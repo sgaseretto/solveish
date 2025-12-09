@@ -63,6 +63,11 @@ class CellType(str, Enum):
     NOTE = "note"
     PROMPT = "prompt"
 
+class CollapseLevel(int, Enum):
+    EXPANDED = 0    # Fully visible
+    SCROLLABLE = 1  # Limited height, scrollable
+    SUMMARY = 2     # First line only with ellipsis
+
 @dataclass
 class Cell:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
@@ -73,7 +78,9 @@ class Cell:
     time_run: str = ""
     skipped: bool = False
     use_thinking: bool = False
-    collapsed: bool = False
+    collapsed: bool = False  # Legacy: kept for backwards compatibility
+    input_collapse: int = 0  # CollapseLevel: 0=expanded, 1=scrollable, 2=summary
+    output_collapse: int = 0  # CollapseLevel: 0=expanded, 1=scrollable, 2=summary
     pinned: bool = False
     is_exported: bool = False
     
@@ -92,6 +99,8 @@ class Cell:
             if self.skipped: cell["metadata"]["skipped"] = True
             if self.is_exported: cell["metadata"]["is_exported"] = True
             if self.pinned: cell["metadata"]["pinned"] = True
+            if self.input_collapse: cell["metadata"]["input_collapse"] = self.input_collapse
+            if self.output_collapse: cell["metadata"]["output_collapse"] = self.output_collapse
         elif self.cell_type == CellType.NOTE.value:
             cell = {
                 "cell_type": "markdown",
@@ -101,6 +110,7 @@ class Cell:
             }
             if self.collapsed: cell["metadata"]["collapsed"] = True
             if self.pinned: cell["metadata"]["pinned"] = True
+            if self.input_collapse: cell["metadata"]["input_collapse"] = self.input_collapse
         else:  # Prompt
             combined = join_prompt_content(self.source, self.output)
             cell = {
@@ -113,6 +123,8 @@ class Cell:
             if self.time_run: cell["metadata"]["time_run"] = self.time_run
             if self.collapsed: cell["metadata"]["collapsed"] = True
             if self.pinned: cell["metadata"]["pinned"] = True
+            if self.input_collapse: cell["metadata"]["input_collapse"] = self.input_collapse
+            if self.output_collapse: cell["metadata"]["output_collapse"] = self.output_collapse
         return cell
     
     @classmethod
@@ -129,7 +141,9 @@ class Cell:
                 time_run=metadata.get("time_run", ""),
                 skipped=metadata.get("skipped", False),
                 is_exported=metadata.get("is_exported", False),
-                pinned=metadata.get("pinned", False)
+                pinned=metadata.get("pinned", False),
+                input_collapse=metadata.get("input_collapse", 0),
+                output_collapse=metadata.get("output_collapse", 1)  # Default to scrollable for code cells
             )
         else:
             if metadata.get("solveit_ai"):
@@ -140,13 +154,16 @@ class Cell:
                     use_thinking=metadata.get("use_thinking", False),
                     time_run=metadata.get("time_run", ""),
                     collapsed=metadata.get("collapsed", False),
-                    pinned=metadata.get("pinned", False)
+                    pinned=metadata.get("pinned", False),
+                    input_collapse=metadata.get("input_collapse", 0),
+                    output_collapse=metadata.get("output_collapse", 0)
                 )
             else:
                 return cls(
                     id=cell_id, cell_type=CellType.NOTE.value, source=source,
                     collapsed=metadata.get("collapsed", False),
-                    pinned=metadata.get("pinned", False)
+                    pinned=metadata.get("pinned", False),
+                    input_collapse=metadata.get("input_collapse", 0)
                 )
     
     @staticmethod
@@ -291,8 +308,17 @@ kernel = PythonKernel()
 # Mock LLM with Streaming
 # ============================================================================
 
-async def mock_llm_stream(prompt: str, context: str):
+async def mock_llm_stream(prompt: str, context: str, use_thinking: bool = False):
     """Mock LLM for demo (replace with real API)"""
+    # Simulate thinking phase if enabled
+    if use_thinking:
+        yield {"type": "thinking_start"}
+        # Simulate thinking with 🧠 indicators
+        for _ in range(3):
+            yield {"type": "thinking", "content": "🧠 "}
+            await asyncio.sleep(0.3)
+        yield {"type": "thinking_end"}
+
     # Always echo the user's prompt first, then provide a response
     response = f"""You said:
 
@@ -306,12 +332,13 @@ This is a **demo response**. In production, connect to Claude, OpenAI, or local 
 - Both prompt AND response are editable
 - Double-click to edit rendered markdown
 - Press `Escape` to finish editing
-- `Ctrl+Enter` runs cells"""
-    
+- `Ctrl+Enter` runs cells
+- Cancel generation with ⏹ button"""
+
     # Stream word by word
     words = response.split(' ')
     for i, word in enumerate(words):
-        yield word + (' ' if i < len(words) - 1 else '')
+        yield {"type": "chunk", "content": word + (' ' if i < len(words) - 1 else '')}
         await asyncio.sleep(0.02)
 
 # ============================================================================
@@ -325,6 +352,9 @@ NOTEBOOKS_DIR.mkdir(exist_ok=True)
 # Track active WebSocket connections per notebook
 ws_connections: Dict[str, Dict[int, Any]] = {}
 
+# Track cancelled cell generations
+cancelled_cells: set = set()
+
 def get_notebook(notebook_id: str) -> Notebook:
     """Get or create a notebook - ALWAYS requires notebook_id"""
     if notebook_id not in notebooks:
@@ -335,7 +365,7 @@ def get_notebook(notebook_id: str) -> Notebook:
             nb = Notebook(id=notebook_id, title=notebook_id)
             nb.cells = [
                 Cell(cell_type="note", source="# Welcome to LLM Notebook! 🚀\n\nAn open-source notebook with **prompt cells** for AI interaction.\n\n**Keyboard Shortcuts (Jupyter-style):**\n- `Shift+Enter` - Run cell (recommended)\n- `Ctrl/Cmd+Enter` - Run cell (alternative)\n- `Ctrl/Cmd+S` - Save notebook\n- `D D` - Delete cell (press D twice)\n- `Ctrl/Cmd+Shift+C` - Add code cell\n- `Ctrl/Cmd+Shift+N` - Add note cell\n- `Ctrl/Cmd+Shift+P` - Add prompt cell\n- `Alt+↑/↓` - Move cell up/down\n- `Escape` - Exit edit mode\n- Double-click - Edit markdown/response"),
-                Cell(cell_type="code", source="# Try running some Python (Shift+Enter)\nx = [1, 2, 3, 4, 5]\nprint(f'Sum: {sum(x)}')\nprint(f'Average: {sum(x)/len(x)}')\nx"),
+                Cell(cell_type="code", source="# Try running some Python (Shift+Enter)\nx = [1, 2, 3, 4, 5]\nprint(f'Sum: {sum(x)}')\nprint(f'Average: {sum(x)/len(x)}')\nx", output_collapse=1),
                 Cell(cell_type="prompt", source="Hello! What can you help me with?"),
             ]
             notebooks[notebook_id] = nb
@@ -354,6 +384,7 @@ def list_notebooks() -> List[str]:
 # ============================================================================
 
 css = """
+/* Dark theme (default) */
 :root {
     --bg-primary: #0d1117;
     --bg-secondary: #161b22;
@@ -367,6 +398,22 @@ css = """
     --accent-orange: #d29922;
     --accent-red: #f85149;
     --border: #30363d;
+}
+
+/* Light theme */
+[data-theme="light"] {
+    --bg-primary: #ffffff;
+    --bg-secondary: #f6f8fa;
+    --bg-cell: #eaeef2;
+    --bg-input: #ffffff;
+    --text-primary: #24292f;
+    --text-muted: #57606a;
+    --accent-blue: #0969da;
+    --accent-green: #1a7f37;
+    --accent-purple: #8250df;
+    --accent-orange: #bf8700;
+    --accent-red: #cf222e;
+    --border: #d0d7de;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -569,6 +616,136 @@ body {
 }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
+/* Thinking indicator */
+.thinking-indicator {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 0.85rem; color: var(--accent-purple);
+    animation: thinking-pulse 1.5s ease-in-out infinite;
+}
+@keyframes thinking-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+/* Cell collapse/fold - Legacy full collapse */
+.cell.collapsed .cell-body { display: none; }
+.cell.collapsed { opacity: 0.7; }
+.collapse-btn {
+    background: none; border: none; cursor: pointer;
+    color: var(--text-muted); font-size: 0.85rem;
+    padding: 2px 4px; transition: transform 0.2s;
+}
+.collapse-btn:hover { color: var(--text-primary); }
+.cell.collapsed .collapse-btn { transform: rotate(-90deg); }
+
+/* Multi-level collapse: Scrollable mode - limited height with scroll */
+.collapse-scrollable {
+    max-height: 168px !important;
+    overflow-y: auto !important;
+    min-height: 40px !important;
+}
+.collapse-scrollable::-webkit-scrollbar {
+    width: 6px;
+}
+.collapse-scrollable::-webkit-scrollbar-track {
+    background: var(--bg-secondary);
+}
+.collapse-scrollable::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 3px;
+}
+.collapse-scrollable::-webkit-scrollbar-thumb:hover {
+    background: var(--text-muted);
+}
+
+/* Multi-level collapse: Summary mode - first line only with ellipsis */
+.collapse-summary {
+    max-height: 2.25em !important;
+    overflow: hidden !important;
+    white-space: nowrap !important;
+    text-overflow: ellipsis !important;
+    padding: 6px 12px !important;
+}
+.collapse-summary * {
+    display: inline !important;
+    white-space: nowrap !important;
+}
+
+/* Collapse section buttons */
+.section-collapse-btn {
+    background: none; border: none; cursor: pointer;
+    color: var(--text-muted); font-size: 0.7rem;
+    padding: 2px 6px; margin-left: 8px;
+    border-radius: 3px; transition: all 0.15s;
+}
+.section-collapse-btn:hover {
+    background: var(--bg-cell);
+    color: var(--text-primary);
+}
+/* Collapse level indicators */
+.section-collapse-btn[data-level="0"]::after { content: "▼"; }
+.section-collapse-btn[data-level="1"]::after { content: "◐"; }
+.section-collapse-btn[data-level="2"]::after { content: "▬"; }
+
+/* Cell header collapse controls */
+.collapse-controls {
+    display: flex; align-items: center; gap: 4px;
+    font-size: 0.7rem; color: var(--text-muted);
+}
+.collapse-controls .label {
+    font-size: 0.6rem; text-transform: uppercase; opacity: 0.7;
+}
+
+/* Cancel button */
+.btn-cancel {
+    background: var(--accent-red); border-color: var(--accent-red); color: #fff;
+}
+.btn-cancel:hover { background: #d73a49; }
+
+/* Theme toggle */
+.theme-toggle {
+    background: var(--bg-cell); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 10px; cursor: pointer;
+    font-size: 1rem; transition: all 0.15s;
+}
+.theme-toggle:hover { border-color: var(--accent-blue); }
+
+/* Mobile responsive */
+@media (max-width: 768px) {
+    .container { padding: 10px; }
+    .header { flex-direction: column; gap: 12px; align-items: stretch; }
+    .title { font-size: 1.1rem; justify-content: center; }
+    .toolbar { justify-content: center; flex-wrap: wrap; }
+    .cell-header { flex-direction: column; gap: 8px; padding: 8px; }
+    .cell-actions { justify-content: center; flex-wrap: wrap; }
+    .cell-badge { align-self: flex-start; }
+    .add-row { flex-direction: column; gap: 4px; }
+    .add-row .btn { width: 100%; justify-content: center; }
+    .file-list { flex-direction: column; }
+    .file-item { text-align: center; }
+    .source, .prompt-content { font-size: 0.85rem; }
+    .ace-container { min-height: 100px; }
+    .btn { padding: 8px 12px; }
+    .btn-sm { padding: 6px 10px; }
+    .mode-select { width: 100%; }
+}
+
+@media (max-width: 480px) {
+    .container { padding: 8px; }
+    .header { padding: 8px 0; margin-bottom: 12px; }
+    .title { font-size: 1rem; }
+    .toolbar { gap: 4px; }
+    .btn { font-size: 0.8rem; padding: 6px 8px; }
+    .cell { margin-bottom: 8px; border-radius: 6px; }
+    .cell-header { padding: 6px 8px; }
+    .cell-badge { font-size: 0.6rem; padding: 2px 6px; }
+    .cell-body { padding: 0; }
+    .source, .prompt-content { padding: 10px; min-height: 50px; }
+    .output { padding: 10px; font-size: 0.8rem; }
+    .md-preview, .ai-preview { padding: 10px; }
+    .edit-hint { font-size: 0.65rem; padding: 3px 10px; }
+}
+
 /* Keyboard shortcut hints */
 .kbd {
     display: inline-block; padding: 2px 6px;
@@ -628,7 +805,8 @@ function initAceEditor(cellId) {
     container.className = 'ace-container';  // Reset classes
 
     const editor = ace.edit(container);
-    editor.setTheme("ace/theme/monokai");
+    const currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
+    editor.setTheme(currentTheme === 'light' ? 'ace/theme/chrome' : 'ace/theme/monokai');
     editor.setOptions({
         fontSize: "14px",
         showPrintMargin: false,
@@ -891,6 +1069,52 @@ document.addEventListener('keydown', e => {
             document.activeElement.blur();
         }
         Object.values(aceEditors).forEach(ed => ed.blur());
+    }
+
+    // ===== Z - Collapse shortcuts =====
+    // Z: cycle input collapse, Shift+Z: cycle output collapse, Alt+Z: cycle both
+    if ((e.key === 'z' || e.key === 'Z') && !inInput && !inAce) {
+        if (currentCellId) {
+            e.preventDefault();
+            if (e.altKey) {
+                // Alt+Z: cycle both
+                cycleCollapseLevel(currentCellId, 'both');
+            } else if (e.shiftKey) {
+                // Shift+Z: cycle output
+                cycleCollapseLevel(currentCellId, 'output');
+            } else {
+                // Z: cycle input
+                cycleCollapseLevel(currentCellId, 'input');
+            }
+        }
+    }
+
+    // ===== 0-3: Set specific collapse level =====
+    // 0-3 for input, Shift+0-3 for output
+    if (['0', '1', '2', '3'].includes(e.key) && !inInput && !inAce && !mod) {
+        if (currentCellId) {
+            const level = parseInt(e.key);
+            if (e.shiftKey) {
+                e.preventDefault();
+                setCollapseLevel(currentCellId, 'output', level);
+                // Also save to server
+                fetch(`${window.location.pathname}/cell/${currentCellId}/collapse-section`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: `section=output&level=${level}`
+                });
+            } else if (e.altKey) {
+                e.preventDefault();
+                // Alt+number: set both to same level
+                setCollapseLevel(currentCellId, 'input', level);
+                setCollapseLevel(currentCellId, 'output', level);
+                fetch(`${window.location.pathname}/cell/${currentCellId}/collapse-section`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: `section=both&level=${level}`
+                });
+            }
+        }
     }
     
     // ===== Ctrl/Cmd+Shift+D or Ctrl/Cmd+Backspace - Delete cell =====
@@ -1163,6 +1387,7 @@ document.addEventListener('htmx:afterSettle', (e) => {
 
 // On page load
 document.addEventListener('DOMContentLoaded', () => {
+    loadTheme();
     document.querySelectorAll('.cell').forEach(cell => {
         const cellId = cell.id.replace('cell-', '');
         initCell(cellId);
@@ -1178,6 +1403,149 @@ document.addEventListener('input', e => {
     }
 });
 
+// ==================== Theme Toggle ====================
+function toggleTheme() {
+    const html = document.documentElement;
+    const currentTheme = html.getAttribute('data-theme') || 'dark';
+    const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+    html.setAttribute('data-theme', newTheme);
+    localStorage.setItem('theme', newTheme);
+
+    // Update Ace editor themes
+    const aceTheme = newTheme === 'light' ? 'ace/theme/chrome' : 'ace/theme/monokai';
+    Object.values(aceEditors).forEach(editor => {
+        editor.setTheme(aceTheme);
+    });
+
+    // Update toggle button
+    const btn = document.getElementById('theme-toggle');
+    if (btn) btn.textContent = newTheme === 'light' ? '🌙' : '☀️';
+}
+
+function loadTheme() {
+    const savedTheme = localStorage.getItem('theme') || 'dark';
+    document.documentElement.setAttribute('data-theme', savedTheme);
+    const btn = document.getElementById('theme-toggle');
+    if (btn) btn.textContent = savedTheme === 'light' ? '🌙' : '☀️';
+}
+
+// ==================== Cell Collapse ====================
+// Collapse levels: 0=expanded, 1=scrollable, 2=summary
+const COLLAPSE_LEVELS = ['', 'collapse-scrollable', 'collapse-summary'];
+const COLLAPSE_LABELS = ['Expanded', 'Scrollable', 'Summary'];
+
+function toggleCollapse(cellId) {
+    const cell = document.getElementById(`cell-${cellId}`);
+    if (cell) {
+        cell.classList.toggle('collapsed');
+        // Send update to server
+        const isCollapsed = cell.classList.contains('collapsed');
+        fetch(`${window.location.pathname}/cell/${cellId}/collapse`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: `collapsed=${isCollapsed}`
+        });
+    }
+}
+
+function cycleCollapseLevel(cellId, section) {
+    // section can be 'input', 'output', or 'both'
+    const cell = document.getElementById(`cell-${cellId}`);
+    if (!cell) return;
+
+    if (section === 'both') {
+        cycleCollapseLevel(cellId, 'input');
+        cycleCollapseLevel(cellId, 'output');
+        return;
+    }
+
+    // Find the section element
+    const sectionEl = cell.querySelector(`[data-collapse-section="${section}"]`);
+    const btn = cell.querySelector(`[data-collapse-btn="${section}"]`);
+    if (!sectionEl) return;
+
+    // Get current level
+    let currentLevel = 0;
+    for (let i = COLLAPSE_LEVELS.length - 1; i > 0; i--) {
+        if (COLLAPSE_LEVELS[i] && sectionEl.classList.contains(COLLAPSE_LEVELS[i])) {
+            currentLevel = i;
+            break;
+        }
+    }
+
+    // Cycle to next level (0 -> 1 -> 2 -> 3 -> 0)
+    const nextLevel = (currentLevel + 1) % COLLAPSE_LEVELS.length;
+
+    // Remove all collapse classes
+    COLLAPSE_LEVELS.forEach(cls => {
+        if (cls) sectionEl.classList.remove(cls);
+    });
+
+    // Add new collapse class if not expanded
+    if (COLLAPSE_LEVELS[nextLevel]) {
+        sectionEl.classList.add(COLLAPSE_LEVELS[nextLevel]);
+    }
+
+    // Update button indicator
+    if (btn) {
+        btn.setAttribute('data-level', nextLevel);
+        btn.title = `${section === 'input' ? 'Input' : 'Output'}: ${COLLAPSE_LABELS[nextLevel]} (click to cycle)`;
+    }
+
+    // Send update to server
+    fetch(`${window.location.pathname}/cell/${cellId}/collapse-section`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: `section=${section}&level=${nextLevel}`
+    });
+}
+
+function setCollapseLevel(cellId, section, level) {
+    const cell = document.getElementById(`cell-${cellId}`);
+    if (!cell) return;
+
+    const sectionEl = cell.querySelector(`[data-collapse-section="${section}"]`);
+    const btn = cell.querySelector(`[data-collapse-btn="${section}"]`);
+    if (!sectionEl) return;
+
+    // Remove all collapse classes
+    COLLAPSE_LEVELS.forEach(cls => {
+        if (cls) sectionEl.classList.remove(cls);
+    });
+
+    // Add new collapse class if not expanded
+    if (COLLAPSE_LEVELS[level]) {
+        sectionEl.classList.add(COLLAPSE_LEVELS[level]);
+    }
+
+    // Update button indicator
+    if (btn) {
+        btn.setAttribute('data-level', level);
+        btn.title = `${section === 'input' ? 'Input' : 'Output'}: ${COLLAPSE_LABELS[level]} (click to cycle)`;
+    }
+}
+
+// ==================== Cancel Streaming ====================
+let cancelledCells = new Set();
+
+function cancelStreaming(cellId) {
+    cancelledCells.add(cellId);
+    const cell = document.getElementById(`cell-${cellId}`);
+    if (cell) {
+        cell.classList.remove('streaming');
+        // Hide cancel button, show run button
+        const cancelBtn = cell.querySelector('.btn-cancel');
+        const runBtn = cell.querySelector('.btn-run');
+        if (cancelBtn) cancelBtn.style.display = 'none';
+        if (runBtn) runBtn.style.display = '';
+    }
+    // Send cancel message via WebSocket
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({type: 'cancel', cell_id: cellId}));
+    }
+    streamingCellId = null;
+}
+
 // ==================== WebSocket for Streaming ====================
 let ws = null;
 let streamingCellId = null;
@@ -1189,9 +1557,16 @@ function connectWebSocket(notebookId) {
     ws.onmessage = function(event) {
         const data = JSON.parse(event.data);
         if (data.type === 'stream_chunk') {
-            appendToResponse(data.cell_id, data.chunk);
+            // Skip if cancelled
+            if (cancelledCells.has(data.cell_id)) return;
+            appendToResponse(data.cell_id, data.chunk, data.thinking);
         } else if (data.type === 'stream_end') {
+            cancelledCells.delete(data.cell_id);
             finishStreaming(data.cell_id);
+        } else if (data.type === 'thinking_start') {
+            showThinkingIndicator(data.cell_id);
+        } else if (data.type === 'thinking_end') {
+            hideThinkingIndicator(data.cell_id);
         }
     };
     
@@ -1200,11 +1575,11 @@ function connectWebSocket(notebookId) {
     };
 }
 
-function appendToResponse(cellId, chunk) {
+function appendToResponse(cellId, chunk, isThinking) {
     const textarea = document.getElementById(`output-${cellId}`);
     const preview = document.querySelector(`[data-cell-id="${cellId}"][data-field="output"]`);
     if (textarea) {
-        if (textarea.value === 'Generating...' || textarea.value === 'Click ▶ to generate response...') {
+        if (textarea.value === 'Generating...' || textarea.value === 'Click ▶ to generate response...' || textarea.value.startsWith('🧠')) {
             textarea.value = '';
         }
         textarea.value += chunk;
@@ -1214,23 +1589,61 @@ function appendToResponse(cellId, chunk) {
     }
 }
 
+function showThinkingIndicator(cellId) {
+    const cell = document.getElementById(`cell-${cellId}`);
+    const preview = document.querySelector(`[data-cell-id="${cellId}"][data-field="output"]`);
+    if (preview) {
+        preview.innerHTML = '<div class="thinking-indicator"><span>🧠</span> Thinking...</div>';
+    }
+    if (cell) {
+        const header = cell.querySelector('.cell-header');
+        if (header && !header.querySelector('.thinking-indicator')) {
+            const indicator = document.createElement('span');
+            indicator.className = 'thinking-indicator';
+            indicator.innerHTML = '🧠 Thinking...';
+            indicator.id = `thinking-${cellId}`;
+            header.querySelector('.cell-actions')?.prepend(indicator);
+        }
+    }
+}
+
+function hideThinkingIndicator(cellId) {
+    const indicator = document.getElementById(`thinking-${cellId}`);
+    if (indicator) indicator.remove();
+}
+
 function finishStreaming(cellId) {
     const cell = document.getElementById(`cell-${cellId}`);
     if (cell) {
         cell.classList.remove('streaming');
+        // Hide cancel button, show run button
+        const cancelBtn = cell.querySelector('.btn-cancel');
+        const runBtn = cell.querySelector('.btn-run');
+        if (cancelBtn) cancelBtn.style.display = 'none';
+        if (runBtn) runBtn.style.display = '';
     }
+    hideThinkingIndicator(cellId);
     streamingCellId = null;
 }
 
-function startStreaming(cellId) {
+function startStreaming(cellId, useThinking) {
     const cell = document.getElementById(`cell-${cellId}`);
     if (cell) {
         cell.classList.add('streaming');
+        // Show cancel button, hide run button
+        const cancelBtn = cell.querySelector('.btn-cancel');
+        const runBtn = cell.querySelector('.btn-run');
+        if (cancelBtn) cancelBtn.style.display = '';
+        if (runBtn) runBtn.style.display = 'none';
     }
     streamingCellId = cellId;
     const textarea = document.getElementById(`output-${cellId}`);
+    const preview = document.querySelector(`[data-cell-id="${cellId}"][data-field="output"]`);
     if (textarea) {
-        textarea.value = 'Generating...';
+        textarea.value = useThinking ? '🧠 Thinking...' : 'Generating...';
+    }
+    if (preview && useThinking) {
+        preview.innerHTML = '<div class="thinking-indicator"><span>🧠</span> Thinking...</div>';
     }
 }
 """
@@ -1248,6 +1661,7 @@ app, rt = fast_app(
         Script(src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/ace.min.js"),
         Script(src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/mode-python.min.js"),
         Script(src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/theme-monokai.min.js"),
+        Script(src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/theme-chrome.min.js"),
         # Highlight.js for markdown code blocks
         Link(rel="stylesheet", href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"),
         Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"),
@@ -1271,6 +1685,25 @@ def TypeSelect(cell_id: str, current: str, nb_id: str):
         hx_swap="outerHTML"
     )
 
+def get_collapse_class(level: int) -> str:
+    """Get CSS class for collapse level"""
+    if level == 1: return "collapse-scrollable"
+    if level == 2: return "collapse-summary"
+    return ""
+
+def CollapseBtn(cell_id: str, section: str, level: int) -> Button:
+    """Create a collapse button for input/output section"""
+    labels = {0: "▼", 1: "◐", 2: "▬"}
+    tooltips = {0: "Expanded", 1: "Scrollable", 2: "Summary"}
+    return Button(
+        labels.get(level, "▼"),
+        cls="section-collapse-btn",
+        data_collapse_btn=section,
+        data_level=str(level),
+        onclick=f"cycleCollapseLevel('{cell_id}', '{section}')",
+        title=f"{section.capitalize()}: {tooltips.get(level, 'Expanded')} (click to cycle)"
+    )
+
 def CellView(cell: Cell, notebook_id: str):
     """Render a single cell"""
     meta_info = []
@@ -1278,11 +1711,34 @@ def CellView(cell: Cell, notebook_id: str):
         meta_info.append(Span(f"[{cell.execution_count}]"))
     if cell.time_run:
         meta_info.append(Span(cell.time_run))
-    
+
+    # Collapse controls in header
+    collapse_controls = []
+    if cell.cell_type == "code":
+        collapse_controls = [
+            Span("In:", cls="label"),
+            CollapseBtn(cell.id, "input", cell.input_collapse),
+            Span("Out:", cls="label"),
+            CollapseBtn(cell.id, "output", cell.output_collapse),
+        ]
+    elif cell.cell_type == "note":
+        collapse_controls = [
+            CollapseBtn(cell.id, "input", cell.input_collapse),
+        ]
+    else:  # prompt
+        collapse_controls = [
+            Span("In:", cls="label"),
+            CollapseBtn(cell.id, "input", cell.input_collapse),
+            Span("Out:", cls="label"),
+            CollapseBtn(cell.id, "output", cell.output_collapse),
+        ]
+
     header = Div(
         Div(
+            Button("▼", cls="collapse-btn", onclick=f"toggleCollapse('{cell.id}')", title="Collapse/Expand (full)"),
             Span(cell.cell_type.upper(), cls=f"cell-badge {cell.cell_type}"),
             Span(*meta_info, cls="cell-meta") if meta_info else None,
+            Div(*collapse_controls, cls="collapse-controls") if collapse_controls else None,
         ),
         Div(
             TypeSelect(cell.id, cell.cell_type, notebook_id),
@@ -1291,8 +1747,12 @@ def CellView(cell: Cell, notebook_id: str):
                    hx_target=f"#cell-{cell.id}",
                    hx_swap="outerHTML",
                    hx_vals=f"js:{{source: document.getElementById('source-{cell.id}')?.value || ''}}",
-                   onclick=f"syncAceToTextarea('{cell.id}'); syncPromptContent('{cell.id}');",
+                   onclick=f"syncAceToTextarea('{cell.id}'); syncPromptContent('{cell.id}'); startStreaming('{cell.id}', {str(cell.use_thinking).lower()});",
                    title="Run (Shift+Enter)") if cell.cell_type != "note" else None,
+            Button("⏹", cls="btn btn-sm btn-cancel",
+                   onclick=f"cancelStreaming('{cell.id}')",
+                   title="Cancel generation",
+                   style="display: none;") if cell.cell_type == "prompt" else None,
             Button("↑", cls="btn btn-sm btn-icon",
                    hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/move/up",
                    hx_target="#cells", hx_swap="outerHTML", title="Move up"),
@@ -1309,21 +1769,29 @@ def CellView(cell: Cell, notebook_id: str):
     )
     
     if cell.cell_type == "code":
+        input_collapse_cls = get_collapse_class(cell.input_collapse)
+        output_collapse_cls = get_collapse_class(cell.output_collapse)
         body = Div(
             # Hidden textarea for form submission - Ace reads from this
             Textarea(cell.source, name="source", id=f"source-{cell.id}",
                     style="display: none;",
                     hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/source",
                     hx_trigger="blur changed", hx_swap="none"),
-            # Ace Editor container - empty, content comes from textarea
-            Div(id=f"ace-{cell.id}", cls="ace-container"),
+            # Ace Editor container - with collapse support
+            Div(
+                Div(id=f"ace-{cell.id}", cls="ace-container"),
+                cls=f"cell-input {input_collapse_cls}".strip(),
+                data_collapse_section="input"
+            ),
             Div(cell.output,
-                cls=f"output{' error' if cell.output and ('Error' in cell.output or 'Traceback' in cell.output) else ''}")
+                cls=f"output{' error' if cell.output and ('Error' in cell.output or 'Traceback' in cell.output) else ''} {output_collapse_cls}".strip(),
+                data_collapse_section="output")
                 if cell.output else None,
             Script(f"setTimeout(() => initAceEditor('{cell.id}'), 0);"),
             cls="cell-body"
         )
     elif cell.cell_type == "note":
+        input_collapse_cls = get_collapse_class(cell.input_collapse)
         body = Div(
             Textarea(cell.source, cls="source", name="source", id=f"source-{cell.id}",
                     placeholder="# Markdown notes...",
@@ -1331,14 +1799,20 @@ def CellView(cell: Cell, notebook_id: str):
                     hx_trigger="blur changed", hx_swap="none",
                     style="display: none;",
                     onblur=f"switchToPreview('{cell.id}', 'source')"),
-            Div(id=f"preview-{cell.id}", cls="md-preview",
-                data_cell_id=cell.id, data_field="source"),
-            Div("Double-click to edit • Escape to finish", cls="edit-hint"),
+            Div(
+                Div(id=f"preview-{cell.id}", cls="md-preview",
+                    data_cell_id=cell.id, data_field="source"),
+                cls=f"cell-input {input_collapse_cls}".strip(),
+                data_collapse_section="input"
+            ),
+            Div("Double-click to edit • Escape to finish • Z to cycle collapse", cls="edit-hint"),
             cls="cell-body"
         )
     else:  # Prompt
         # Determine if prompt has been run (has output)
         has_output = bool(cell.output and cell.output.strip())
+        input_collapse_cls = get_collapse_class(cell.input_collapse)
+        output_collapse_cls = get_collapse_class(cell.output_collapse)
 
         # User prompt section - show preview if has output, else show textarea
         if has_output:
@@ -1347,27 +1821,35 @@ def CellView(cell: Cell, notebook_id: str):
                 Div(Span("👤"), " Your Prompt ",
                     Span("(double-click to edit)", style="font-weight: normal; opacity: 0.6;"),
                     cls="prompt-label user"),
-                Textarea(cell.source, cls="prompt-content", name="prompt_source",
-                        id=f"prompt-{cell.id}",
-                        placeholder="Ask the AI anything...",
-                        hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/source",
-                        hx_trigger="blur changed", hx_swap="none",
-                        style="display: none;",
-                        oninput=f"document.getElementById('source-{cell.id}').value = this.value",
-                        onblur=f"switchToPreview('{cell.id}', 'prompt')"),
-                Div(cls="md-preview prompt-preview", data_cell_id=cell.id, data_field="prompt"),
+                Div(
+                    Textarea(cell.source, cls="prompt-content", name="prompt_source",
+                            id=f"prompt-{cell.id}",
+                            placeholder="Ask the AI anything...",
+                            hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/source",
+                            hx_trigger="blur changed", hx_swap="none",
+                            style="display: none;",
+                            oninput=f"document.getElementById('source-{cell.id}').value = this.value",
+                            onblur=f"switchToPreview('{cell.id}', 'prompt')"),
+                    Div(cls="md-preview prompt-preview", data_cell_id=cell.id, data_field="prompt"),
+                    cls=f"prompt-input {input_collapse_cls}".strip(),
+                    data_collapse_section="input"
+                ),
                 cls="prompt-section"
             )
         else:
             # Before run: show editable textarea
             user_prompt_section = Div(
                 Div(Span("👤"), " Your Prompt", cls="prompt-label user"),
-                Textarea(cell.source, cls="prompt-content", name="prompt_source",
-                        id=f"prompt-{cell.id}",
-                        placeholder="Ask the AI anything...",
-                        hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/source",
-                        hx_trigger="blur changed", hx_swap="none",
-                        oninput=f"document.getElementById('source-{cell.id}').value = this.value"),
+                Div(
+                    Textarea(cell.source, cls="prompt-content", name="prompt_source",
+                            id=f"prompt-{cell.id}",
+                            placeholder="Ask the AI anything...",
+                            hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/source",
+                            hx_trigger="blur changed", hx_swap="none",
+                            oninput=f"document.getElementById('source-{cell.id}').value = this.value"),
+                    cls=f"prompt-input {input_collapse_cls}".strip(),
+                    data_collapse_section="input"
+                ),
                 cls="prompt-section"
             )
 
@@ -1380,20 +1862,25 @@ def CellView(cell: Cell, notebook_id: str):
                 Div(Span("🤖"), " AI Response ",
                     Span("(double-click to edit)", style="font-weight: normal; opacity: 0.6;"),
                     cls="prompt-label ai"),
-                Textarea(cell.output if cell.output else "",
-                        cls="prompt-content", name="output", id=f"output-{cell.id}",
-                        placeholder="Click ▶ to generate response...",
-                        hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/output",
-                        hx_trigger="blur changed", hx_swap="none",
-                        style="display: none; min-height: 80px;",
-                        onblur=f"switchToPreview('{cell.id}', 'output')"),
-                Div(cls="ai-preview", data_cell_id=cell.id, data_field="output"),
+                Div(
+                    Textarea(cell.output if cell.output else "",
+                            cls="prompt-content", name="output", id=f"output-{cell.id}",
+                            placeholder="Click ▶ to generate response...",
+                            hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/output",
+                            hx_trigger="blur changed", hx_swap="none",
+                            style="display: none; min-height: 80px;",
+                            onblur=f"switchToPreview('{cell.id}', 'output')"),
+                    Div(cls="ai-preview", data_cell_id=cell.id, data_field="output"),
+                    cls=f"prompt-output {output_collapse_cls}".strip(),
+                    data_collapse_section="output"
+                ),
                 cls="prompt-section"
             ),
             cls="cell-body"
         )
     
-    return Div(header, body, id=f"cell-{cell.id}", cls="cell", data_type=cell.cell_type)
+    collapsed_cls = " collapsed" if cell.collapsed else ""
+    return Div(header, body, id=f"cell-{cell.id}", cls=f"cell{collapsed_cls}", data_type=cell.cell_type)
 
 def AddButtons(pos: int, nb_id: str):
     return Div(
@@ -1431,6 +1918,8 @@ def NotebookPage(nb: Notebook, notebook_list: List[str]):
             Div(
                 Div(Span("📓", cls="title-icon"), Span(nb.title, cls="title")),
                 Div(
+                    Button("☀️", cls="theme-toggle", id="theme-toggle",
+                           onclick="toggleTheme()", title="Toggle light/dark theme"),
                     Select(
                         Option("Learning", value="learning", selected=nb.dialog_mode=="learning"),
                         Option("Concise", value="concise", selected=nb.dialog_mode=="concise"),
@@ -1509,7 +1998,11 @@ def post(nb_id: str, pos: int = -1, type: str = "code"):
     nb = get_notebook(nb_id)
     if pos < 0:
         pos = len(nb.cells)
-    nb.cells.insert(pos, Cell(cell_type=type))
+    # Code cells default to scrollable output for better screen space usage
+    if type == "code":
+        nb.cells.insert(pos, Cell(cell_type=type, output_collapse=1))
+    else:
+        nb.cells.insert(pos, Cell(cell_type=type))
     return AllCells(nb)
 
 @rt("/notebook/{nb_id}/cell/{cid}")
@@ -1559,6 +2052,31 @@ def post(nb_id: str, cid: str, direction: str):
             break
     return AllCells(nb)
 
+@rt("/notebook/{nb_id}/cell/{cid}/collapse")
+def post(nb_id: str, cid: str, collapsed: str):
+    nb = get_notebook(nb_id)
+    for c in nb.cells:
+        if c.id == cid:
+            c.collapsed = collapsed.lower() == "true"
+            break
+    return ""
+
+@rt("/notebook/{nb_id}/cell/{cid}/collapse-section")
+def post(nb_id: str, cid: str, section: str, level: int):
+    """Update collapse level for input or output section"""
+    nb = get_notebook(nb_id)
+    for c in nb.cells:
+        if c.id == cid:
+            if section == "input":
+                c.input_collapse = level
+            elif section == "output":
+                c.output_collapse = level
+            elif section == "both":
+                c.input_collapse = level
+                c.output_collapse = level
+            break
+    return ""
+
 @rt("/notebook/{nb_id}/cell/{cid}/run")
 async def post(nb_id: str, cid: str, source: str = None):
     nb = get_notebook(nb_id)
@@ -1601,13 +2119,32 @@ async def post(nb_id: str, cid: str, source: str = None):
                 context_parts.append(f"User: {prev.source}\n\nAssistant: {prev.output}")
         context = "\n\n".join(context_parts)
 
+        # Remove from cancelled set if it was there
+        cancelled_cells.discard(cid)
+
         # Stream via WebSocket if available, otherwise collect
         response_parts = []
-        async for chunk in mock_llm_stream(c.source, context):
-            response_parts.append(chunk)
-            # Send via WebSocket
+        async for item in mock_llm_stream(c.source, context, c.use_thinking):
+            # Check if cancelled
+            if cid in cancelled_cells:
+                cancelled_cells.discard(cid)
+                break
+
+            # Collect response chunks (always, regardless of WebSocket)
+            if item["type"] == "chunk":
+                response_parts.append(item["content"])
+
+            # Send via WebSocket if clients are connected
             if nb_id in ws_connections:
-                msg = json.dumps({"type": "stream_chunk", "cell_id": cid, "chunk": chunk})
+                if item["type"] == "thinking_start":
+                    msg = json.dumps({"type": "thinking_start", "cell_id": cid})
+                elif item["type"] == "thinking_end":
+                    msg = json.dumps({"type": "thinking_end", "cell_id": cid})
+                elif item["type"] == "thinking":
+                    msg = json.dumps({"type": "stream_chunk", "cell_id": cid, "chunk": item["content"], "thinking": True})
+                else:  # chunk
+                    msg = json.dumps({"type": "stream_chunk", "cell_id": cid, "chunk": item["content"]})
+
                 for send in ws_connections[nb_id].values():
                     try:
                         await send(msg)
@@ -1629,8 +2166,8 @@ async def post(nb_id: str, cid: str, source: str = None):
     is_last_cell = cell_index == len(nb.cells) - 1
 
     if is_last_cell:
-        # Add a new code cell using OOB swap
-        new_cell = Cell(cell_type="code")
+        # Add a new code cell using OOB swap (with scrollable output default)
+        new_cell = Cell(cell_type="code", output_collapse=1)
         nb.cells.append(new_cell)
         new_cell_index = len(nb.cells) - 1
         next_cell_id = new_cell.id
@@ -1681,7 +2218,15 @@ async def ws(ws, send, nb_id: str):
     try:
         while True:
             msg = await ws.receive_text()
-            # Handle any client messages if needed
+            # Handle client messages
+            try:
+                data = json.loads(msg)
+                if data.get("type") == "cancel":
+                    cell_id = data.get("cell_id")
+                    if cell_id:
+                        cancelled_cells.add(cell_id)
+            except json.JSONDecodeError:
+                pass
     except:
         pass
     finally:

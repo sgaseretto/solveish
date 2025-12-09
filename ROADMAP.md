@@ -2,7 +2,7 @@
 
 This document outlines the planned features and development direction for LLM Notebook.
 
-## Current Status: v0.2.0
+## Current Status: v0.3.1
 
 ✅ **Completed in v0.1.0 (MVP)**
 - Three cell types: Code, Note, Prompt
@@ -24,6 +24,21 @@ This document outlines the planned features and development direction for LLM No
 - Efficient partial re-rendering (only affected cells)
 - Fixed Ace Editor positioning and syntax highlighting bugs
 
+✅ **Completed in v0.3.0**
+- Dark/light theme toggle with localStorage persistence
+- Mobile-responsive layout (tablet 768px, mobile 480px breakpoints)
+- Cell folding/collapsing with visual feedback
+- WebSocket real-time token streaming for AI responses
+- Cancel generation mid-stream (⏹ button)
+- 🧠 Thinking mode indicator during AI processing
+
+✅ **Completed in v0.3.1**
+- Multi-level collapsing for input/output sections independently
+- Three collapse levels: Expanded (▼), Scrollable (◐), Summary (▬)
+- Keyboard shortcuts for collapsing: Z (input), Shift+Z (output), Alt+Z (both)
+- Code cells default to scrollable output mode
+- Persistent collapse state saved to notebook metadata
+
 ---
 
 ## Phase 1: Core Improvements (v0.2.0)
@@ -36,9 +51,9 @@ This document outlines the planned features and development direction for LLM No
 - [ ] **API key management** - Secure storage, environment variables
 
 ### 📡 WebSocket Streaming
-- [ ] Real-time token streaming for AI responses
-- [ ] Progress indicators during generation
-- [ ] Cancel generation mid-stream
+- [x] Real-time token streaming for AI responses ✅ v0.3.0
+- [x] Progress indicators during generation ✅ v0.3.0
+- [x] Cancel generation mid-stream ✅ v0.3.0
 - [ ] Typing indicators
 
 ### 💾 Enhanced Persistence
@@ -51,9 +66,10 @@ This document outlines the planned features and development direction for LLM No
 ### 🎨 UI Polish
 - [x] Syntax highlighting (Ace Editor with Monokai theme) ✅ v0.2.0
 - [x] Better markdown preview (full CommonMark support) ✅ v0.2.0
-- [ ] Cell folding/collapsing
-- [ ] Dark/light theme toggle
-- [ ] Mobile-responsive layout
+- [x] Cell folding/collapsing ✅ v0.3.0
+- [x] Dark/light theme toggle ✅ v0.3.0
+- [x] Mobile-responsive layout ✅ v0.3.0
+- [x] Multi-level section collapse (input/output) ✅ v0.3.1
 
 ---
 
@@ -65,7 +81,7 @@ This document outlines the planned features and development direction for LLM No
 - [ ] **Dialog modes** - Learning, Concise, Code-focused
 - [ ] **Tool use** - Let AI execute code, search web, etc.
 - [ ] **Multi-turn context** - Conversation history within prompt cells
-- [ ] **Thinking mode** - Extended thinking for complex problems
+- [x] **Thinking mode** - Extended thinking for complex problems ✅ v0.3.0
 
 ### 📊 Rich Outputs
 - [ ] **Matplotlib/Plotly** - Inline chart rendering
@@ -177,8 +193,8 @@ We welcome contributions! Here's how you can help:
 
 ### Good First Issues
 - [x] Add syntax highlighting ✅ v0.2.0
-- [ ] Improve mobile responsiveness
-- [x] Add more keyboard shortcuts ✅ v0.2.0
+- [x] Improve mobile responsiveness ✅ v0.3.0
+- [x] Add more keyboard shortcuts ✅ v0.2.0, v0.3.1
 - [ ] Write documentation
 - [ ] Add unit tests
 
@@ -186,10 +202,10 @@ We welcome contributions! Here's how you can help:
 - [ ] Implement a new LLM provider
 - [ ] Add a new cell type
 - [ ] Implement undo/redo
-- [ ] Add theme support
+- [x] Add theme support ✅ v0.3.0
 
 ### Advanced
-- [ ] WebSocket streaming implementation
+- [x] WebSocket streaming implementation ✅ v0.3.0
 - [ ] Real-time collaboration
 - [ ] Cloud storage backend
 - [ ] Multi-kernel support
@@ -212,8 +228,10 @@ See [DEVELOPERS.md](DEVELOPERS.md) for technical guidance.
 |---------|------|------------|
 | v0.1.0 | 2024-XX | Initial MVP with core features |
 | v0.2.0 | 2024-12-09 | Ace Editor, Jupyter-style output, cell navigation, UI fixes |
-| v0.3.0 | TBD | Rich outputs, advanced AI features |
-| v0.4.0 | TBD | Collaboration features |
+| v0.3.0 | 2024-12-09 | Theme toggle, mobile responsive, cell folding, WebSocket streaming, cancel generation |
+| v0.3.1 | 2024-12-09 | Multi-level input/output collapsing, keyboard shortcuts for collapse |
+| v0.4.0 | TBD | Real LLM integration, context management, rich outputs |
+| v0.5.0 | TBD | Collaboration features |
 | v1.0.0 | TBD | Full platform with module system |
 
 ---
@@ -229,12 +247,15 @@ Tracking parity with [Solveit](https://solve.it.com/):
 | Prompt cells | ✅ | ✅ | Done |
 | Editable AI responses | ✅ | ✅ | Done |
 | .ipynb format | ✅ | ✅ | Done |
-| Context management | ✅ | ⬜ | Planned v0.3 |
-| WebSocket streaming | ✅ | ⬜ | Planned v0.2 |
-| Tool use | ✅ | ⬜ | Planned v0.3 |
-| Real-time collaboration | ✅ | ⬜ | Planned v0.4 |
+| Context management | ✅ | ⬜ | Planned v0.4 |
+| WebSocket streaming | ✅ | ✅ | Done v0.3.0 |
+| Cancel generation | ✅ | ✅ | Done v0.3.0 |
+| Dark/light theme | ✅ | ✅ | Done v0.3.0 |
+| Cell collapsing | ✅ | ✅ | Done v0.3.1 |
+| Tool use | ✅ | ⬜ | Planned v0.4 |
+| Real-time collaboration | ✅ | ⬜ | Planned v0.5 |
 | Module export | ✅ | ⬜ | Planned v1.0 |
-| Cloud sync | ✅ | ⬜ | Planned v0.4 |
+| Cloud sync | ✅ | ⬜ | Planned v0.5 |
 | FastHTML support | ✅ | ✅ | Built with it! |
 | Open source | ❌ | ✅ | **Advantage!** |
 

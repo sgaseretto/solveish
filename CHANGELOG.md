@@ -5,6 +5,80 @@ All notable changes to LLM Notebook will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2024-12-09
+
+### Added
+
+#### Multi-Level Collapsing for Input/Output
+- **Independent input/output collapse** - Each cell now has separate collapse controls for input (code/prompt) and output (result/response)
+- **Three collapse levels**:
+  - **Expanded (▼)** - Full visibility
+  - **Scrollable (◐)** - Limited height (168px) with scrollbar for longer content
+  - **Summary (▬)** - Single line (2.25em) with ellipsis for quick preview
+- **Code cells default to scrollable output** - Both new code cells and existing code cells loaded from notebooks now start with output in scrollable mode for better screen space usage
+- **Section collapse buttons** - Visual indicators in cell header show current collapse state for each section
+- **Keyboard shortcuts for collapsing**:
+  - `Z` - Cycle input collapse level
+  - `Shift+Z` - Cycle output collapse level
+  - `Alt+Z` - Cycle both input and output together
+- **Persistent collapse state** - Collapse levels are saved to notebook metadata and restored on load
+
+### Technical Changes
+
+- Added `CollapseLevel` enum (EXPANDED=0, SCROLLABLE=1, SUMMARY=2)
+- Added `input_collapse` and `output_collapse` fields to Cell dataclass
+- Added CSS classes: `.collapse-scrollable`, `.collapse-summary`
+- Added CSS for section collapse buttons with level indicators
+- Added JavaScript functions: `cycleCollapseLevel()`, `setCollapseLevel()`
+- Added new route `/notebook/{nb_id}/cell/{cid}/collapse-section` for updating section collapse state
+- Updated `CellView()` to include collapse controls and data attributes
+- Updated `to_jupyter_cell()` and `from_jupyter_cell()` to serialize/deserialize collapse levels
+- New code cells default to `output_collapse=1` (scrollable output)
+- Code cells loaded from disk without explicit `output_collapse` metadata default to scrollable (1) instead of expanded (0)
+
+## [0.3.0] - 2024-12-09
+
+### Added
+
+#### Cell Folding/Collapsing
+- **Collapse toggle button** - Each cell now has a ▼ button in the header to collapse/expand cell content
+- **Persistent collapse state** - Collapsed state is saved per cell and persists across page reloads
+- **Visual feedback** - Collapsed cells show reduced opacity and the collapse button rotates to indicate state
+
+#### Dark/Light Theme Toggle
+- **Theme toggle button** - Sun/Moon icon (☀️/🌙) in the toolbar to switch between dark and light themes
+- **Light theme CSS** - Complete light theme with GitHub-inspired color palette
+- **Ace Editor theme sync** - Code editor automatically switches between Monokai (dark) and Chrome (light) themes
+- **localStorage persistence** - Theme preference is saved and restored across sessions
+
+#### Mobile-Responsive Layout
+- **Tablet breakpoint (768px)** - Responsive toolbar, stacked cell headers, and full-width buttons
+- **Mobile breakpoint (480px)** - Compact layout with smaller fonts, tighter padding, and optimized touch targets
+- **Responsive Ace Editor** - Code editor adjusts minimum height on smaller screens
+- **Fluid notebook list** - Notebooks stack vertically on mobile for better navigation
+
+#### Real-time Token Streaming
+- **🧠 Thinking indicator** - When `use_thinking` is enabled, shows animated "🧠 Thinking..." in the AI response area and cell header
+- **Visual streaming feedback** - Cell border turns orange during generation
+- **Smooth animation** - Thinking indicator pulses with a subtle animation
+
+#### Cancel Generation
+- **Cancel button (⏹)** - Appears during streaming to stop AI generation mid-stream
+- **WebSocket cancellation** - Properly signals the server to stop generation
+- **Clean state handling** - Run button re-appears after cancellation or completion
+- **Server-side tracking** - Uses a global set to track cancelled cells across async operations
+
+### Technical Changes
+
+- Added light theme CSS variables under `[data-theme="light"]` selector
+- Added `cancelled_cells` global set for tracking cancelled generations
+- Updated `mock_llm_stream()` to yield dictionaries with `type` field for different message types
+- Added WebSocket message handler for `cancel` type messages
+- Added new route `/notebook/{nb_id}/cell/{cid}/collapse` for toggling cell collapse state
+- Added Chrome theme CDN for Ace Editor (light mode)
+- Added responsive CSS media queries for 768px and 480px breakpoints
+- Added JavaScript functions: `toggleTheme()`, `loadTheme()`, `toggleCollapse()`, `cancelStreaming()`, `showThinkingIndicator()`, `hideThinkingIndicator()`
+
 ## [0.2.0] - 2024-12-09
 
 ### Added

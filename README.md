@@ -11,6 +11,11 @@ An open-source Solveit-like notebook built entirely with **FastHTML**. Features 
 - **Solveit-compatible**: Standard `.ipynb` format with Solveit metadata conventions
 - **Pure Python**: Built with FastHTML, no JavaScript frameworks
 - **Mock LLM included**: Works out of the box without API keys
+- **Dark/Light theme**: Toggle between themes with persistent localStorage saving
+- **Mobile responsive**: Works on tablets and phones with adaptive layout
+- **Cell folding**: Collapse cells to focus on what matters
+- **Cancel generation**: Stop AI responses mid-stream with the ⏹ button
+- **🧠 Thinking mode**: Visual indicator during AI thinking process
 
 ## 📚 Documentation
 
@@ -142,14 +147,18 @@ Works on both Windows/Linux (Ctrl) and macOS (Cmd):
 | `Alt+↓` | Move cell down |
 | `Escape` | Exit edit mode |
 | `Double-click` | Edit markdown/AI response |
+| `Z` | Cycle input collapse level |
+| `Shift+Z` | Cycle output collapse level |
+| `Alt+Z` | Cycle both input and output collapse |
 
 ## 🎨 Ace Editor
 
-Code cells use the **Ace Editor** with Monokai theme for proper syntax highlighting:
+Code cells use the **Ace Editor** for proper syntax highlighting:
 - Python syntax highlighting
 - Auto-indentation
 - Bracket matching
 - Keyboard shortcuts work inside the editor
+- **Theme-aware**: Monokai (dark) / Chrome (light) based on app theme
 
 ## 🔌 WebSocket Streaming
 
@@ -265,13 +274,46 @@ See **[DEVELOPERS.md](DEVELOPERS.md)** for complete examples and patterns.
 
 ---
 
+## 🌗 Theme & UI Features
+
+### Theme Toggle
+Click the ☀️/🌙 button in the toolbar to switch between dark and light themes. Your preference is saved to localStorage.
+
+### Cell Folding
+Click the ▼ button on any cell to collapse it completely. Collapsed cells show only the header. Click again to expand.
+
+### Multi-Level Section Collapse
+Each cell has independent collapse controls for input and output sections:
+
+| Icon | Level | Description |
+|------|-------|-------------|
+| ▼ | Expanded | Full visibility |
+| ◐ | Scrollable | 168px max height with scrollbar (default for code cells) |
+| ▬ | Summary | Single line with ellipsis |
+
+**Keyboard shortcuts:**
+- `Z` - Cycle input collapse level
+- `Shift+Z` - Cycle output collapse level
+- `Alt+Z` - Cycle both together
+
+New code cells default to scrollable output mode for better screen space usage. Collapse states are saved per cell and persist across page reloads.
+
+### Mobile Support
+The interface adapts to smaller screens:
+- **Tablet (768px)**: Stacked toolbar, full-width buttons
+- **Mobile (480px)**: Compact layout, optimized touch targets
+
+### Cancel Generation
+During AI response streaming, click the ⏹ button to stop generation. The run button (▶) returns after cancellation.
+
 ## 🗺️ Roadmap
 
 | Phase | Key Features |
 |-------|--------------|
-| **v0.2** | Real LLM integration, WebSocket streaming, auto-save |
-| **v0.3** | Context management, rich outputs (plots, tables), multi-kernel |
-| **v0.4** | Real-time collaboration, authentication, cloud storage |
+| **v0.2** ✓ | Ace Editor, cell navigation, output improvements |
+| **v0.3** ✓ | Theme toggle, mobile responsive, cell folding, cancel streaming |
+| **v0.4** | Real LLM integration, context management, rich outputs |
+| **v0.5** | Real-time collaboration, authentication, cloud storage |
 | **v1.0** | Module export, full Solveit feature parity |
 
 See **[ROADMAP.md](ROADMAP.md)** for detailed plans and contribution opportunities.
@@ -298,10 +340,11 @@ llm_notebook/
 This is an open-source alternative to Solveit. Contributions welcome!
 
 **Good first issues:**
-- Add syntax highlighting
-- Improve mobile responsiveness
+- Add real LLM provider integration (Claude, OpenAI)
 - Write unit tests
-- Add more keyboard shortcuts
+- Add cell execution queue
+- Implement cell pinning UI
+- Add notebook title editing
 
 **See [ROADMAP.md](ROADMAP.md)** for the full list of planned features.
 
