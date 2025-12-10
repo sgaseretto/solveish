@@ -5,6 +5,97 @@ All notable changes to LLM Notebook will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2024-12-10
+
+### Fixed
+
+#### Code Cell Streaming Output
+- **Fixed streaming output display** - Output now streams to browser in real-time (was not showing due to CSS selector mismatch)
+- **Fixed empty cell output** - Output container always renders, even for cells without prior output
+- **Fixed output element ID** - Added `id="output-{cell.id}"` for reliable JavaScript selection
+
+### Added
+
+#### Rich Output Support (Jupyter-like)
+- **MIME bundle rendering** - Full support for Jupyter MIME types:
+  - `text/html` - Direct HTML rendering (FastHTML components, widgets)
+  - `image/png`, `image/jpeg`, `image/gif` - Base64 image display
+  - `image/svg+xml` - Inline SVG rendering
+  - `text/markdown` - Markdown content
+  - `text/latex` - LaTeX math notation
+  - `application/json` - Pretty-printed JSON
+  - `text/plain` - Escaped text fallback
+- **ANSI color code support** - Terminal colors render as styled HTML spans
+- **tqdm progress bar support** - Progress bars now work with carriage return handling
+- **display_data streaming** - Rich outputs stream via WebSocket (`code_display_data` message type)
+
+### Technical Changes
+
+- Updated CellView HTML: Changed class from `output` to `cell-output`, added `id` attribute
+- Added `render_mime_bundle()` function for converting MIME bundles to HTML
+- Added `appendDisplayData()` JavaScript function for rich output rendering
+- Added `ansiToHtml()` JavaScript function for ANSI-to-HTML conversion
+- Updated `appendCodeOutput()` to handle carriage returns for tqdm
+- Changed `StreamingStdout.isatty()` to return `True` to enable tqdm
+- Added CSS for `.cell-output`, `.stream-output`, `.display-data`, `.mime-*` classes
+- Added `code_display_data` WebSocket message type handler
+
+---
+
+## [0.5.0] - 2024-12-10
+
+### Added
+
+#### Streaming Code Cell Execution
+- **Real-time stdout/stderr streaming** - Code cell output streams incrementally as it runs, like Jupyter notebooks
+- **Subprocess-based kernel** - Code executes in a separate process for hard interrupt support
+- **Hard interrupt (SIGINT)** - Stop any running code including C extensions and tight loops via cancel button
+- **Rich output support** - Infrastructure for matplotlib plots, images, and HTML displays
+- **WebSocket streaming** - Output chunks stream to browser in real-time via WebSocket messages
+
+#### Execution Queue
+- **FIFO cell queue** - Queue multiple cells while one is running
+- **Responsive UI** - UI stays responsive during execution (async background processing)
+- **Cancel queued cells** - Cancel individual cells or all queued cells
+
+#### Project Restructuring (DCS Architecture)
+- **Document layer** (`document/`) - Data models for Cell, Notebook, CellOutput
+  - `cell.py` - Cell with streaming outputs, state tracking (IDLE, QUEUED, RUNNING, SUCCESS, ERROR)
+  - `notebook.py` - Notebook with cell operations
+  - `serialization.py` - .ipynb I/O using execnb.nbio
+- **Service layer** (`services/kernel/`) - Business logic for code execution
+  - `kernel_worker.py` - Subprocess kernel worker with streaming output
+  - `subprocess_kernel.py` - Kernel manager with interrupt and restart
+  - `kernel_service.py` - Service managing kernels per notebook
+  - `execution_queue.py` - FIFO queue with callbacks for streaming
+
+#### UI Enhancements
+- **Cancel button for code cells** - Stop running code execution with the interrupt button
+- **Streaming visual feedback** - Cell border shows streaming state during execution
+- **Per-notebook kernels** - Each notebook has its own isolated kernel process
+
+### Technical Changes
+
+- Replaced `PythonKernel` class with `KernelService` for subprocess-based execution
+- Added `multiprocessing.Process` for subprocess-based kernel with SIGINT support
+- Added `fastcore.patch` to extend execnb's CaptureShell with streaming method
+- Added custom `StreamingStdout` and `StreamingDisplayPublisher` for real-time output capture
+- Added async generators for streaming output via multiprocessing.Queue
+- Added signal handler in kernel worker for reliable KeyboardInterrupt on SIGINT
+- Added `CellState` enum for tracking cell execution state
+- Added `CellOutput` dataclass for structured output (stream, execute_result, error, display_data)
+- Updated `requirements.txt` to include `fastcore>=1.5.0`
+- Added WebSocket message types: `code_stream_start`, `code_stream_chunk`, `code_stream_end`
+- Added JavaScript handlers for code cell streaming UI updates
+- Added `/notebook/{nb_id}/kernel/interrupt` route for hard interrupt
+- Updated `/notebook/{nb_id}/kernel/restart` route (was `/kernel/restart`)
+
+### Documentation
+
+- Added `docs/how_it_works/04_kernel_execution.md` - Comprehensive guide to kernel architecture
+- Updated `docs/how_it_works/README.md` with kernel execution documentation
+- Added test files: `test_kernel.py`, `test_integration.py`
+
 ## [0.4.1] - 2024-12-09
 
 ### Fixed

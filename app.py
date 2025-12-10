@@ -22,6 +22,9 @@ from contextlib import redirect_stdout, redirect_stderr
 from enum import Enum
 from pathlib import Path
 
+# New streaming kernel
+from services.kernel import KernelService
+
 # ============================================================================
 # Constants
 # ============================================================================
@@ -242,67 +245,16 @@ class Notebook:
         return nb
 
 # ============================================================================
-# Python Kernel
+# Python Kernel (Streaming Subprocess)
 # ============================================================================
 
-class PythonKernel:
-    def __init__(self):
-        self.namespace = {"__name__": "__main__"}
-        self.execution_count = 0
-        self._setup_builtins()
-    
-    def _setup_builtins(self):
-        exec("import sys, os, json, math, random, datetime", self.namespace)
-        
-    def execute(self, code: str) -> tuple[str, str, bool, int]:
-        """Execute code with Jupyter-style output for the last expression."""
-        self.execution_count += 1
-        stdout_capture = io.StringIO()
-        stderr_capture = io.StringIO()
-        success = True
-        last_expr_result = None
+# KernelService manages subprocess kernels per notebook with:
+# - Real-time streaming output (stdout/stderr as they happen)
+# - Hard interrupt via SIGINT (can stop tight loops, C extensions)
+# - Rich output support (images, plots, HTML)
+# - Persistent namespace across cells
 
-        try:
-            with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-                # Parse the code into an AST
-                tree = ast.parse(code, '<cell>', 'exec')
-
-                if tree.body:
-                    last_stmt = tree.body[-1]
-
-                    # Check if the last statement is an expression (not assignment, etc.)
-                    if isinstance(last_stmt, ast.Expr):
-                        # Execute all statements except the last
-                        if len(tree.body) > 1:
-                            exec_tree = ast.Module(body=tree.body[:-1], type_ignores=[])
-                            exec(compile(exec_tree, '<cell>', 'exec'), self.namespace)
-
-                        # Evaluate the last expression and capture its result
-                        expr_tree = ast.Expression(body=last_stmt.value)
-                        last_expr_result = eval(compile(expr_tree, '<cell>', 'eval'), self.namespace)
-                    else:
-                        # Last statement is not an expression, execute everything
-                        exec(compile(tree, '<cell>', 'exec'), self.namespace)
-
-        except Exception:
-            success = False
-            stderr_capture.write(traceback.format_exc())
-
-        # Append the last expression result to stdout (Jupyter-style)
-        stdout_val = stdout_capture.getvalue()
-        if last_expr_result is not None:
-            if stdout_val and not stdout_val.endswith('\n'):
-                stdout_val += '\n'
-            stdout_val += repr(last_expr_result)
-
-        return (stdout_val, stderr_capture.getvalue(), success, self.execution_count)
-    
-    def restart(self):
-        self.namespace = {"__name__": "__main__"}
-        self.execution_count = 0
-        self._setup_builtins()
-
-kernel = PythonKernel()
+kernel_service = KernelService()
 
 # ============================================================================
 # Mock LLM with Streaming
@@ -366,6 +318,15 @@ def get_notebook(notebook_id: str) -> Notebook:
             nb.cells = [
                 Cell(cell_type="note", source="# Welcome to LLM Notebook! 🚀\n\nAn open-source notebook with **prompt cells** for AI interaction.\n\n**Keyboard Shortcuts (Jupyter-style):**\n- `Shift+Enter` - Run cell (recommended)\n- `Ctrl/Cmd+Enter` - Run cell (alternative)\n- `Ctrl/Cmd+S` - Save notebook\n- `D D` - Delete cell (press D twice)\n- `Ctrl/Cmd+Shift+C` - Add code cell\n- `Ctrl/Cmd+Shift+N` - Add note cell\n- `Ctrl/Cmd+Shift+P` - Add prompt cell\n- `Alt+↑/↓` - Move cell up/down\n- `Escape` - Exit edit mode\n- Double-click - Edit markdown/response"),
                 Cell(cell_type="code", source="# Try running some Python (Shift+Enter)\nx = [1, 2, 3, 4, 5]\nprint(f'Sum: {sum(x)}')\nprint(f'Average: {sum(x)/len(x)}')\nx", output_collapse=1),
+                Cell(cell_type="note", source="## 🔄 Streaming Output Tests\n\nThe cells below demonstrate real-time streaming output. Run them to see output appear incrementally."),
+                Cell(cell_type="code", source="# Test 1: Basic streaming with sleep\nfrom time import sleep\n\nfor i in range(5):\n    print(f\"Step {i + 1}/5: Processing...\")\n    sleep(1)\n\nprint(\"Done!\")", output_collapse=1),
+                Cell(cell_type="code", source="# Test 2: Progress bar with tqdm\nfrom tqdm import tqdm\nfrom time import sleep\n\nfor i in tqdm(range(20), desc=\"Processing\"):\n    sleep(0.1)", output_collapse=1),
+                Cell(cell_type="code", source="# Test 3: ANSI colors (if supported)\nprint(\"\\033[31mRed text\\033[0m\")\nprint(\"\\033[32mGreen text\\033[0m\")\nprint(\"\\033[33mYellow text\\033[0m\")\nprint(\"\\033[34mBlue text\\033[0m\")\nprint(\"\\033[1mBold text\\033[0m\")", output_collapse=1),
+                Cell(cell_type="note", source="## 📊 Rich Output Tests\n\nThese cells test display of images, HTML, and other rich content."),
+                Cell(cell_type="code", source="# Test 4: HTML display\nfrom IPython.display import HTML, display\n\ndisplay(HTML(\"\"\"\n<div style=\"padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 10px; color: white;\">\n    <h3>🎨 Rich HTML Output</h3>\n    <p>This is rendered HTML with styling!</p>\n    <button style=\"padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer;\">Click me (won't do anything)</button>\n</div>\n\"\"\"))", output_collapse=1),
+                Cell(cell_type="code", source="# Test 5: Matplotlib plot\nimport matplotlib.pyplot as plt\nimport numpy as np\n\nx = np.linspace(0, 10, 100)\nplt.figure(figsize=(8, 4))\nplt.plot(x, np.sin(x), label='sin(x)')\nplt.plot(x, np.cos(x), label='cos(x)')\nplt.legend()\nplt.title('Trigonometric Functions')\nplt.xlabel('x')\nplt.ylabel('y')\nplt.grid(True, alpha=0.3)\nplt.show()", output_collapse=1),
+                Cell(cell_type="code", source="# Test 6: Error handling\n# This will raise an error - the traceback should display properly\nresult = 1 / 0", output_collapse=1),
+                Cell(cell_type="note", source="## 💬 Prompt Cell\n\nUse the prompt cell below to chat with the AI assistant."),
                 Cell(cell_type="prompt", source="Hello! What can you help me with?"),
             ]
             notebooks[notebook_id] = nb
@@ -378,6 +339,128 @@ def save_notebook(notebook_id: str):
 
 def list_notebooks() -> List[str]:
     return [p.stem for p in NOTEBOOKS_DIR.glob("*.ipynb")]
+
+def render_mime_bundle(data: dict, metadata: dict = None) -> str:
+    """
+    Convert Jupyter MIME bundle to HTML.
+    Priority: text/html > image/svg+xml > image/png > image/jpeg > text/markdown > text/plain
+
+    Args:
+        data: Dict with MIME types as keys and content as values
+        metadata: Optional dict with rendering hints (width, height, etc.)
+
+    Returns:
+        HTML string for rendering
+    """
+    import html as html_module
+    metadata = metadata or {}
+
+    # HTML - render directly (trusted user code, matches Jupyter behavior)
+    if 'text/html' in data:
+        return f'<div class="mime-html">{data["text/html"]}</div>'
+
+    # SVG - render inline
+    if 'image/svg+xml' in data:
+        return f'<div class="mime-svg">{data["image/svg+xml"]}</div>'
+
+    # PNG image - base64 data URL
+    if 'image/png' in data:
+        width = metadata.get('width', '')
+        height = metadata.get('height', '')
+        style_parts = []
+        if width:
+            style_parts.append(f'width:{width}px')
+        if height:
+            style_parts.append(f'height:{height}px')
+        style = ';'.join(style_parts)
+        style_attr = f' style="{style}"' if style else ''
+        return f'<img class="mime-image" src="data:image/png;base64,{data["image/png"]}"{style_attr} />'
+
+    # JPEG image
+    if 'image/jpeg' in data:
+        return f'<img class="mime-image" src="data:image/jpeg;base64,{data["image/jpeg"]}" />'
+
+    # GIF image
+    if 'image/gif' in data:
+        return f'<img class="mime-image" src="data:image/gif;base64,{data["image/gif"]}" />'
+
+    # Markdown - wrap for potential rendering
+    if 'text/markdown' in data:
+        return f'<div class="mime-markdown">{data["text/markdown"]}</div>'
+
+    # LaTeX - wrap for MathJax/KaTeX processing
+    if 'text/latex' in data:
+        return f'<div class="mime-latex">{html_module.escape(data["text/latex"])}</div>'
+
+    # JSON - pretty print
+    if 'application/json' in data:
+        json_str = json.dumps(data['application/json'], indent=2)
+        return f'<pre class="mime-json">{html_module.escape(json_str)}</pre>'
+
+    # Plain text fallback
+    if 'text/plain' in data:
+        return f'<pre class="mime-text">{html_module.escape(data["text/plain"])}</pre>'
+
+    # Unknown format - show raw
+    return f'<pre class="mime-unknown">{html_module.escape(str(data))}</pre>'
+
+
+def ansi_to_html(text: str) -> str:
+    """
+    Convert ANSI escape codes to HTML spans with inline styles.
+
+    Handles common ANSI codes for colors (30-37, 90-97), backgrounds (40-47),
+    bold (1), and reset (0).
+    """
+    import re
+    import html as html_module
+
+    ANSI_COLORS = {
+        '30': '#000', '31': '#c00', '32': '#0a0', '33': '#a50',
+        '34': '#00a', '35': '#a0a', '36': '#0aa', '37': '#aaa',
+        '90': '#555', '91': '#f55', '92': '#5f5', '93': '#ff5',
+        '94': '#55f', '95': '#f5f', '96': '#5ff', '97': '#fff',
+    }
+    ANSI_BG_COLORS = {
+        '40': '#000', '41': '#c00', '42': '#0a0', '43': '#a50',
+        '44': '#00a', '45': '#a0a', '46': '#0aa', '47': '#aaa',
+    }
+
+    result = []
+    open_spans = 0
+
+    # Split by ANSI escape sequences
+    parts = re.split(r'(\x1b\[[0-9;]*m)', text)
+
+    for part in parts:
+        match = re.match(r'\x1b\[([0-9;]*)m', part)
+        if match:
+            codes = match.group(1).split(';')
+            for code in codes:
+                if code == '0' or code == '':
+                    # Reset all styles
+                    while open_spans > 0:
+                        result.append('</span>')
+                        open_spans -= 1
+                elif code == '1':
+                    result.append('<span style="font-weight:bold">')
+                    open_spans += 1
+                elif code in ANSI_COLORS:
+                    result.append(f'<span style="color:{ANSI_COLORS[code]}">')
+                    open_spans += 1
+                elif code in ANSI_BG_COLORS:
+                    result.append(f'<span style="background:{ANSI_BG_COLORS[code]}">')
+                    open_spans += 1
+        else:
+            result.append(html_module.escape(part))
+
+    # Close any remaining open spans
+    while open_spans > 0:
+        result.append('</span>')
+        open_spans -= 1
+
+    return ''.join(result)
+
 
 # ============================================================================
 # Collaborative WebSocket Broadcasting
@@ -545,7 +628,64 @@ body {
 .source:focus { outline: none; background: #0a0c10; }
 .source:last-child { border-bottom: none; }
 
-/* Code output */
+/* Code cell output container */
+.cell-output {
+    background: var(--bg-input);
+    border-top: 1px solid var(--border);
+}
+.cell-output:empty { display: none; }
+.cell-output.error { }
+
+/* Stream output (print, tqdm, etc.) */
+.cell-output .stream-output {
+    margin: 0;
+    padding: 12px;
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    font-size: 0.85rem;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 400px;
+    overflow-y: auto;
+    background: transparent;
+}
+.cell-output .stream-output.stderr,
+.cell-output.error .stream-output {
+    color: var(--accent-red);
+}
+
+/* Display data (images, HTML, plots, etc.) */
+.cell-output .display-data {
+    padding: 12px;
+}
+.cell-output .mime-image {
+    max-width: 100%;
+    height: auto;
+    display: block;
+}
+.cell-output .mime-svg svg {
+    max-width: 100%;
+    height: auto;
+}
+.cell-output .mime-text,
+.cell-output .mime-json {
+    margin: 0;
+    font-family: 'SF Mono', Monaco, monospace;
+    font-size: 0.85rem;
+    white-space: pre-wrap;
+}
+.cell-output .mime-html {
+    /* Allow full HTML rendering - trusted user code */
+}
+.cell-output pre {
+    margin: 0;
+    padding: 12px;
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    font-size: 0.85rem;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+/* Legacy output class for backwards compatibility */
 .output {
     padding: 12px; background: var(--bg-input);
     font-family: monospace; font-size: 0.85rem;
@@ -789,7 +929,7 @@ body {
     .cell-badge { font-size: 0.6rem; padding: 2px 6px; }
     .cell-body { padding: 0; }
     .source, .prompt-content { padding: 10px; min-height: 50px; }
-    .output { padding: 10px; font-size: 0.8rem; }
+    .output, .cell-output pre, .cell-output .stream-output { padding: 10px; font-size: 0.8rem; }
     .md-preview, .ai-preview { padding: 10px; }
     .edit-hint { font-size: 0.65rem; padding: 3px 10px; }
 }
@@ -1633,6 +1773,18 @@ function connectWebSocket(notebookId) {
             showThinkingIndicator(data.cell_id);
         } else if (data.type === 'thinking_end') {
             hideThinkingIndicator(data.cell_id);
+        } else if (data.type === 'code_stream_start') {
+            // Code cell execution started - show streaming indicator
+            startCodeStreaming(data.cell_id);
+        } else if (data.type === 'code_stream_chunk') {
+            // Append output chunk to code cell
+            appendCodeOutput(data.cell_id, data.chunk, data.stream);
+        } else if (data.type === 'code_stream_end') {
+            // Code cell execution finished
+            finishCodeStreaming(data.cell_id, data.has_error);
+        } else if (data.type === 'code_display_data') {
+            // Rich output (image, HTML, plot, etc.)
+            appendDisplayData(data.cell_id, data.html);
         }
     };
 
@@ -1715,6 +1867,200 @@ function startStreaming(cellId, useThinking) {
     }
     if (preview && useThinking) {
         preview.innerHTML = '<div class="thinking-indicator"><span>🧠</span> Thinking...</div>';
+    }
+}
+
+// ==================== Code Cell Streaming Functions ====================
+
+// ANSI color code mapping
+const ANSI_COLORS = {
+    '30': '#000', '31': '#c00', '32': '#0a0', '33': '#a50',
+    '34': '#00a', '35': '#a0a', '36': '#0aa', '37': '#aaa',
+    '90': '#555', '91': '#f55', '92': '#5f5', '93': '#ff5',
+    '94': '#55f', '95': '#f5f', '96': '#5ff', '97': '#fff',
+    '40': 'background:#000', '41': 'background:#c00',
+    '42': 'background:#0a0', '43': 'background:#a50',
+    '44': 'background:#00a', '45': 'background:#a0a',
+    '46': 'background:#0aa', '47': 'background:#aaa'
+};
+
+function escapeHtml(text) {
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+function ansiToHtml(text) {
+    let result = '';
+    let openSpans = 0;
+
+    const parts = text.split(/(\\x1b\\[[0-9;]*m)/);
+    for (const part of parts) {
+        const match = part.match(/\\x1b\\[([0-9;]*)m/);
+        if (match) {
+            const codes = match[1].split(';');
+            for (const code of codes) {
+                if (code === '0' || code === '') {
+                    // Reset all styles
+                    while (openSpans > 0) {
+                        result += '</span>';
+                        openSpans--;
+                    }
+                } else if (code === '1') {
+                    result += '<span style="font-weight:bold">';
+                    openSpans++;
+                } else if (ANSI_COLORS[code]) {
+                    const style = ANSI_COLORS[code].includes(':')
+                        ? ANSI_COLORS[code]
+                        : `color:${ANSI_COLORS[code]}`;
+                    result += `<span style="${style}">`;
+                    openSpans++;
+                }
+            }
+        } else {
+            result += escapeHtml(part);
+        }
+    }
+
+    // Close any remaining open spans
+    while (openSpans > 0) {
+        result += '</span>';
+        openSpans--;
+    }
+
+    return result;
+}
+
+// Track raw text content for carriage return handling
+const streamTextContent = new Map();
+
+function startCodeStreaming(cellId) {
+    const cell = document.getElementById(`cell-${cellId}`);
+    const outputEl = document.getElementById(`output-${cellId}`);
+
+    if (cell) {
+        cell.classList.add('streaming');
+        const cancelBtn = cell.querySelector('.btn-cancel');
+        const runBtn = cell.querySelector('.btn-run');
+        if (cancelBtn) cancelBtn.style.display = '';
+        if (runBtn) runBtn.style.display = 'none';
+    }
+
+    if (outputEl) {
+        outputEl.innerHTML = '';  // Clear for fresh output
+        outputEl.classList.remove('error');
+    }
+
+    // Reset text content tracker for this cell
+    streamTextContent.set(cellId, '');
+
+    console.log('[Code] Started streaming for cell:', cellId);
+}
+
+function appendCodeOutput(cellId, chunk, streamName) {
+    const outputEl = document.getElementById(`output-${cellId}`);
+    if (!outputEl) return;
+
+    // Get or create stream output container
+    let streamEl = outputEl.querySelector('.stream-output');
+    if (!streamEl) {
+        streamEl = document.createElement('pre');
+        streamEl.className = 'stream-output';
+        outputEl.appendChild(streamEl);
+    }
+
+    if (streamName === 'stderr') {
+        outputEl.classList.add('error');
+    }
+
+    // Get current raw text and apply chunk
+    let currentText = streamTextContent.get(cellId) || '';
+
+    // Handle carriage return for progress bars (tqdm)
+    if (chunk.includes('\\r')) {
+        const lines = currentText.split('\\n');
+        const parts = chunk.split('\\r');
+
+        for (let i = 0; i < parts.length; i++) {
+            if (i === 0) {
+                // First part appends to current line
+                lines[lines.length - 1] += parts[i];
+            } else {
+                // After \\r, replace current line content
+                lines[lines.length - 1] = parts[i];
+            }
+        }
+        currentText = lines.join('\\n');
+    } else {
+        currentText += chunk;
+    }
+
+    // Store updated raw text
+    streamTextContent.set(cellId, currentText);
+
+    // Render with ANSI color conversion
+    streamEl.innerHTML = ansiToHtml(currentText);
+    streamEl.scrollTop = streamEl.scrollHeight;
+}
+
+function appendDisplayData(cellId, html) {
+    const outputEl = document.getElementById(`output-${cellId}`);
+    if (!outputEl) return;
+
+    // Create display data container
+    const displayEl = document.createElement('div');
+    displayEl.className = 'display-data';
+    displayEl.innerHTML = html;
+    outputEl.appendChild(displayEl);
+
+    // Execute any scripts in the HTML (for interactive widgets)
+    displayEl.querySelectorAll('script').forEach(script => {
+        const newScript = document.createElement('script');
+        newScript.textContent = script.textContent;
+        script.parentNode.replaceChild(newScript, script);
+    });
+}
+
+function finishCodeStreaming(cellId, hasError) {
+    const cell = document.getElementById(`cell-${cellId}`);
+    const outputEl = document.getElementById(`output-${cellId}`);
+
+    if (cell) {
+        cell.classList.remove('streaming');
+        const cancelBtn = cell.querySelector('.btn-cancel');
+        const runBtn = cell.querySelector('.btn-run');
+        if (cancelBtn) cancelBtn.style.display = 'none';
+        if (runBtn) runBtn.style.display = '';
+    }
+
+    if (outputEl && hasError) {
+        outputEl.classList.add('error');
+    }
+
+    // Clean up text content tracker
+    streamTextContent.delete(cellId);
+
+    console.log('[Code] Finished streaming for cell:', cellId, hasError ? '(with errors)' : '');
+}
+
+function interruptCodeCell(notebookId, cellId) {
+    // Send interrupt request to the server
+    fetch(`/notebook/${notebookId}/kernel/interrupt`, {
+        method: 'POST'
+    }).then(response => {
+        console.log('[Code] Interrupt sent for notebook:', notebookId);
+    }).catch(err => {
+        console.error('[Code] Interrupt failed:', err);
+    });
+
+    // Immediately update UI
+    const cell = document.getElementById(`cell-${cellId}`);
+    if (cell) {
+        const cancelBtn = cell.querySelector('.btn-cancel');
+        const runBtn = cell.querySelector('.btn-run');
+        if (cancelBtn) cancelBtn.style.display = 'none';
+        if (runBtn) runBtn.style.display = '';
     }
 }
 
@@ -1960,9 +2306,9 @@ def CellView(cell: Cell, notebook_id: str):
                    onclick=f"syncAceToTextarea('{cell.id}'); syncPromptContent('{cell.id}'); startStreaming('{cell.id}', {str(cell.use_thinking).lower()});",
                    title="Run (Shift+Enter)") if cell.cell_type != "note" else None,
             Button("⏹", cls="btn btn-sm btn-cancel",
-                   onclick=f"cancelStreaming('{cell.id}')",
-                   title="Cancel generation",
-                   style="display: none;") if cell.cell_type == "prompt" else None,
+                   onclick=f"cancelStreaming('{cell.id}')" if cell.cell_type == "prompt" else f"interruptCodeCell('{notebook_id}', '{cell.id}')",
+                   title="Cancel generation" if cell.cell_type == "prompt" else "Interrupt execution (Ctrl+C)",
+                   style="display: none;") if cell.cell_type in ("prompt", "code") else None,
             Button("↑", cls="btn btn-sm btn-icon",
                    hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/move/up",
                    hx_target="#cells", hx_swap="outerHTML", title="Move up"),
@@ -1993,10 +2339,12 @@ def CellView(cell: Cell, notebook_id: str):
                 cls=f"cell-input {input_collapse_cls}".strip(),
                 data_collapse_section="input"
             ),
-            Div(cell.output,
-                cls=f"output{' error' if cell.output and ('Error' in cell.output or 'Traceback' in cell.output) else ''} {output_collapse_cls}".strip(),
-                data_collapse_section="output")
-                if cell.output else None,
+            Div(
+                Pre(NotStr(cell.output), cls="stream-output") if cell.output else "",
+                id=f"output-{cell.id}",
+                cls=f"cell-output{' error' if cell.output and ('Error' in cell.output or 'Traceback' in cell.output) else ''} {output_collapse_cls}".strip(),
+                data_collapse_section="output"
+            ),
             Script(f"setTimeout(() => initAceEditor('{cell.id}'), 0);"),
             cls="cell-body"
         )
@@ -2367,10 +2715,102 @@ async def post(nb_id: str, cid: str, source: str = None):
         c.source = source
 
     if c.cell_type == "code":
-        stdout, stderr, success, exec_count = kernel.execute(c.source)
-        c.output = stdout + stderr
-        c.execution_count = exec_count
+        # Use streaming kernel for real-time output
+        kernel = kernel_service.get_kernel(nb_id)
+        output_parts = []
+        has_error = False
+        exec_count = None
+
+        # Send start signal to all clients
+        if nb_id in ws_connections and ws_connections[nb_id]:
+            msg = json.dumps({"type": "code_stream_start", "cell_id": cid})
+            for send in ws_connections[nb_id]:
+                try:
+                    await send(msg)
+                except:
+                    pass
+
+        # Stream output chunks
+        async for output in kernel.execute_streaming(c.source):
+            if output.output_type == 'stream':
+                chunk = output.content
+                # Store as HTML for final output (ANSI converted)
+                output_parts.append(ansi_to_html(chunk))
+                # Stream raw to WebSocket clients (JS handles ANSI conversion)
+                if nb_id in ws_connections and ws_connections[nb_id]:
+                    msg = json.dumps({
+                        "type": "code_stream_chunk",
+                        "cell_id": cid,
+                        "chunk": chunk,
+                        "stream": output.stream_name  # 'stdout' or 'stderr'
+                    })
+                    for send in ws_connections[nb_id]:
+                        try:
+                            await send(msg)
+                        except:
+                            pass
+
+            elif output.output_type == 'execute_result':
+                # Final result value (like Jupyter's Out[n])
+                result_text = output.content
+                if output_parts and not output_parts[-1].endswith('\n'):
+                    output_parts.append('\n')
+                # Convert ANSI codes in result too
+                output_parts.append(ansi_to_html(result_text))
+
+            elif output.output_type == 'error':
+                has_error = True
+                # Format error with traceback (convert ANSI colors)
+                tb_text = '\n'.join(output.traceback or [])
+                output_parts.append(ansi_to_html(tb_text))
+                # Stream error to clients
+                if nb_id in ws_connections and ws_connections[nb_id]:
+                    msg = json.dumps({
+                        "type": "code_stream_chunk",
+                        "cell_id": cid,
+                        "chunk": tb_text,
+                        "stream": "stderr"
+                    })
+                    for send in ws_connections[nb_id]:
+                        try:
+                            await send(msg)
+                        except:
+                            pass
+
+            elif output.output_type == 'display_data':
+                # Rich output (images, HTML, plots, etc.)
+                html_content = render_mime_bundle(output.content, output.metadata)
+                output_parts.append(html_content)
+
+                # Stream to WebSocket clients
+                if nb_id in ws_connections and ws_connections[nb_id]:
+                    msg = json.dumps({
+                        "type": "code_display_data",
+                        "cell_id": cid,
+                        "html": html_content
+                    })
+                    for send in ws_connections[nb_id]:
+                        try:
+                            await send(msg)
+                        except:
+                            pass
+
+            elif output.output_type == 'status' and hasattr(output, 'execution_count'):
+                exec_count = output.execution_count
+
+        # Combine all output
+        c.output = ''.join(output_parts)
+        c.execution_count = exec_count or (c.execution_count or 0) + 1
         c.time_run = datetime.now().strftime("%H:%M:%S")
+
+        # Send end signal to all clients
+        if nb_id in ws_connections and ws_connections[nb_id]:
+            msg = json.dumps({"type": "code_stream_end", "cell_id": cid, "has_error": has_error})
+            for send in ws_connections[nb_id]:
+                try:
+                    await send(msg)
+                except:
+                    pass
 
         # Broadcast code cell output to collaborators using OOB swap
         await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
@@ -2475,10 +2915,20 @@ async def post(nb_id: str, cid: str, source: str = None):
         Script(f"setTimeout(() => focusNextCell('{next_cell_id}'), 50);")
     )
 
-@rt("/kernel/restart")
-def post():
-    kernel.restart()
+@rt("/notebook/{nb_id}/kernel/restart")
+def post(nb_id: str):
+    """Restart the kernel for a specific notebook."""
+    kernel_service.restart(nb_id)
     return Div("✓ Kernel restarted", cls="status success")
+
+@rt("/notebook/{nb_id}/kernel/interrupt")
+def post(nb_id: str):
+    """Interrupt currently running code in the notebook's kernel."""
+    success = kernel_service.interrupt(nb_id)
+    if success:
+        return Div("✓ Execution interrupted", cls="status success")
+    else:
+        return Div("No kernel to interrupt", cls="status warning")
 
 # ============================================================================
 # WebSocket for Streaming
