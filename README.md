@@ -7,6 +7,7 @@ An open-source Solveit-like notebook built entirely with **FastHTML**. Features 
 ## ✨ Key Features
 
 - **Three cell types**: Code, Note, and Prompt
+- **Real-time collaboration**: Share URL to collaborate - see cell changes, outputs, and AI responses in real-time
 - **Editable AI responses**: Both user prompts AND AI responses are fully editable
 - **Solveit-compatible**: Standard `.ipynb` format with Solveit metadata conventions
 - **Pure Python**: Built with FastHTML, no JavaScript frameworks
@@ -24,6 +25,7 @@ An open-source Solveit-like notebook built entirely with **FastHTML**. Features 
 | **[README.md](README.md)** | Quick start and overview (this file) |
 | **[DEVELOPERS.md](DEVELOPERS.md)** | Developer guide for extending the project |
 | **[ROADMAP.md](ROADMAP.md)** | Planned features and contribution opportunities |
+| **[docs/](docs/)** | Technical deep dives (collaboration, architecture) |
 
 ---
 
@@ -55,20 +57,19 @@ Unlike traditional notebooks (Jupyter) or chat interfaces (ChatGPT), LLM Noteboo
 | **Note** | Documentation | Rendered markdown | Yes |
 | **Prompt** | Chat with AI | LLM response | **Both parts!** |
 
-```
-┌─────────────────────────────────────────┐
-│ PROMPT                               ▶  │
-├─────────────────────────────────────────┤
-│ 👤 Your Prompt                          │
-├─────────────────────────────────────────┤
-│ How do I reverse a list in Python?      │ ← Editable
-├─────────────────────────────────────────┤
-│ 🤖 AI Response (editable)               │
-├─────────────────────────────────────────┤
-│ You can reverse a list using:           │ ← Also editable!
-│ - `list.reverse()` (in-place)           │
-│ - `list[::-1]` (creates new list)       │
-└─────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph PromptCell["PROMPT ▶"]
+        direction TB
+        Header["👤 Your Prompt"]
+        UserInput["How do I reverse a list in Python?<br/><i>← Editable</i>"]
+        AIHeader["🤖 AI Response (editable)"]
+        AIResponse["You can reverse a list using:<br/>• list.reverse() (in-place)<br/>• list[::-1] (creates new list)<br/><i>← Also editable!</i>"]
+    end
+
+    Header --> UserInput
+    UserInput --> AIHeader
+    AIHeader --> AIResponse
 ```
 
 ---
@@ -186,31 +187,28 @@ ws.onmessage = (event) => {
 
 ## 🏗️ Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    FastHTML Frontend                        │
-│  ┌──────────┐  ┌──────────┐  ┌────────────────────────┐    │
-│  │Code Cell │  │Note Cell │  │     Prompt Cell        │    │
-│  │[Python]  │  │[Markdown]│  │[User Input]            │    │
-│  │[Output]  │  │[Preview] │  │[Editable AI Response]  │    │
-│  └──────────┘  └──────────┘  └────────────────────────┘    │
-│                         │                                   │
-│                    HTMX Requests                            │
-└─────────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    FastHTML Backend                         │
-│  ┌────────────────┐  ┌─────────────────┐  ┌─────────────┐  │
-│  │ Python Kernel  │  │ Context Builder │  │ LLM Client  │  │
-│  │ (exec/eval)    │  │ (aggregates     │  │ (Mock/API)  │  │
-│  │                │  │  visible cells) │  │             │  │
-│  └────────────────┘  └─────────────────┘  └─────────────┘  │
-│                                                             │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │           Notebook Storage (.ipynb files)           │   │
-│  └─────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Frontend["FastHTML Frontend"]
+        subgraph Cells["Cell Types"]
+            CodeCell["Code Cell<br/>[Python]<br/>[Output]"]
+            NoteCell["Note Cell<br/>[Markdown]<br/>[Preview]"]
+            PromptCell["Prompt Cell<br/>[User Input]<br/>[Editable AI Response]"]
+        end
+        HTMX["HTMX Requests"]
+    end
+
+    subgraph Backend["FastHTML Backend"]
+        subgraph Services["Services"]
+            Kernel["Python Kernel<br/>(exec/eval)"]
+            Context["Context Builder<br/>(aggregates visible cells)"]
+            LLM["LLM Client<br/>(Mock/API)"]
+        end
+        Storage["Notebook Storage (.ipynb files)"]
+    end
+
+    Cells --> HTMX
+    HTMX --> Backend
 ```
 
 ### Data Flow
@@ -306,14 +304,37 @@ The interface adapts to smaller screens:
 ### Cancel Generation
 During AI response streaming, click the ⏹ button to stop generation. The run button (▶) returns after cancellation.
 
+## 👥 Real-time Collaboration
+
+Share your notebook URL with others to collaborate in real-time. All connected users will see:
+
+- **Cell operations**: When you add, delete, or move a cell, collaborators see it instantly
+- **Code execution**: When you run a code cell, everyone sees the output
+- **AI responses**: Prompt cell responses stream to all connected users simultaneously
+- **Collapse state**: Cell expand/collapse changes are synchronized
+- **Cell type changes**: Switching a cell between code/note/prompt updates for everyone
+
+### How it works
+
+1. Open a notebook at `http://localhost:8000/notebook/mynotebook`
+2. Share the URL with collaborators
+3. Everyone with the URL sees changes in real-time
+
+**Note**: Typing in cells is NOT synced in real-time (to avoid interruptions). Only cell-level operations (run, add, delete, move, collapse) are broadcast.
+
+### Smart Conflict Avoidance
+
+If you're actively editing a cell when a collaborator makes changes to that same cell, the update is skipped for you to avoid interrupting your work. Once you finish editing, subsequent updates will come through.
+
 ## 🗺️ Roadmap
 
 | Phase | Key Features |
 |-------|--------------|
 | **v0.2** ✓ | Ace Editor, cell navigation, output improvements |
 | **v0.3** ✓ | Theme toggle, mobile responsive, cell folding, cancel streaming |
-| **v0.4** | Real LLM integration, context management, rich outputs |
-| **v0.5** | Real-time collaboration, authentication, cloud storage |
+| **v0.4** ✓ | Real-time collaboration via WebSocket |
+| **v0.5** | Real LLM integration, context management, rich outputs |
+| **v0.6** | Authentication, cloud storage |
 | **v1.0** | Module export, full Solveit feature parity |
 
 See **[ROADMAP.md](ROADMAP.md)** for detailed plans and contribution opportunities.

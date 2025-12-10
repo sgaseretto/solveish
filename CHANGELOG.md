@@ -5,6 +5,71 @@ All notable changes to LLM Notebook will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2024-12-09
+
+### Fixed
+
+#### WebSocket Collaboration Bug Fixes
+- **Fixed HTML serialization** - Changed from `str(component)` to `to_xml(component)` for proper HTML serialization when broadcasting updates via WebSocket
+- **Fixed connection tracking** - Changed from Dict-based (`id(send)`) to List-based connection tracking following FastHTML Game of Life pattern
+- **Fixed WebSocket lifecycle** - Used `conn=` and `disconn=` decorator parameters on `@app.ws` instead of manual registration on first message
+- **Fixed prompt cell streaming** - Fixed `.values()` call on list in streaming loop (lists don't have `.values()` method)
+
+### Technical Changes
+
+- Changed `ws_connections` from `Dict[str, Dict[int, Any]]` to `Dict[str, List[Any]]`
+- Updated `ws_on_connect` to append send function to list: `ws_connections[nb_id].append(send)`
+- Updated `ws_on_disconnect` to remove from list: `ws_connections[nb_id].remove(send)`
+- Added `AllCellsOOB()` and `CellViewOOB()` helper functions for generating OOB swap components
+- Updated `broadcast_to_notebook()` to use `to_xml()` for HTML serialization
+- Added `processOOBSwap()` JavaScript function to handle HTML OOB swaps from WebSocket
+- Fixed prompt cell streaming to iterate over list directly instead of calling `.values()`
+- Removed unused JSON-based WebSocket message handlers
+
+### Documentation
+
+- Added `docs/` folder with technical documentation
+- Added numbered documentation files in `docs/how_it_works/` for recommended reading order:
+  1. `01_state_management.md` - comprehensive guide to notebook/cell state management including in-memory storage, lazy loading, persistence to `.ipynb` files, CRUD operations, and state synchronization
+  2. `02_cell_types.md` - comprehensive guide to the three cell types (Code, Note, Prompt) including data model, rendering logic, execution behavior, serialization format, collapse system, and how to add new cell types
+  3. `03_real_time_collaboration.md` - comprehensive guide to the WebSocket collaboration system including architecture, message types, OOB swaps, cell-specific behavior, conflict avoidance, and improvement suggestions
+- Converted ASCII diagrams to Mermaid format in README.md, DEVELOPERS.md, and docs/how_it_works/ for better rendering on GitHub
+
+## [0.4.0] - 2024-12-09
+
+### Added
+
+#### Real-time Collaborative Editing
+- **Share notebook URL for collaboration** - Multiple users can view and edit the same notebook simultaneously by sharing the URL
+- **Real-time cell operations** - When a collaborator adds, deletes, or moves a cell, all connected users see the change instantly
+- **Live code execution output** - When someone runs a code cell, all collaborators see the output in real-time
+- **Streaming AI responses** - Prompt cell AI responses are streamed to all connected collaborators simultaneously
+- **Collapse state synchronization** - Cell collapse/expand states are broadcast to all users
+- **Cell type changes** - Changing a cell's type (code/note/prompt) is reflected for all collaborators
+
+### Technical Changes
+
+- Added `broadcast_to_notebook()` async helper function to broadcast WebSocket messages to all connected clients
+- Added `to_html_string()` utility function to convert FastHTML components to HTML strings for WebSocket transmission
+- Added two new WebSocket message types for collaborative updates:
+  - `cells_updated` - Full cells container replacement (for add/delete/move operations)
+  - `cell_updated` - Single cell replacement (for run output, collapse changes, type changes)
+- Added JavaScript handlers for collaborative updates:
+  - `handleCellsUpdated()` - Replaces entire cells container, reinitializes Ace editors, re-renders previews
+  - `handleCellUpdated()` - Replaces single cell (skips if user is editing or cell is streaming)
+  - `reinitializeAceEditors()` - Destroys and recreates all Ace editors after DOM update
+  - `renderAllPreviews()` - Re-renders all markdown previews after collaborative update
+  - `renderCellPreviews()` - Re-renders previews for a specific cell
+- Updated routes to async and added broadcast calls:
+  - `/notebook/{nb_id}/cell/add` - Broadcasts cells_updated
+  - `/notebook/{nb_id}/cell/{cid}` (DELETE) - Broadcasts cells_updated
+  - `/notebook/{nb_id}/cell/{cid}/move/{direction}` - Broadcasts cells_updated
+  - `/notebook/{nb_id}/cell/{cid}/type` - Broadcasts cell_updated
+  - `/notebook/{nb_id}/cell/{cid}/collapse` - Broadcasts cell_updated
+  - `/notebook/{nb_id}/cell/{cid}/collapse-section` - Broadcasts cell_updated
+  - `/notebook/{nb_id}/cell/{cid}/run` - Broadcasts cell_updated (for code cells and final prompt state)
+- Smart conflict avoidance: Cell updates are skipped if user is actively editing that cell or if it's currently streaming
+
 ## [0.3.1] - 2024-12-09
 
 ### Added
