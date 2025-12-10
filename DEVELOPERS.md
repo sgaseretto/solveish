@@ -7,50 +7,78 @@ A comprehensive guide for developers who want to extend, customize, or contribut
 1. [Architecture Overview](#architecture-overview)
 2. [Project Structure](#project-structure)
 3. [Core Concepts](#core-concepts)
-4. [Extension Points](#extension-points)
-5. [Adding New Cell Types](#adding-new-cell-types)
-6. [Integrating Real LLM Providers](#integrating-real-llm-providers)
-7. [Adding Persistence Backends](#adding-persistence-backends)
-8. [UI Customization](#ui-customization)
-9. [Testing](#testing)
-10. [Common Patterns](#common-patterns)
+4. [Real-time Collaboration](#real-time-collaboration)
+5. [Extension Points](#extension-points)
+6. [Adding New Cell Types](#adding-new-cell-types)
+7. [Integrating Real LLM Providers](#integrating-real-llm-providers)
+8. [Adding Persistence Backends](#adding-persistence-backends)
+9. [UI Customization](#ui-customization)
+10. [Testing](#testing)
+11. [Common Patterns](#common-patterns)
 
 ---
 
 ## Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        FastHTML App                              │
-├─────────────────────────────────────────────────────────────────┤
-│  Routes          │  Components       │  Services                 │
-│  ───────         │  ──────────       │  ────────                 │
-│  /notebook/{id}  │  NotebookPage()   │  PythonKernel            │
-│  /cell/{id}/run  │  CellView()       │  LLM Provider            │
-│  /cell/add       │  AddButtons()     │  Storage (ipynb)         │
-│  ...             │  TypeSelect()     │  Context Builder         │
-├─────────────────────────────────────────────────────────────────┤
-│                     Data Models                                  │
-│  ─────────────────────────────────────────────────────────────  │
-│  Cell (code/note/prompt) ←→ Jupyter Cell (ipynb format)         │
-│  Notebook ←→ ipynb file                                         │
-├─────────────────────────────────────────────────────────────────┤
-│                     Frontend (HTMX)                              │
-│  ─────────────────────────────────────────────────────────────  │
-│  hx-post, hx-target, hx-swap for reactive updates               │
-│  Minimal JavaScript for keyboard shortcuts & markdown preview   │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph FastHTML["FastHTML App"]
+        subgraph Routes["Routes"]
+            r1["/notebook/{id}"]
+            r2["/cell/{id}/run"]
+            r3["/cell/add"]
+            r4["..."]
+        end
+
+        subgraph Components["Components"]
+            c1["NotebookPage()"]
+            c2["CellView()"]
+            c3["AddButtons()"]
+            c4["TypeSelect()"]
+        end
+
+        subgraph Services["Services"]
+            s1["PythonKernel"]
+            s2["LLM Provider"]
+            s3["Storage (ipynb)"]
+            s4["Context Builder"]
+        end
+
+        subgraph Models["Data Models"]
+            m1["Cell (code/note/prompt)"]
+            m2["Notebook"]
+        end
+
+        subgraph Frontend["Frontend (HTMX)"]
+            f1["hx-post, hx-target, hx-swap"]
+            f2["Minimal JS for shortcuts & markdown"]
+        end
+    end
+
+    m1 <--> |"ipynb format"| JupyterCell["Jupyter Cell"]
+    m2 <--> |"file"| ipynb["*.ipynb"]
 ```
 
 ### Request Flow
 
-```
-User Action → HTMX Request → FastHTML Route → Update Model → Return HTML Fragment → HTMX Swaps DOM
+```mermaid
+flowchart LR
+    A["User Action"] --> B["HTMX Request"]
+    B --> C["FastHTML Route"]
+    C --> D["Update Model"]
+    D --> E["Return HTML Fragment"]
+    E --> F["HTMX Swaps DOM"]
 ```
 
-Example: Running a code cell
-```
-Click ▶ → POST /cell/{id}/run → kernel.execute() → Update cell.output → Return CellView() → Replace #cell-{id}
+**Example: Running a code cell**
+
+```mermaid
+flowchart LR
+    A["Click ▶"] --> B["POST /cell/{id}/run"]
+    B --> C["kernel.execute()"]
+    C --> D["Update cell.output"]
+    D --> E["Return CellView()"]
+    E --> F["Replace #cell-{id}"]
 ```
 
 ---
@@ -159,6 +187,156 @@ Textarea(cell.source,
     hx_trigger="blur changed",            # Only POST if changed
     hx_swap="none"                        # Don't update DOM
 )
+```
+
+---
+
+## Real-time Collaboration
+
+LLM Notebook supports real-time collaboration via WebSockets. Multiple users can view and edit the same notebook simultaneously.
+
+### Architecture
+
+```mermaid
+flowchart TB
+    subgraph WSLayer["WebSocket Layer"]
+        wsConn["ws_connections: Dict[notebook_id, List[send_func]]"]
+        wsDesc["Each notebook maintains a registry of connected WebSockets<br/>Messages are broadcast to all connections for that notebook"]
+    end
+
+    subgraph BroadcastEvents["Broadcast Events"]
+        ev1["cells_updated → Full #cells container HTML (add/delete/move)"]
+        ev2["cell_updated → Single cell HTML (run output, collapse)"]
+        ev3["stream_chunk → LLM streaming token (prompt cells)"]
+        ev4["stream_end → LLM streaming complete"]
+    end
+
+    WSLayer --> BroadcastEvents
+```
+
+### Key Functions
+
+```python
+# Broadcast helper - sends message to all connected clients
+async def broadcast_to_notebook(nb_id: str, message: dict, exclude_ws: Any = None):
+    """Broadcast a JSON message to all WebSocket connections for a notebook."""
+    if nb_id not in ws_connections:
+        return
+
+    msg = json.dumps(message)
+    exclude_id = id(exclude_ws) if exclude_ws else None
+
+    for ws_id, send in ws_connections[nb_id].items():
+        if ws_id != exclude_id:
+            try:
+                await send(msg)
+            except Exception:
+                pass  # Dead connections cleaned up later
+
+# Convert FastHTML components to HTML strings for transmission
+def to_html_string(component) -> str:
+    from fasthtml.common import to_xml
+    return to_xml(component)
+```
+
+### Message Types
+
+| Type | When Sent | Payload |
+|------|-----------|---------|
+| `cells_updated` | Cell add/delete/move | `{type, html: "<div id='cells'>..."}` |
+| `cell_updated` | Cell run, collapse, type change | `{type, cell_id, html: "<div id='cell-xxx'>..."}` |
+| `stream_chunk` | LLM streaming token | `{type, cell_id, chunk, thinking?}` |
+| `stream_end` | LLM streaming complete | `{type, cell_id}` |
+
+### Adding Broadcasting to a Route
+
+```python
+# Example: Adding broadcast to a new route
+@rt("/notebook/{nb_id}/cell/{cid}/custom-action")
+async def post(nb_id: str, cid: str):
+    nb = get_notebook(nb_id)
+    cell = find_cell(nb, cid)
+
+    # ... perform action ...
+
+    # Broadcast update to collaborators
+    await broadcast_to_notebook(nb_id, {
+        "type": "cell_updated",
+        "cell_id": cid,
+        "html": to_html_string(CellView(cell, nb_id))
+    })
+
+    # Return response for the requesting client
+    return CellView(cell, nb_id)
+```
+
+### Client-Side Handling
+
+```javascript
+// WebSocket message handler
+ws.onmessage = function(event) {
+    const data = JSON.parse(event.data);
+
+    if (data.type === 'cells_updated') {
+        // Replace entire cells container
+        handleCellsUpdated(data.html);
+    } else if (data.type === 'cell_updated') {
+        // Replace single cell (skip if user is editing it)
+        handleCellUpdated(data.cell_id, data.html);
+    } else if (data.type === 'stream_chunk') {
+        // Append to streaming response
+        appendToResponse(data.cell_id, data.chunk, data.thinking);
+    }
+};
+
+function handleCellsUpdated(html) {
+    const container = document.getElementById('cells');
+    if (container) {
+        container.outerHTML = html;
+        reinitializeAceEditors();  // Re-create Ace editors
+        renderAllPreviews();        // Re-render markdown
+    }
+}
+
+function handleCellUpdated(cellId, html) {
+    const cell = document.getElementById(`cell-${cellId}`);
+    if (cell) {
+        // Skip if user is editing this cell
+        const isEditing = cell.contains(document.activeElement);
+        if (!isEditing) {
+            cell.outerHTML = html;
+            // Reinitialize editor if code cell
+            if (cell.dataset.type === 'code') {
+                initAceEditor(cellId);
+            }
+        }
+    }
+}
+```
+
+### Smart Conflict Avoidance
+
+To prevent interrupting users who are actively editing:
+
+1. **Client-side check**: Before replacing a cell, check if the user is focused on any element within it
+2. **Streaming check**: Don't replace cells that are currently streaming
+3. **No typing sync**: Individual keystrokes are NOT broadcast (too expensive and disruptive)
+
+```javascript
+function handleCellUpdated(cellId, html) {
+    const cell = document.getElementById(`cell-${cellId}`);
+    if (cell) {
+        // Skip if user is actively editing or cell is streaming
+        const isEditing = cell.contains(document.activeElement);
+        const wasStreaming = cell.classList.contains('streaming');
+
+        if (isEditing || wasStreaming) {
+            return;  // Don't interrupt the user
+        }
+
+        cell.outerHTML = html;
+    }
+}
 ```
 
 ---

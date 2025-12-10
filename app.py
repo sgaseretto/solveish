@@ -349,8 +349,8 @@ notebooks: Dict[str, Notebook] = {}
 NOTEBOOKS_DIR = Path("notebooks")
 NOTEBOOKS_DIR.mkdir(exist_ok=True)
 
-# Track active WebSocket connections per notebook
-ws_connections: Dict[str, Dict[int, Any]] = {}
+# Track active WebSocket connections per notebook (list of send functions)
+ws_connections: Dict[str, List[Any]] = {}
 
 # Track cancelled cell generations
 cancelled_cells: set = set()
@@ -378,6 +378,54 @@ def save_notebook(notebook_id: str):
 
 def list_notebooks() -> List[str]:
     return [p.stem for p in NOTEBOOKS_DIR.glob("*.ipynb")]
+
+# ============================================================================
+# Collaborative WebSocket Broadcasting
+# ============================================================================
+
+async def broadcast_to_notebook(nb_id: str, component, exclude_send: Any = None):
+    """Broadcast an HTML component to all WebSocket connections for a notebook.
+
+    This sends HTML components directly via WebSocket. The JavaScript client
+    processes hx-swap-oob attributes to update the DOM.
+
+    Args:
+        nb_id: The notebook ID to broadcast to
+        component: FastHTML component to send
+        exclude_send: Optional send function to exclude (e.g., the sender)
+    """
+    if nb_id not in ws_connections or not ws_connections[nb_id]:
+        print(f"[BROADCAST] No connections for notebook {nb_id}")
+        return
+
+    connections = ws_connections[nb_id]
+    print(f"[BROADCAST] Sending to {len(connections)} connections for {nb_id}")
+
+    # Convert component to HTML string using to_xml
+    # FastHTML's str() on components returns the ID, not HTML
+    html_str = to_xml(component)
+    print(f"[BROADCAST] HTML length: {len(html_str)} chars, starts with: {html_str[:100]}")
+
+    # Track which connections are still alive
+    alive = []
+    sent_count = 0
+
+    for send in connections:
+        if send is exclude_send:
+            alive.append(send)  # Keep but don't send
+            continue
+        try:
+            # Send the HTML string directly
+            await send(html_str)
+            alive.append(send)
+            sent_count += 1
+        except Exception as e:
+            print(f"[BROADCAST] Failed to send (removing dead connection): {e}")
+            # Don't add to alive - this removes the dead connection
+
+    # Replace with only alive connections
+    ws_connections[nb_id] = alive
+    print(f"[BROADCAST] Sent to {sent_count} clients, {len(alive)} connections remain")
 
 # ============================================================================
 # CSS
@@ -1553,9 +1601,27 @@ let streamingCellId = null;
 function connectWebSocket(notebookId) {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${protocol}//${window.location.host}/ws/${notebookId}`);
-    
+
+    ws.onopen = function() {
+        console.log('[WS] Connected to notebook:', notebookId);
+        // Send join message to register this connection with the notebook
+        ws.send(JSON.stringify({type: 'join', notebook_id: notebookId}));
+    };
+
     ws.onmessage = function(event) {
-        const data = JSON.parse(event.data);
+        const msg = event.data;
+
+        // Check if message is HTML (OOB swap from collaborator) or JSON (streaming)
+        if (msg.startsWith('<')) {
+            // HTML with hx-swap-oob - process as OOB swap
+            console.log('[WS] Received OOB HTML swap');
+            processOOBSwap(msg);
+            return;
+        }
+
+        // JSON message for streaming, thinking indicators, etc.
+        const data = JSON.parse(msg);
+        console.log('[WS] Received message:', data.type, data.cell_id || '');
         if (data.type === 'stream_chunk') {
             // Skip if cancelled
             if (cancelledCells.has(data.cell_id)) return;
@@ -1569,9 +1635,14 @@ function connectWebSocket(notebookId) {
             hideThinkingIndicator(data.cell_id);
         }
     };
-    
+
     ws.onclose = function() {
+        console.log('[WS] Disconnected, reconnecting in 3s...');
         setTimeout(() => connectWebSocket(notebookId), 3000);
+    };
+
+    ws.onerror = function(error) {
+        console.error('[WS] Error:', error);
     };
 }
 
@@ -1644,6 +1715,145 @@ function startStreaming(cellId, useThinking) {
     }
     if (preview && useThinking) {
         preview.innerHTML = '<div class="thinking-indicator"><span>🧠</span> Thinking...</div>';
+    }
+}
+
+// ==================== Collaborative WebSocket OOB Swap Handler ====================
+
+function processOOBSwap(html) {
+    // Process HTML with hx-swap-oob attributes from WebSocket
+    // This handles both full cells container updates and single cell updates
+
+    // Parse the HTML to extract the element(s)
+    const template = document.createElement('template');
+    template.innerHTML = html.trim();
+    const elements = template.content.children;
+
+    for (const element of elements) {
+        const oobAttr = element.getAttribute('hx-swap-oob');
+        if (oobAttr !== 'true') continue;
+
+        const targetId = element.id;
+        if (!targetId) continue;
+
+        const target = document.getElementById(targetId);
+        if (!target) continue;
+
+        // Check if this is a cell update
+        if (targetId.startsWith('cell-')) {
+            const cellId = targetId.replace('cell-', '');
+            const isEditing = target.contains(document.activeElement);
+            const isStreaming = target.classList.contains('streaming');
+
+            // Skip update if user is editing this cell or it's streaming
+            if (isEditing || isStreaming) {
+                console.log('[WS] Skipping OOB swap for cell being edited/streamed:', cellId);
+                continue;
+            }
+
+            // Replace the cell
+            element.removeAttribute('hx-swap-oob');
+            target.replaceWith(element);
+
+            // Reinitialize Ace editor if it's a code cell
+            const newCell = document.getElementById(targetId);
+            if (newCell && newCell.dataset.type === 'code') {
+                setTimeout(() => initAceEditor(cellId), 0);
+            }
+
+            // Re-render previews for this cell
+            renderCellPreviews(cellId);
+        }
+        else if (targetId === 'cells') {
+            // Full cells container update
+            // Save currently focused cell ID before update
+            const focusedCell = document.activeElement?.closest('.cell');
+            const focusedCellId = focusedCell?.id?.replace('cell-', '');
+
+            // Check if any cell is being edited or streaming
+            const editingCell = focusedCell;
+            const streamingCell = document.querySelector('.cell.streaming');
+
+            // If user is editing or a cell is streaming, skip update
+            if (editingCell || streamingCell) {
+                console.log('[WS] Skipping cells container update - user editing or streaming');
+                continue;
+            }
+
+            // Replace the cells container
+            element.removeAttribute('hx-swap-oob');
+            target.replaceWith(element);
+
+            // Reinitialize Ace editors for all code cells
+            reinitializeAceEditors();
+
+            // Re-render all markdown previews
+            renderAllPreviews();
+
+            // Restore focus if possible
+            if (focusedCellId) {
+                const restoredCell = document.getElementById(`cell-${focusedCellId}`);
+                if (restoredCell) {
+                    setFocusedCell(focusedCellId);
+                }
+            }
+        }
+    }
+}
+
+function reinitializeAceEditors() {
+    // Destroy all existing Ace editors
+    for (const cellId of Object.keys(aceEditors)) {
+        destroyAceEditor(cellId);
+    }
+
+    // Find all code cells and initialize their editors
+    document.querySelectorAll('.cell[data-type="code"]').forEach(cell => {
+        const cellId = cell.id.replace('cell-', '');
+        setTimeout(() => initAceEditor(cellId), 0);
+    });
+}
+
+function renderAllPreviews() {
+    // Re-render all markdown previews after a collaborative update
+    document.querySelectorAll('.md-preview, .ai-preview, .prompt-preview').forEach(preview => {
+        const cellId = preview.dataset.cellId;
+        const field = preview.dataset.field;
+        if (cellId && field) {
+            renderCellPreviews(cellId);
+        }
+    });
+}
+
+function renderCellPreviews(cellId) {
+    // Render markdown preview for a specific cell
+    const cell = document.getElementById(`cell-${cellId}`);
+    if (!cell) return;
+
+    // Handle note cells
+    const notePreview = document.getElementById(`preview-${cellId}`);
+    if (notePreview) {
+        const textarea = document.getElementById(`source-${cellId}`);
+        if (textarea) {
+            notePreview.innerHTML = renderMarkdown(textarea.value);
+        }
+    }
+
+    // Handle prompt cells - render both prompt and output previews
+    const promptPreview = cell.querySelector(`[data-cell-id="${cellId}"][data-field="prompt"]`);
+    if (promptPreview) {
+        const promptTextarea = document.getElementById(`prompt-${cellId}`);
+        if (promptTextarea) {
+            promptPreview.innerHTML = renderMarkdown(promptTextarea.value);
+        }
+    }
+
+    const outputPreview = cell.querySelector(`[data-cell-id="${cellId}"][data-field="output"]`);
+    if (outputPreview) {
+        const outputTextarea = document.getElementById(`output-${cellId}`);
+        if (outputTextarea && outputTextarea.value) {
+            outputPreview.innerHTML = renderMarkdown(outputTextarea.value);
+        }
     }
 }
 """
@@ -1911,6 +2121,34 @@ def AllCells(nb: Notebook):
         items.extend([CellView(c, nb.id), AddButtons(i+1, nb.id)])
     return Div(*items, id="cells")
 
+def AllCellsOOB(nb: Notebook):
+    """Returns AllCells with hx-swap-oob for WebSocket broadcasting.
+
+    HTMX will automatically swap this element by ID when received via WebSocket.
+    """
+    items = [AddButtons(0, nb.id)]
+    for i, c in enumerate(nb.cells):
+        items.extend([CellView(c, nb.id), AddButtons(i+1, nb.id)])
+    return Div(*items, id="cells", hx_swap_oob="true")
+
+def CellViewOOB(cell: Cell, notebook_id: str):
+    """Returns CellView with hx-swap-oob for WebSocket broadcasting.
+
+    HTMX will automatically swap this element by ID when received via WebSocket.
+    """
+    # Get the regular cell view
+    cell_div = CellView(cell, notebook_id)
+    # The cell already has id=f"cell-{cell.id}", just need to add OOB attribute
+    # We need to recreate with the OOB attribute since CellView returns a complete Div
+    # Read the cell ID from the component and recreate with OOB
+    return Div(
+        *cell_div.children,
+        id=f"cell-{cell.id}",
+        cls=cell_div.attrs.get('class', ''),
+        hx_swap_oob="true",
+        **{k: v for k, v in cell_div.attrs.items() if k not in ('id', 'class')}
+    )
+
 def NotebookPage(nb: Notebook, notebook_list: List[str]):
     return Titled(
         f"{nb.title} - LLM Notebook",
@@ -1994,7 +2232,7 @@ def get(nb_id: str):
 
 # Cell operations - now include notebook ID in path
 @rt("/notebook/{nb_id}/cell/add")
-def post(nb_id: str, pos: int = -1, type: str = "code"):
+async def post(nb_id: str, pos: int = -1, type: str = "code"):
     nb = get_notebook(nb_id)
     if pos < 0:
         pos = len(nb.cells)
@@ -2003,12 +2241,20 @@ def post(nb_id: str, pos: int = -1, type: str = "code"):
         nb.cells.insert(pos, Cell(cell_type=type, output_collapse=1))
     else:
         nb.cells.insert(pos, Cell(cell_type=type))
+
+    # Broadcast to collaborators - send HTML with OOB swap
+    await broadcast_to_notebook(nb_id, AllCellsOOB(nb))
+
     return AllCells(nb)
 
 @rt("/notebook/{nb_id}/cell/{cid}")
-def delete(nb_id: str, cid: str):
+async def delete(nb_id: str, cid: str):
     nb = get_notebook(nb_id)
     nb.cells = [c for c in nb.cells if c.id != cid]
+
+    # Broadcast to collaborators - send HTML with OOB swap
+    await broadcast_to_notebook(nb_id, AllCellsOOB(nb))
+
     return AllCells(nb)
 
 @rt("/notebook/{nb_id}/cell/{cid}/source")
@@ -2030,18 +2276,22 @@ def post(nb_id: str, cid: str, output: str):
     return ""
 
 @rt("/notebook/{nb_id}/cell/{cid}/type")
-def post(nb_id: str, cid: str, cell_type: str):
+async def post(nb_id: str, cid: str, cell_type: str):
     nb = get_notebook(nb_id)
     for c in nb.cells:
         if c.id == cid:
             c.cell_type = cell_type
             c.output = ""
             c.execution_count = None
+
+            # Broadcast cell type change to collaborators using OOB swap
+            await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
+
             return CellView(c, nb.id)
     return ""
 
 @rt("/notebook/{nb_id}/cell/{cid}/move/{direction}")
-def post(nb_id: str, cid: str, direction: str):
+async def post(nb_id: str, cid: str, direction: str):
     nb = get_notebook(nb_id)
     for i, c in enumerate(nb.cells):
         if c.id == cid:
@@ -2050,23 +2300,36 @@ def post(nb_id: str, cid: str, direction: str):
             elif direction == "down" and i < len(nb.cells) - 1:
                 nb.cells[i], nb.cells[i+1] = nb.cells[i+1], nb.cells[i]
             break
+
+    # Broadcast to collaborators using OOB swap
+    await broadcast_to_notebook(nb_id, AllCellsOOB(nb))
+
     return AllCells(nb)
 
 @rt("/notebook/{nb_id}/cell/{cid}/collapse")
-def post(nb_id: str, cid: str, collapsed: str):
+async def post(nb_id: str, cid: str, collapsed: str):
     nb = get_notebook(nb_id)
+    cell = None
     for c in nb.cells:
         if c.id == cid:
+            cell = c
             c.collapsed = collapsed.lower() == "true"
             break
+
+    # Broadcast full collapse state change to collaborators using OOB swap
+    if cell:
+        await broadcast_to_notebook(nb_id, CellViewOOB(cell, nb_id))
+
     return ""
 
 @rt("/notebook/{nb_id}/cell/{cid}/collapse-section")
-def post(nb_id: str, cid: str, section: str, level: int):
+async def post(nb_id: str, cid: str, section: str, level: int):
     """Update collapse level for input or output section"""
     nb = get_notebook(nb_id)
+    cell = None
     for c in nb.cells:
         if c.id == cid:
+            cell = c
             if section == "input":
                 c.input_collapse = level
             elif section == "output":
@@ -2075,6 +2338,11 @@ def post(nb_id: str, cid: str, section: str, level: int):
                 c.input_collapse = level
                 c.output_collapse = level
             break
+
+    # Broadcast collapse state change to collaborators using OOB swap
+    if cell:
+        await broadcast_to_notebook(nb_id, CellViewOOB(cell, nb_id))
+
     return ""
 
 @rt("/notebook/{nb_id}/cell/{cid}/run")
@@ -2104,6 +2372,9 @@ async def post(nb_id: str, cid: str, source: str = None):
         c.execution_count = exec_count
         c.time_run = datetime.now().strftime("%H:%M:%S")
 
+        # Broadcast code cell output to collaborators using OOB swap
+        await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
+
     elif c.cell_type == "prompt":
         # Build context
         context_parts = []
@@ -2122,7 +2393,8 @@ async def post(nb_id: str, cid: str, source: str = None):
         # Remove from cancelled set if it was there
         cancelled_cells.discard(cid)
 
-        # Stream via WebSocket if available, otherwise collect
+        # Stream via WebSocket to all connected clients
+        # Collaborators will receive the final cell state via OOB broadcast after completion
         response_parts = []
         async for item in mock_llm_stream(c.source, context, c.use_thinking):
             # Check if cancelled
@@ -2130,12 +2402,12 @@ async def post(nb_id: str, cid: str, source: str = None):
                 cancelled_cells.discard(cid)
                 break
 
-            # Collect response chunks (always, regardless of WebSocket)
+            # Collect response chunks
             if item["type"] == "chunk":
                 response_parts.append(item["content"])
 
-            # Send via WebSocket if clients are connected
-            if nb_id in ws_connections:
+            # Send streaming updates via WebSocket
+            if nb_id in ws_connections and ws_connections[nb_id]:
                 if item["type"] == "thinking_start":
                     msg = json.dumps({"type": "thinking_start", "cell_id": cid})
                 elif item["type"] == "thinking_end":
@@ -2145,21 +2417,27 @@ async def post(nb_id: str, cid: str, source: str = None):
                 else:  # chunk
                     msg = json.dumps({"type": "stream_chunk", "cell_id": cid, "chunk": item["content"]})
 
-                for send in ws_connections[nb_id].values():
+                # Iterate over list (not dict.values())
+                for send in ws_connections[nb_id]:
                     try:
                         await send(msg)
-                    except: pass
+                    except:
+                        pass
 
         c.output = "".join(response_parts)
         c.time_run = datetime.now().strftime("%H:%M:%S")
 
-        # Send end signal
-        if nb_id in ws_connections:
+        # Send end signal to all clients
+        if nb_id in ws_connections and ws_connections[nb_id]:
             msg = json.dumps({"type": "stream_end", "cell_id": cid})
-            for send in ws_connections[nb_id].values():
+            for send in ws_connections[nb_id]:
                 try:
                     await send(msg)
-                except: pass
+                except:
+                    pass
+
+        # Broadcast final prompt cell state to collaborators using OOB swap
+        await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
 
     # Determine next cell ID for auto-focus
     next_cell_id = None
@@ -2171,6 +2449,9 @@ async def post(nb_id: str, cid: str, source: str = None):
         nb.cells.append(new_cell)
         new_cell_index = len(nb.cells) - 1
         next_cell_id = new_cell.id
+
+        # Broadcast new cell addition to collaborators using OOB swap
+        await broadcast_to_notebook(nb_id, AllCellsOOB(nb))
 
         # Return: updated cell (main) + new cell with AddButtons (OOB appended to #cells)
         # Use a wrapper div with hx-swap-oob to append the new elements
@@ -2203,34 +2484,50 @@ def post():
 # WebSocket for Streaming
 # ============================================================================
 
-def on_connect(ws, send, nb_id):
+# Use FastHTML's ws decorator with a simpler pattern
+# The key insight: we register on connect, not on first message
+
+async def ws_on_connect(send, scope):
+    """Called when WebSocket connection is established."""
+    # Extract notebook ID from scope path
+    path = scope.get('path', '')
+    # Path is like /ws/notebook_id
+    parts = path.strip('/').split('/')
+    nb_id = parts[1] if len(parts) > 1 else 'default'
+
     if nb_id not in ws_connections:
-        ws_connections[nb_id] = {}
-    ws_connections[nb_id][id(ws)] = send
+        ws_connections[nb_id] = []
+    ws_connections[nb_id].append(send)
+    print(f"[WS] Client connected to {nb_id}. Total: {len(ws_connections[nb_id])}", flush=True)
 
-def on_disconnect(ws, nb_id):
-    if nb_id in ws_connections:
-        ws_connections[nb_id].pop(id(ws), None)
+async def ws_on_disconnect(send, scope):
+    """Called when WebSocket connection is closed."""
+    path = scope.get('path', '')
+    parts = path.strip('/').split('/')
+    nb_id = parts[1] if len(parts) > 1 else 'default'
 
-@app.ws('/ws/{nb_id}')
-async def ws(ws, send, nb_id: str):
-    on_connect(ws, send, nb_id)
+    if nb_id in ws_connections and send in ws_connections[nb_id]:
+        ws_connections[nb_id].remove(send)
+        print(f"[WS] Client disconnected from {nb_id}. Total: {len(ws_connections[nb_id])}", flush=True)
+
+@app.ws('/ws/{nb_id}', conn=ws_on_connect, disconn=ws_on_disconnect)
+async def ws(msg, send, nb_id: str):
+    """Handle incoming WebSocket messages."""
+    # FastHTML may pass _empty or None for empty/initial messages - ignore them
+    if msg is None or not isinstance(msg, str) or not msg:
+        return
+
+    print(f"[WS] Message from {nb_id}: {msg[:50]}", flush=True)
+
     try:
-        while True:
-            msg = await ws.receive_text()
-            # Handle client messages
-            try:
-                data = json.loads(msg)
-                if data.get("type") == "cancel":
-                    cell_id = data.get("cell_id")
-                    if cell_id:
-                        cancelled_cells.add(cell_id)
-            except json.JSONDecodeError:
-                pass
-    except:
+        data = json.loads(msg)
+        if data.get("type") == "cancel":
+            cell_id = data.get("cell_id")
+            if cell_id:
+                cancelled_cells.add(cell_id)
+                print(f"[WS] Cancelled cell {cell_id}", flush=True)
+    except json.JSONDecodeError:
         pass
-    finally:
-        on_disconnect(ws, nb_id)
 
 # ============================================================================
 # Run
