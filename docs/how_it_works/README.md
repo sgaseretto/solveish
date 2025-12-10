@@ -11,6 +11,7 @@ Read the documents in numerical order for the best understanding of the system:
 | 1 | [01_state_management.md](01_state_management.md) | **Start here** - How notebooks and cells are stored, loaded, saved, and synchronized |
 | 2 | [02_cell_types.md](02_cell_types.md) | The three cell types (Code, Note, Prompt) - data model, rendering, execution, serialization |
 | 3 | [03_real_time_collaboration.md](03_real_time_collaboration.md) | WebSocket-based real-time collaboration - OOB swaps, broadcasting, conflict avoidance |
+| 4 | [04_kernel_execution.md](04_kernel_execution.md) | Subprocess kernel with streaming output, hard interrupt (SIGINT), and execution queue |
 
 ## Purpose
 
@@ -32,6 +33,9 @@ These documents are intended for developers who want to:
 | Add a new cell field | [01_state_management.md](01_state_management.md) → [02_cell_types.md](02_cell_types.md) |
 | Understand persistence | [01_state_management.md](01_state_management.md) |
 | Add new storage backend | [01_state_management.md](01_state_management.md) |
+| Debug code execution | [04_kernel_execution.md](04_kernel_execution.md) |
+| Add streaming outputs | [04_kernel_execution.md](04_kernel_execution.md) |
+| Implement cell queue | [04_kernel_execution.md](04_kernel_execution.md) |
 
 ## Related Documentation
 
