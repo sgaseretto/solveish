@@ -7,6 +7,17 @@ tqdm>=4.66.0
 matplotlib>=3.8.0
 numpy>=1.26.0
 
-# Optional: For real LLM integration
-# anthropic>=0.50.0  # Claude API
-# openai>=1.0.0      # OpenAI API
+# LLM integration
+# claudette for direct Anthropic API and AWS Bedrock
+claudette>=0.2.0
+anthropic>=0.40.0
+
+# claudette-agent for Claude Code subscription
+claudette-agent @ git+https://github.com/sgaseretto/claudette-agent.git
+
+# AWS support for Bedrock
+boto3>=1.34.0
+botocore>=1.34.0
+
+# dialoghelper for solveit compatibility
+dialoghelper

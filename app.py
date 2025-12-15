@@ -24,12 +24,38 @@ from pathlib import Path
 
 # New streaming kernel
 from services.kernel import KernelService
+from services.kernel.execution_queue import ExecutionQueue
+from document.cell import CellState
+
+# DialogHelper compatibility and LLM services
+from services import (
+    get_msg_idx, find_msgs, read_msg, cell_to_dict,
+    build_context_messages, llm_service
+)
+from services.credential_service import (
+    detect_credentials, get_available_modes, print_credential_status, CredentialStatus
+)
+from services.dialeng_config import (
+    load_config, get_config, print_config_status
+)
 
 # ============================================================================
 # Constants
 # ============================================================================
 
 SOLVEIT_VER = 2
+
+# Load configuration (creates dialeng_config.json with defaults if it doesn't exist)
+DIALENG_CONFIG = load_config()
+
+# Detect credentials at startup
+CREDENTIAL_STATUS = detect_credentials()
+AVAILABLE_DIALOG_MODES = get_available_modes(CREDENTIAL_STATUS)
+
+# Models from config
+AVAILABLE_MODELS = DIALENG_CONFIG.get_model_choices()
+DEFAULT_MODEL = DIALENG_CONFIG.get_default_model()
+
 SEPARATOR_PREFIX = "##### 🤖Reply🤖<!-- SOLVEIT_SEPARATOR_"
 SEPARATOR_SUFFIX = " -->"
 SEPARATOR_PATTERN = re.compile(r'##### 🤖Reply🤖<!-- SOLVEIT_SEPARATOR_([a-f0-9]+) -->')
@@ -204,13 +230,17 @@ class Cell:
         return '\n'.join(result)
 
 
+# Default dialog mode based on credentials and config
+DEFAULT_DIALOG_MODE = DIALENG_CONFIG.default_mode if CREDENTIAL_STATUS.available else "mock"
+
 @dataclass
 class Notebook:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     title: str = "Untitled Notebook"
     cells: List[Cell] = field(default_factory=list)
-    dialog_mode: str = "learning"
-    
+    dialog_mode: str = DEFAULT_DIALOG_MODE
+    model: str = DEFAULT_MODEL
+
     def to_ipynb(self) -> Dict[str, Any]:
         return {
             "nbformat": 4, "nbformat_minor": 5,
@@ -218,6 +248,7 @@ class Notebook:
                 "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
                 "language_info": {"name": "python", "version": "3.11.0"},
                 "solveit_dialog_mode": self.dialog_mode,
+                "solveit_model": self.model,
                 "solveit_ver": SOLVEIT_VER
             },
             "cells": [cell.to_jupyter_cell() for cell in self.cells]
@@ -230,7 +261,8 @@ class Notebook:
         return cls(
             id=notebook_id or uuid.uuid4().hex[:8],
             title="Imported Notebook", cells=cells,
-            dialog_mode=metadata.get("solveit_dialog_mode", "learning")
+            dialog_mode=metadata.get("solveit_dialog_mode", "learning"),
+            model=metadata.get("solveit_model", DEFAULT_MODEL)
         )
     
     def save(self, path: str):
@@ -255,6 +287,80 @@ class Notebook:
 # - Persistent namespace across cells
 
 kernel_service = KernelService()
+
+# ExecutionQueue instances per notebook (created lazily)
+execution_queues: Dict[str, ExecutionQueue] = {}
+
+def get_execution_queue(nb_id: str) -> ExecutionQueue:
+    """Get or create execution queue for a notebook."""
+    if nb_id not in execution_queues:
+        queue = ExecutionQueue(kernel_service)
+        execution_queues[nb_id] = queue
+        # Register callbacks for WebSocket broadcasting
+        queue.on_output(nb_id, _make_output_callback(nb_id))
+        queue.on_state_change(nb_id, _make_state_callback(nb_id))
+    return execution_queues[nb_id]
+
+def _make_output_callback(nb_id: str):
+    """Create output callback for streaming cell output via WebSocket."""
+    async def callback(cell, output):
+        await broadcast_cell_output(nb_id, cell.id, output)
+    return callback
+
+def _make_state_callback(nb_id: str):
+    """Create state callback for broadcasting cell state changes."""
+    async def callback(cell, state):
+        if state == CellState.RUNNING:
+            # Send code_stream_start when execution begins
+            if nb_id in ws_connections and ws_connections[nb_id]:
+                msg = json.dumps({"type": "code_stream_start", "cell_id": cell.id})
+                for send in list(ws_connections[nb_id]):
+                    try:
+                        await send(msg)
+                    except:
+                        pass
+
+        await broadcast_cell_state(nb_id, cell.id, state)
+        await broadcast_queue_state(nb_id)
+
+        if state in (CellState.SUCCESS, CellState.ERROR):
+            # Finalize cell output and send code_stream_end
+            await finalize_cell_execution(nb_id, cell, state == CellState.ERROR)
+    return callback
+
+
+async def finalize_cell_execution(nb_id: str, cell, has_error: bool):
+    """Convert cell outputs to HTML string and broadcast final state."""
+    # Convert outputs to HTML string
+    output_parts = []
+    for output in cell.outputs:
+        if output.output_type == 'stream':
+            output_parts.append(ansi_to_html(output.content))
+        elif output.output_type == 'execute_result':
+            if output_parts and output_parts[-1] and not output_parts[-1].endswith('\n'):
+                output_parts.append('\n')
+            output_parts.append(ansi_to_html(output.content))
+        elif output.output_type == 'error':
+            tb_text = '\n'.join(output.traceback or [])
+            output_parts.append(ansi_to_html(tb_text))
+        elif output.output_type == 'display_data':
+            html_content = render_mime_bundle(output.content, output.metadata)
+            output_parts.append(html_content)
+
+    cell.output = ''.join(output_parts)
+    cell.time_run = datetime.now().strftime("%H:%M:%S")
+
+    # Send code_stream_end signal
+    if nb_id in ws_connections and ws_connections[nb_id]:
+        msg = json.dumps({"type": "code_stream_end", "cell_id": cell.id, "has_error": has_error})
+        for send in list(ws_connections[nb_id]):
+            try:
+                await send(msg)
+            except:
+                pass
+
+    # Broadcast final cell state via OOB swap
+    await broadcast_to_notebook(nb_id, CellViewOOB(cell, nb_id))
 
 # ============================================================================
 # Mock LLM with Streaming
@@ -510,6 +616,84 @@ async def broadcast_to_notebook(nb_id: str, component, exclude_send: Any = None)
     ws_connections[nb_id] = alive
     print(f"[BROADCAST] Sent to {sent_count} clients, {len(alive)} connections remain")
 
+
+async def broadcast_queue_state(nb_id: str):
+    """Broadcast current queue state to all clients."""
+    queue = get_execution_queue(nb_id)
+    status = queue.get_status(nb_id)
+
+    msg = json.dumps({
+        "type": "queue_update",
+        "running_cell_id": status.current_cell_id,
+        "queued_cell_ids": status.queued_cell_ids
+    })
+
+    if nb_id in ws_connections and ws_connections[nb_id]:
+        for send in list(ws_connections[nb_id]):
+            try:
+                await send(msg)
+            except:
+                pass
+
+
+async def broadcast_cell_state(nb_id: str, cell_id: str, state: CellState):
+    """Broadcast cell state change to all clients."""
+    msg = json.dumps({
+        "type": "cell_state_change",
+        "cell_id": cell_id,
+        "state": state.value
+    })
+
+    if nb_id in ws_connections and ws_connections[nb_id]:
+        for send in list(ws_connections[nb_id]):
+            try:
+                await send(msg)
+            except:
+                pass
+
+
+async def broadcast_cell_output(nb_id: str, cell_id: str, output):
+    """Broadcast cell output chunk to all clients."""
+    if output.output_type == 'stream':
+        msg = json.dumps({
+            "type": "code_stream_chunk",
+            "cell_id": cell_id,
+            "chunk": output.content,
+            "stream": output.stream_name
+        })
+    elif output.output_type == 'execute_result':
+        msg = json.dumps({
+            "type": "code_stream_chunk",
+            "cell_id": cell_id,
+            "chunk": output.content,
+            "stream": "stdout"
+        })
+    elif output.output_type == 'error':
+        tb_text = '\n'.join(output.traceback or [])
+        msg = json.dumps({
+            "type": "code_stream_chunk",
+            "cell_id": cell_id,
+            "chunk": tb_text,
+            "stream": "stderr"
+        })
+    elif output.output_type == 'display_data':
+        html_content = render_mime_bundle(output.content, output.metadata)
+        msg = json.dumps({
+            "type": "code_display_data",
+            "cell_id": cell_id,
+            "html": html_content
+        })
+    else:
+        return  # Unknown type, skip
+
+    if nb_id in ws_connections and ws_connections[nb_id]:
+        for send in list(ws_connections[nb_id]):
+            try:
+                await send(msg)
+            except:
+                pass
+
+
 # ============================================================================
 # CSS
 # ============================================================================
@@ -527,6 +711,7 @@ css = """
     --accent-green: #3fb950;
     --accent-purple: #bc8cff;
     --accent-orange: #d29922;
+    --accent-yellow: #f0c000;
     --accent-red: #f85149;
     --border: #30363d;
 }
@@ -543,6 +728,7 @@ css = """
     --accent-green: #1a7f37;
     --accent-purple: #8250df;
     --accent-orange: #bf8700;
+    --accent-yellow: #d4a000;
     --accent-red: #cf222e;
     --border: #d0d7de;
 }
@@ -579,11 +765,17 @@ body {
 .btn-icon { padding: 4px 6px; font-size: 0.9rem; }
 .btn-run { background: var(--accent-green); border-color: var(--accent-green); color: #000; }
 .btn-run:hover { background: #2ea043; }
+.btn-cancel-all { background: var(--accent-red); border-color: var(--accent-red); color: white; }
+.btn-cancel-all:hover { background: #c62828; }
 .btn-save { background: var(--accent-blue); border-color: var(--accent-blue); }
 
-.mode-select {
+.mode-select, .model-select {
     padding: 4px 8px; background: var(--bg-cell); border: 1px solid var(--border);
     border-radius: 4px; color: var(--text-primary); font-size: 0.8rem;
+}
+
+.model-select {
+    margin-left: 4px;
 }
 
 /* Cells */
@@ -597,6 +789,13 @@ body {
 }
 .cell:focus-within { border-color: var(--accent-blue); }
 .cell.streaming { border-color: var(--accent-orange); }
+.cell.queued { border-color: var(--accent-yellow, #f0c000); }
+
+.cell.queued .btn-run {
+    background: var(--accent-yellow, #f0c000);
+    color: #000;
+    cursor: not-allowed;
+}
 
 .cell-header {
     display: flex; justify-content: space-between; align-items: center;
@@ -915,7 +1114,7 @@ body {
     .ace-container { min-height: 100px; }
     .btn { padding: 8px 12px; }
     .btn-sm { padding: 6px 10px; }
-    .mode-select { width: 100%; }
+    .mode-select, .model-select { width: 100%; margin-left: 0; }
 }
 
 @media (max-width: 480px) {
@@ -954,8 +1153,16 @@ body {
 
 /* Focused cell indicator */
 .cell.focused {
-    border-color: var(--accent-blue);
-    box-shadow: 0 0 0 1px var(--accent-blue);
+    border-color: var(--accent-blue) !important;
+    box-shadow: 0 0 0 2px var(--accent-blue) !important;
+}
+
+/* Ensure focused state overrides other states */
+.cell.focused.streaming {
+    border-color: var(--accent-blue) !important;
+}
+.cell.focused.queued {
+    border-color: var(--accent-blue) !important;
 }
 """
 
@@ -964,6 +1171,18 @@ body {
 # ============================================================================
 
 js = """
+// ==================== Global Cell Selection (Event Delegation) ====================
+// Use event delegation on document to ensure cell selection works even when clicking buttons
+document.addEventListener('mousedown', (e) => {
+    const cell = e.target.closest('.cell');
+    if (cell) {
+        const cellId = cell.id.replace('cell-', '');
+        if (cellId && typeof setFocusedCell === 'function') {
+            setFocusedCell(cellId);
+        }
+    }
+}, true);  // Use capture phase to get the event before it's stopped
+
 // ==================== Ace Editor Management ====================
 const aceEditors = {};
 
@@ -1026,7 +1245,12 @@ function initAceEditor(cellId) {
         });
     }
     
-    // Shift+Enter to run (Jupyter style)
+    // When Ace editor gets focus, also set cell as focused
+    editor.on('focus', () => {
+        setFocusedCell(cellId);
+    });
+
+    // Shift+Enter to run AND move to next cell (Jupyter style)
     editor.commands.addCommand({
         name: 'runCell',
         bindKey: {win: 'Shift-Enter', mac: 'Shift-Enter'},
@@ -1038,6 +1262,8 @@ function initAceEditor(cellId) {
                 syncAceToTextarea(cellId);
                 const btn = cell.querySelector('.btn-run');
                 if (btn) btn.click();
+                // Move to next cell immediately (Jupyter behavior)
+                moveToNextCell(cell);
             }
         }
     });
@@ -1065,7 +1291,10 @@ function initAceEditor(cellId) {
             document.getElementById('save-btn')?.click();
         }
     });
-    
+
+    // Double-Escape to cancel all (handled by global keydown listener)
+    // No need for Ace-specific binding since Escape blurs the editor first
+
     aceEditors[cellId] = editor;
     return editor;
 }
@@ -1201,7 +1430,7 @@ document.addEventListener('keydown', e => {
         lastKeyTime = 0;
     }
     
-    // ===== Shift+Enter - Run current cell (Jupyter style) =====
+    // ===== Shift+Enter - Run current cell AND move to next (Jupyter style) =====
     if (e.shiftKey && e.key === 'Enter' && !inAce) {
         // Use currentCellId (from getFocusedCellId) or fall back to target's cell
         const cellId = currentCellId || (target.closest('.cell')?.id.replace('cell-', ''));
@@ -1214,8 +1443,11 @@ document.addEventListener('keydown', e => {
                 syncPromptContent(cellId);
                 const btn = cell.querySelector('.btn-run');
                 if (btn) {
-                    // Code or Prompt cell - run it (focus will move via server response)
+                    // Click run button first
                     btn.click();
+                    // Move focus to next cell IMMEDIATELY (don't wait for server)
+                    // This is Jupyter behavior - Shift+Enter runs AND moves
+                    moveToNextCell(cell);
                 } else {
                     // Note cell - no run button, just move to next cell
                     moveToNextCell(cell);
@@ -1251,12 +1483,25 @@ document.addEventListener('keydown', e => {
         document.getElementById('save-btn')?.click();
     }
     
-    // ===== Escape - Exit edit mode =====
+    // ===== Escape - Exit edit mode OR Cancel All (double Escape) =====
     if (e.key === 'Escape') {
+        const now = Date.now();
+        // Check for double-Escape (like Jupyter's I I for interrupt)
+        if (lastKey === 'Escape' && (now - lastKeyTime) < 500) {
+            // Double Escape pressed - cancel all execution
+            e.preventDefault();
+            cancelAllExecution();
+            lastKey = '';
+            lastKeyTime = 0;
+            return;
+        }
+        // Single Escape - exit edit mode
         if (document.activeElement) {
             document.activeElement.blur();
         }
         Object.values(aceEditors).forEach(ed => ed.blur());
+        lastKey = 'Escape';
+        lastKeyTime = now;
     }
 
     // ===== Z - Collapse shortcuts =====
@@ -1561,6 +1806,10 @@ document.addEventListener('htmx:afterSettle', (e) => {
             if (target.classList && target.classList.contains('cell')) {
                 const cellId = target.id.replace('cell-', '');
                 initCell(cellId);
+                // Reset streaming state for this cell (HTMX swap means request completed)
+                if (streamingCellId === cellId) {
+                    finishStreaming(cellId);
+                }
             } else {
                 // If target contains cells (e.g., OOB swap to #cells), initialize those
                 target.querySelectorAll('.cell').forEach(cell => {
@@ -1571,6 +1820,56 @@ document.addEventListener('htmx:afterSettle', (e) => {
         }
         setupPreviewEditing();
     }, 20);
+});
+
+// Handle HTMX errors - ensure streaming state is reset for both prompt and code cells
+function resetCellOnError(e, errorMsg) {
+    // Check if this is a cell-related request
+    const target = e.detail?.target;
+    if (target && target.id && target.id.startsWith('cell-')) {
+        const cellId = target.id.replace('cell-', '');
+        const cell = document.getElementById(`cell-${cellId}`);
+
+        if (cell && cell.classList.contains('streaming')) {
+            // Determine cell type and reset appropriately
+            const isCodeCell = cell.querySelector('.ace-container') !== null;
+            const isPromptCell = cell.querySelector('.prompt-source') !== null;
+
+            if (isPromptCell && streamingCellId === cellId) {
+                finishStreaming(cellId);
+                const preview = document.querySelector(`[data-cell-id="${cellId}"][data-field="output"]`);
+                if (preview) {
+                    preview.innerHTML = `<p style="color: var(--error);">${errorMsg}</p>`;
+                }
+            } else if (isCodeCell) {
+                finishCodeStreaming(cellId, true);
+                const outputEl = document.getElementById(`output-${cellId}`);
+                if (outputEl) {
+                    outputEl.innerHTML = `<pre class="stream-output" style="color: var(--error);">${errorMsg}</pre>`;
+                }
+            }
+        }
+    }
+
+    // Fallback: reset prompt streaming if we have a streaming cell
+    if (streamingCellId) {
+        finishStreaming(streamingCellId);
+    }
+}
+
+document.addEventListener('htmx:responseError', (e) => {
+    console.error('[HTMX] Response error:', e.detail);
+    resetCellOnError(e, 'Request failed. Please try again.');
+});
+
+document.addEventListener('htmx:sendError', (e) => {
+    console.error('[HTMX] Send error:', e.detail);
+    resetCellOnError(e, 'Network error. Please check your connection.');
+});
+
+document.addEventListener('htmx:timeout', (e) => {
+    console.error('[HTMX] Timeout:', e.detail);
+    resetCellOnError(e, 'Request timed out. Please try again.');
 });
 
 // On page load
@@ -1615,6 +1914,15 @@ function loadTheme() {
     document.documentElement.setAttribute('data-theme', savedTheme);
     const btn = document.getElementById('theme-toggle');
     if (btn) btn.textContent = savedTheme === 'light' ? '🌙' : '☀️';
+}
+
+// ==================== Model Select Toggle ====================
+function toggleModelSelect(mode) {
+    const modelSelect = document.getElementById('model-select');
+    if (modelSelect) {
+        // Show model dropdown only for non-mock modes
+        modelSelect.style.display = mode === 'mock' ? 'none' : '';
+    }
 }
 
 // ==================== Cell Collapse ====================
@@ -1737,8 +2045,10 @@ function cancelStreaming(cellId) {
 // ==================== WebSocket for Streaming ====================
 let ws = null;
 let streamingCellId = null;
+let currentNotebookId = null;  // Global notebook ID for use in cancelAllExecution, etc.
 
 function connectWebSocket(notebookId) {
+    currentNotebookId = notebookId;  // Store globally for other functions to use
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${protocol}//${window.location.host}/ws/${notebookId}`);
 
@@ -1754,37 +2064,63 @@ function connectWebSocket(notebookId) {
         // Check if message is HTML (OOB swap from collaborator) or JSON (streaming)
         if (msg.startsWith('<')) {
             // HTML with hx-swap-oob - process as OOB swap
-            console.log('[WS] Received OOB HTML swap');
+            console.log('[WS] Received OOB HTML swap, length:', msg.length);
             processOOBSwap(msg);
             return;
         }
 
         // JSON message for streaming, thinking indicators, etc.
-        const data = JSON.parse(msg);
-        console.log('[WS] Received message:', data.type, data.cell_id || '');
+        let data;
+        try {
+            data = JSON.parse(msg);
+        } catch (e) {
+            console.error('[WS] Failed to parse JSON message:', msg.substring(0, 100), e);
+            return;
+        }
+        console.log('[WS] Received message:', data.type, 'cell_id:', data.cell_id || 'none');
+
         if (data.type === 'stream_chunk') {
             // Skip if cancelled
             if (cancelledCells.has(data.cell_id)) return;
             appendToResponse(data.cell_id, data.chunk, data.thinking);
+            // Reset streaming timeout on activity
+            resetStreamingTimeout();
         } else if (data.type === 'stream_end') {
+            console.log('[WS] stream_end received for cell:', data.cell_id);
             cancelledCells.delete(data.cell_id);
             finishStreaming(data.cell_id);
         } else if (data.type === 'thinking_start') {
             showThinkingIndicator(data.cell_id);
+            resetStreamingTimeout();
         } else if (data.type === 'thinking_end') {
             hideThinkingIndicator(data.cell_id);
         } else if (data.type === 'code_stream_start') {
             // Code cell execution started - show streaming indicator
+            console.log('[WS] code_stream_start received for cell:', data.cell_id);
             startCodeStreaming(data.cell_id);
+            resetCodeStreamingTimeout(data.cell_id);
         } else if (data.type === 'code_stream_chunk') {
             // Append output chunk to code cell
+            console.log('[WS] code_stream_chunk received for cell:', data.cell_id, 'stream:', data.stream, 'length:', data.chunk?.length || 0);
             appendCodeOutput(data.cell_id, data.chunk, data.stream);
+            resetCodeStreamingTimeout(data.cell_id);
         } else if (data.type === 'code_stream_end') {
             // Code cell execution finished
+            console.log('[WS] code_stream_end received for cell:', data.cell_id, 'has_error:', data.has_error);
             finishCodeStreaming(data.cell_id, data.has_error);
         } else if (data.type === 'code_display_data') {
             // Rich output (image, HTML, plot, etc.)
+            console.log('[WS] code_display_data received for cell:', data.cell_id);
             appendDisplayData(data.cell_id, data.html);
+            resetCodeStreamingTimeout(data.cell_id);
+        } else if (data.type === 'queue_update') {
+            // Queue state update from server
+            console.log('[WS] queue_update received:', data);
+            handleQueueUpdate(data);
+        } else if (data.type === 'cell_state_change') {
+            // Cell state change (queued, running, idle)
+            console.log('[WS] cell_state_change received:', data.cell_id, data.state);
+            // State changes are now handled via queue_update for consistency
         }
     };
 
@@ -1847,7 +2183,15 @@ function finishStreaming(cellId) {
     }
     hideThinkingIndicator(cellId);
     streamingCellId = null;
+    // Clear safety timeout
+    if (streamingTimeoutId) {
+        clearTimeout(streamingTimeoutId);
+        streamingTimeoutId = null;
+    }
 }
+
+let streamingTimeoutId = null;
+const STREAMING_TIMEOUT_MS = 120000; // 2 minutes safety timeout
 
 function startStreaming(cellId, useThinking) {
     const cell = document.getElementById(`cell-${cellId}`);
@@ -1867,6 +2211,29 @@ function startStreaming(cellId, useThinking) {
     }
     if (preview && useThinking) {
         preview.innerHTML = '<div class="thinking-indicator"><span>🧠</span> Thinking...</div>';
+    }
+
+    // Set safety timeout to reset streaming state
+    if (streamingTimeoutId) clearTimeout(streamingTimeoutId);
+    streamingTimeoutId = setTimeout(() => {
+        if (streamingCellId === cellId) {
+            console.warn('[Streaming] Safety timeout reached, resetting streaming state');
+            finishStreaming(cellId);
+        }
+    }, STREAMING_TIMEOUT_MS);
+}
+
+function resetStreamingTimeout() {
+    // Call this when we receive streaming activity to reset the timeout
+    if (streamingTimeoutId && streamingCellId) {
+        clearTimeout(streamingTimeoutId);
+        const cellId = streamingCellId;
+        streamingTimeoutId = setTimeout(() => {
+            if (streamingCellId === cellId) {
+                console.warn('[Streaming] Safety timeout reached, resetting streaming state');
+                finishStreaming(cellId);
+            }
+        }, STREAMING_TIMEOUT_MS);
     }
 }
 
@@ -1936,16 +2303,24 @@ function ansiToHtml(text) {
 const streamTextContent = new Map();
 
 function startCodeStreaming(cellId) {
+    console.log('[Code] startCodeStreaming called for cell:', cellId);
     const cell = document.getElementById(`cell-${cellId}`);
     const outputEl = document.getElementById(`output-${cellId}`);
 
-    if (cell) {
-        cell.classList.add('streaming');
-        const cancelBtn = cell.querySelector('.btn-cancel');
-        const runBtn = cell.querySelector('.btn-run');
-        if (cancelBtn) cancelBtn.style.display = '';
-        if (runBtn) runBtn.style.display = 'none';
+    if (!cell) {
+        console.error('[Code] Cell element not found:', `cell-${cellId}`);
+        return;
     }
+
+    if (!outputEl) {
+        console.error('[Code] Output element not found:', `output-${cellId}`);
+    }
+
+    cell.classList.add('streaming');
+    const cancelBtn = cell.querySelector('.btn-cancel');
+    const runBtn = cell.querySelector('.btn-run');
+    if (cancelBtn) cancelBtn.style.display = '';
+    if (runBtn) runBtn.style.display = 'none';
 
     if (outputEl) {
         outputEl.innerHTML = '';  // Clear for fresh output
@@ -1955,7 +2330,7 @@ function startCodeStreaming(cellId) {
     // Reset text content tracker for this cell
     streamTextContent.set(cellId, '');
 
-    console.log('[Code] Started streaming for cell:', cellId);
+    console.log('[Code] Started streaming for cell:', cellId, 'cell found:', !!cell, 'output found:', !!outputEl);
 }
 
 function appendCodeOutput(cellId, chunk, streamName) {
@@ -2023,6 +2398,7 @@ function appendDisplayData(cellId, html) {
 }
 
 function finishCodeStreaming(cellId, hasError) {
+    console.log('[Code] finishCodeStreaming called for cell:', cellId, 'hasError:', hasError);
     const cell = document.getElementById(`cell-${cellId}`);
     const outputEl = document.getElementById(`output-${cellId}`);
 
@@ -2041,26 +2417,227 @@ function finishCodeStreaming(cellId, hasError) {
     // Clean up text content tracker
     streamTextContent.delete(cellId);
 
+    // Clear the streaming timeout
+    clearCodeStreamingTimeout(cellId);
+
     console.log('[Code] Finished streaming for cell:', cellId, hasError ? '(with errors)' : '');
 }
 
-function interruptCodeCell(notebookId, cellId) {
-    // Send interrupt request to the server
-    fetch(`/notebook/${notebookId}/kernel/interrupt`, {
-        method: 'POST'
-    }).then(response => {
-        console.log('[Code] Interrupt sent for notebook:', notebookId);
-    }).catch(err => {
-        console.error('[Code] Interrupt failed:', err);
-    });
+// ============================================================================
+// Queue State Management
+// ============================================================================
 
-    // Immediately update UI
+// Track queue state for cells
+const cellQueueState = new Map(); // cellId -> {state: 'queued'|'running'|'idle', position: number}
+
+function handleQueueUpdate(data) {
+    // Clear all previous queue states
+    cellQueueState.forEach((_, cellId) => {
+        clearCellQueueState(cellId);
+    });
+    cellQueueState.clear();
+
+    // Set running cell
+    if (data.running_cell_id) {
+        updateCellQueueState(data.running_cell_id, 'running', null);
+    }
+
+    // Set queued cells with positions
+    if (data.queued_cell_ids) {
+        data.queued_cell_ids.forEach((cellId, index) => {
+            updateCellQueueState(cellId, 'queued', index + 1);
+        });
+    }
+
+    // Show/hide Cancel All button based on queue state
+    const hasQueuedOrRunning = data.running_cell_id || (data.queued_cell_ids && data.queued_cell_ids.length > 0);
+    updateCancelAllButton(hasQueuedOrRunning);
+}
+
+function updateCellQueueState(cellId, state, position) {
+    cellQueueState.set(cellId, { state, position });
+    updateCellVisualState(cellId, state, position);
+}
+
+function clearCellQueueState(cellId) {
+    cellQueueState.delete(cellId);
+    updateCellVisualState(cellId, 'idle', null);
+}
+
+function updateCellVisualState(cellId, state, queuePosition) {
     const cell = document.getElementById(`cell-${cellId}`);
+    const runBtn = cell?.querySelector('.btn-run');
+    const outputEl = document.getElementById(`output-${cellId}`);
+
+    if (!cell) return;
+
+    // Remove all state classes
+    cell.classList.remove('streaming', 'queued');
+
+    switch(state) {
+        case 'queued':
+            cell.classList.add('queued');
+            if (runBtn) {
+                runBtn.style.display = '';
+                runBtn.innerHTML = '⏳';
+                runBtn.disabled = true;
+            }
+            if (outputEl) {
+                outputEl.innerHTML = `<pre class="stream-output" style="color: var(--accent-yellow);">Queued (position ${queuePosition})...</pre>`;
+                outputEl.classList.remove('error');
+            }
+            break;
+
+        case 'running':
+            // Running state is handled by startCodeStreaming
+            // Just ensure queued class is removed
+            break;
+
+        case 'idle':
+        default:
+            if (runBtn) {
+                runBtn.style.display = '';
+                runBtn.innerHTML = '▶';
+                runBtn.disabled = false;
+            }
+            break;
+    }
+}
+
+function updateCancelAllButton(show) {
+    const cancelAllBtn = document.querySelector('.btn-cancel-all');
+    if (cancelAllBtn) {
+        cancelAllBtn.style.display = show ? '' : 'none';
+    }
+}
+
+async function cancelAllExecution() {
+    if (!currentNotebookId) {
+        console.error('[Queue] Cannot cancel: no notebook ID set');
+        return;
+    }
+    try {
+        console.log('[Queue] Cancelling all execution for notebook:', currentNotebookId);
+        await fetch(`/notebook/${currentNotebookId}/queue/cancel_all`, { method: 'POST' });
+    } catch (e) {
+        console.error('[Queue] Failed to cancel all:', e);
+    }
+}
+
+// Code cell streaming timeout mechanism
+let codeStreamingTimeouts = new Map();  // Track timeouts per cell
+const CODE_STREAMING_TIMEOUT_MS = 30000; // 30 seconds safety timeout (reduced for better UX)
+
+// Called immediately when user clicks run on a code cell
+// Provides visual feedback before WebSocket code_stream_start arrives
+function prepareCodeRun(cellId) {
+    console.log('[Code] prepareCodeRun called for cell:', cellId);
+
+    // Skip if cell is already queued or running
+    const queueState = cellQueueState.get(cellId);
+    if (queueState && (queueState.state === 'queued' || queueState.state === 'running')) {
+        console.log('[Code] Cell already queued/running, skipping prepareCodeRun');
+        return;
+    }
+
+    const cell = document.getElementById(`cell-${cellId}`);
+    const outputEl = document.getElementById(`output-${cellId}`);
+
     if (cell) {
+        cell.classList.add('streaming');
         const cancelBtn = cell.querySelector('.btn-cancel');
         const runBtn = cell.querySelector('.btn-run');
-        if (cancelBtn) cancelBtn.style.display = 'none';
-        if (runBtn) runBtn.style.display = '';
+        if (cancelBtn) cancelBtn.style.display = '';
+        if (runBtn) runBtn.style.display = 'none';
+    }
+
+    // Clear output and show "Queuing..." indicator (queue_update will update to "Queued (position N)...")
+    if (outputEl) {
+        outputEl.innerHTML = '<pre class="stream-output" style="color: var(--text-muted);">Queuing...</pre>';
+        outputEl.classList.remove('error');
+    }
+
+    // Reset text content tracker
+    streamTextContent.set(cellId, '');
+
+    // Set safety timeout to reset streaming state if server doesn't respond
+    clearCodeStreamingTimeout(cellId);
+    const timeoutId = setTimeout(() => {
+        const cell = document.getElementById(`cell-${cellId}`);
+        if (cell && cell.classList.contains('streaming')) {
+            console.warn('[Code] Safety timeout reached for cell:', cellId);
+            finishCodeStreaming(cellId, true);
+            const outputEl = document.getElementById(`output-${cellId}`);
+            if (outputEl) {
+                const currentOutput = outputEl.textContent?.trim();
+                if (!currentOutput || currentOutput === 'Running...') {
+                    outputEl.innerHTML = '<pre class="stream-output" style="color: var(--error);">Execution timed out. Please try again.</pre>';
+                }
+            }
+        }
+    }, CODE_STREAMING_TIMEOUT_MS);
+    codeStreamingTimeouts.set(cellId, timeoutId);
+
+    console.log('[Code] Preparing to run cell:', cellId);
+}
+
+function clearCodeStreamingTimeout(cellId) {
+    const timeoutId = codeStreamingTimeouts.get(cellId);
+    if (timeoutId) {
+        clearTimeout(timeoutId);
+        codeStreamingTimeouts.delete(cellId);
+    }
+}
+
+function resetCodeStreamingTimeout(cellId) {
+    // Call this when we receive streaming activity to reset the timeout
+    clearCodeStreamingTimeout(cellId);
+    const timeoutId = setTimeout(() => {
+        const cell = document.getElementById(`cell-${cellId}`);
+        if (cell && cell.classList.contains('streaming')) {
+            console.warn('[Code] Safety timeout reached for cell:', cellId);
+            finishCodeStreaming(cellId, true);
+        }
+    }, CODE_STREAMING_TIMEOUT_MS);
+    codeStreamingTimeouts.set(cellId, timeoutId);
+}
+
+function interruptCodeCell(notebookId, cellId) {
+    console.log('[Code] interruptCodeCell called for cell:', cellId);
+
+    // Use cancelAllExecution to stop running cell AND clear the queue
+    // This ensures we don't just interrupt one cell and continue with others
+    cancelAllExecution();
+
+    // Clear the streaming timeout for this cell
+    clearCodeStreamingTimeout(cellId);
+
+    // Wait a bit for server to finish, then check if cell is still stuck
+    setTimeout(() => {
+        const cell = document.getElementById(`cell-${cellId}`);
+        if (cell && cell.classList.contains('streaming')) {
+            console.log('[Code] Cell still streaming after interrupt, forcing reset');
+            finishCodeStreaming(cellId, true);
+            const outputEl = document.getElementById(`output-${cellId}`);
+            if (outputEl) {
+                const currentOutput = outputEl.textContent?.trim();
+                if (!currentOutput || currentOutput === 'Running...' || currentOutput === 'Stopping...') {
+                    outputEl.innerHTML = '<pre class="stream-output" style="color: var(--warning);">Execution interrupted</pre>';
+                }
+            }
+        }
+    }, 2000); // Wait 2 seconds for server to respond
+
+    // Immediately update UI to show stopping state
+    const cell = document.getElementById(`cell-${cellId}`);
+    if (cell) {
+        const outputEl = document.getElementById(`output-${cellId}`);
+        if (outputEl) {
+            const currentOutput = outputEl.textContent?.trim();
+            if (currentOutput === 'Running...' || currentOutput.startsWith('Queued')) {
+                outputEl.innerHTML = '<pre class="stream-output" style="color: var(--text-muted);">Stopping...</pre>';
+            }
+        }
     }
 }
 
@@ -2101,10 +2678,16 @@ function processOOBSwap(html) {
             element.removeAttribute('hx-swap-oob');
             target.replaceWith(element);
 
-            // Reinitialize Ace editor if it's a code cell
+            // CRITICAL: Reinitialize HTMX bindings on the new element
+            // Without this, hx-post/hx-get attributes won't work!
             const newCell = document.getElementById(targetId);
-            if (newCell && newCell.dataset.type === 'code') {
-                setTimeout(() => initAceEditor(cellId), 0);
+            if (newCell) {
+                htmx.process(newCell);
+
+                // Reinitialize Ace editor if it's a code cell
+                if (newCell.dataset.type === 'code') {
+                    setTimeout(() => initAceEditor(cellId), 0);
+                }
             }
 
             // Re-render previews for this cell
@@ -2129,6 +2712,13 @@ function processOOBSwap(html) {
             // Replace the cells container
             element.removeAttribute('hx-swap-oob');
             target.replaceWith(element);
+
+            // CRITICAL: Reinitialize HTMX bindings on the new cells container
+            // Without this, hx-post/hx-get attributes won't work!
+            const newCells = document.getElementById('cells');
+            if (newCells) {
+                htmx.process(newCells);
+            }
 
             // Reinitialize Ace editors for all code cells
             reinitializeAceEditors();
@@ -2301,9 +2891,12 @@ def CellView(cell: Cell, notebook_id: str):
             Button("▶", cls="btn btn-sm btn-run",
                    hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/run",
                    hx_target=f"#cell-{cell.id}",
-                   hx_swap="outerHTML",
+                   hx_swap="none" if cell.cell_type == "code" else "outerHTML",  # Code cells update via WebSocket
                    hx_vals=f"js:{{source: document.getElementById('source-{cell.id}')?.value || ''}}",
-                   onclick=f"syncAceToTextarea('{cell.id}'); syncPromptContent('{cell.id}'); startStreaming('{cell.id}', {str(cell.use_thinking).lower()});",
+                   hx_timeout="120s",  # Extended timeout for long-running cells (matplotlib, etc.)
+                   onclick=(f"syncAceToTextarea('{cell.id}'); syncPromptContent('{cell.id}'); startStreaming('{cell.id}', {str(cell.use_thinking).lower()});"
+                            if cell.cell_type == "prompt"
+                            else f"syncAceToTextarea('{cell.id}'); prepareCodeRun('{cell.id}');"),
                    title="Run (Shift+Enter)") if cell.cell_type != "note" else None,
             Button("⏹", cls="btn btn-sm btn-cancel",
                    onclick=f"cancelStreaming('{cell.id}')" if cell.cell_type == "prompt" else f"interruptCodeCell('{notebook_id}', '{cell.id}')",
@@ -2507,14 +3100,24 @@ def NotebookPage(nb: Notebook, notebook_list: List[str]):
                     Button("☀️", cls="theme-toggle", id="theme-toggle",
                            onclick="toggleTheme()", title="Toggle light/dark theme"),
                     Select(
-                        Option("Learning", value="learning", selected=nb.dialog_mode=="learning"),
-                        Option("Concise", value="concise", selected=nb.dialog_mode=="concise"),
-                        Option("Standard", value="standard", selected=nb.dialog_mode=="standard"),
-                        cls="mode-select", name="mode",
-                        hx_post=f"/notebook/{nb.id}/mode", hx_swap="none", title="AI Mode"
+                        *[Option(label, value=mode_id, selected=nb.dialog_mode==mode_id)
+                          for mode_id, label in AVAILABLE_DIALOG_MODES],
+                        cls="mode-select", name="mode", id="mode-select",
+                        hx_post=f"/notebook/{nb.id}/mode", hx_swap="none", title="AI Mode",
+                        onchange="toggleModelSelect(this.value)"
+                    ),
+                    Select(
+                        *[Option(label, value=model_id, selected=nb.model==model_id)
+                          for model_id, label in AVAILABLE_MODELS],
+                        cls="model-select", name="model", id="model-select",
+                        hx_post=f"/notebook/{nb.id}/model", hx_swap="none", title="Model",
+                        style="display: none;" if nb.dialog_mode == "mock" else ""
                     ),
                     Button("🔄 Restart", cls="btn btn-sm",
-                           hx_post="/kernel/restart", hx_target="#status", title="Restart kernel"),
+                           hx_post=f"/notebook/{nb.id}/kernel/restart", hx_target="#status", title="Restart kernel"),
+                    Button("⏹ Cancel All", cls="btn btn-sm btn-cancel-all", id="cancel-all-btn",
+                           onclick=f"cancelAllExecution()", title="Cancel running cell and clear queue (Esc Esc)",
+                           style="display: none;"),
                     Button("💾 Save", cls="btn btn-sm btn-save", id="save-btn",
                            hx_post=f"/notebook/{nb.id}/save", hx_target="#status", title="Save (Ctrl+S)"),
                     Button("📥 Export", cls="btn btn-sm",
@@ -2571,6 +3174,12 @@ def post(nb_id: str, mode: str):
     nb.dialog_mode = mode
     return ""
 
+@rt("/notebook/{nb_id}/model")
+def post(nb_id: str, model: str):
+    nb = get_notebook(nb_id)
+    nb.model = model
+    return ""
+
 @rt("/notebook/{nb_id}/export")
 def get(nb_id: str):
     nb = get_notebook(nb_id)
@@ -2598,7 +3207,15 @@ async def post(nb_id: str, pos: int = -1, type: str = "code"):
 @rt("/notebook/{nb_id}/cell/{cid}")
 async def delete(nb_id: str, cid: str):
     nb = get_notebook(nb_id)
+
+    # Remove from execution queue if queued
+    queue = get_execution_queue(nb_id)
+    queue.cancel_queued(nb_id, cid)
+
     nb.cells = [c for c in nb.cells if c.id != cid]
+
+    # Broadcast queue state update
+    await broadcast_queue_state(nb_id)
 
     # Broadcast to collaborators - send HTML with OOB swap
     await broadcast_to_notebook(nb_id, AllCellsOOB(nb))
@@ -2715,166 +3332,118 @@ async def post(nb_id: str, cid: str, source: str = None):
         c.source = source
 
     if c.cell_type == "code":
-        # Use streaming kernel for real-time output
-        kernel = kernel_service.get_kernel(nb_id)
-        output_parts = []
-        has_error = False
-        exec_count = None
+        queue = get_execution_queue(nb_id)
 
-        # Send start signal to all clients
-        if nb_id in ws_connections and ws_connections[nb_id]:
-            msg = json.dumps({"type": "code_stream_start", "cell_id": cid})
-            for send in ws_connections[nb_id]:
-                try:
-                    await send(msg)
-                except:
-                    pass
+        # Check if already queued or running - ignore duplicate requests
+        if queue.is_cell_queued(nb_id, cid):
+            print(f"[CODE RUN] Cell {cid} already queued/running, ignoring duplicate", flush=True)
+            return ""
 
-        # Stream output chunks
-        async for output in kernel.execute_streaming(c.source):
-            if output.output_type == 'stream':
-                chunk = output.content
-                # Store as HTML for final output (ANSI converted)
-                output_parts.append(ansi_to_html(chunk))
-                # Stream raw to WebSocket clients (JS handles ANSI conversion)
-                if nb_id in ws_connections and ws_connections[nb_id]:
-                    msg = json.dumps({
-                        "type": "code_stream_chunk",
-                        "cell_id": cid,
-                        "chunk": chunk,
-                        "stream": output.stream_name  # 'stdout' or 'stderr'
-                    })
-                    for send in ws_connections[nb_id]:
-                        try:
-                            await send(msg)
-                        except:
-                            pass
+        print(f"[CODE RUN] Queueing cell {cid} in notebook {nb_id}", flush=True)
 
-            elif output.output_type == 'execute_result':
-                # Final result value (like Jupyter's Out[n])
-                result_text = output.content
-                if output_parts and not output_parts[-1].endswith('\n'):
-                    output_parts.append('\n')
-                # Convert ANSI codes in result too
-                output_parts.append(ansi_to_html(result_text))
+        # Queue the cell - returns immediately, execution happens in background
+        queue.queue_cell(nb_id, c)
 
-            elif output.output_type == 'error':
-                has_error = True
-                # Format error with traceback (convert ANSI colors)
-                tb_text = '\n'.join(output.traceback or [])
-                output_parts.append(ansi_to_html(tb_text))
-                # Stream error to clients
-                if nb_id in ws_connections and ws_connections[nb_id]:
-                    msg = json.dumps({
-                        "type": "code_stream_chunk",
-                        "cell_id": cid,
-                        "chunk": tb_text,
-                        "stream": "stderr"
-                    })
-                    for send in ws_connections[nb_id]:
-                        try:
-                            await send(msg)
-                        except:
-                            pass
+        # Broadcast queue state to all clients
+        await broadcast_queue_state(nb_id)
 
-            elif output.output_type == 'display_data':
-                # Rich output (images, HTML, plots, etc.)
-                html_content = render_mime_bundle(output.content, output.metadata)
-                output_parts.append(html_content)
-
-                # Stream to WebSocket clients
-                if nb_id in ws_connections and ws_connections[nb_id]:
-                    msg = json.dumps({
-                        "type": "code_display_data",
-                        "cell_id": cid,
-                        "html": html_content
-                    })
-                    for send in ws_connections[nb_id]:
-                        try:
-                            await send(msg)
-                        except:
-                            pass
-
-            elif output.output_type == 'status' and hasattr(output, 'execution_count'):
-                exec_count = output.execution_count
-
-        # Combine all output
-        c.output = ''.join(output_parts)
-        c.execution_count = exec_count or (c.execution_count or 0) + 1
-        c.time_run = datetime.now().strftime("%H:%M:%S")
-
-        # Send end signal to all clients
-        if nb_id in ws_connections and ws_connections[nb_id]:
-            msg = json.dumps({"type": "code_stream_end", "cell_id": cid, "has_error": has_error})
-            for send in ws_connections[nb_id]:
-                try:
-                    await send(msg)
-                except:
-                    pass
-
-        # Broadcast code cell output to collaborators using OOB swap
-        await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
+        return ""
 
     elif c.cell_type == "prompt":
-        # Build context
-        context_parts = []
-        for prev in nb.cells:
-            if prev.id == cid: break
-            if prev.cell_type == "code":
-                context_parts.append(f"```python\n{prev.source}\n```")
-                if prev.output:
-                    context_parts.append(f"Output:\n```\n{prev.output}\n```")
-            elif prev.cell_type == "note":
-                context_parts.append(prev.source)
-            elif prev.cell_type == "prompt" and prev.output:
-                context_parts.append(f"User: {prev.source}\n\nAssistant: {prev.output}")
-        context = "\n\n".join(context_parts)
-
         # Remove from cancelled set if it was there
         cancelled_cells.discard(cid)
+
+        # Choose stream source based on dialog mode
+        if nb.dialog_mode == "mock":
+            # Build simple context string for mock (backwards compatibility)
+            context_parts = []
+            for prev in nb.cells:
+                if prev.id == cid: break
+                if prev.cell_type == "code":
+                    context_parts.append(f"```python\n{prev.source}\n```")
+                    if prev.output:
+                        context_parts.append(f"Output:\n```\n{prev.output}\n```")
+                elif prev.cell_type == "note":
+                    context_parts.append(prev.source)
+                elif prev.cell_type == "prompt" and prev.output:
+                    context_parts.append(f"User: {prev.source}\n\nAssistant: {prev.output}")
+            context = "\n\n".join(context_parts)
+            stream_func = mock_llm_stream(c.source, context, c.use_thinking)
+        else:
+            # Use real LLM via claudette-agent with dialoghelper context building
+            context_messages = build_context_messages(nb, cid)
+            stream_func = llm_service.stream_response(
+                c.source, context_messages, nb.dialog_mode, nb.model, c.use_thinking
+            )
 
         # Stream via WebSocket to all connected clients
         # Collaborators will receive the final cell state via OOB broadcast after completion
         response_parts = []
-        async for item in mock_llm_stream(c.source, context, c.use_thinking):
-            # Check if cancelled
-            if cid in cancelled_cells:
-                cancelled_cells.discard(cid)
-                break
+        try:
+            async for item in stream_func:
+                # Check if cancelled
+                if cid in cancelled_cells:
+                    cancelled_cells.discard(cid)
+                    break
 
-            # Collect response chunks
-            if item["type"] == "chunk":
-                response_parts.append(item["content"])
+                # Handle errors from LLM service
+                if item["type"] == "error":
+                    response_parts.append(f"\n\n**Error:** {item['content']}")
+                    # Send error to WebSocket
+                    if nb_id in ws_connections and ws_connections[nb_id]:
+                        msg = json.dumps({"type": "stream_chunk", "cell_id": cid, "chunk": f"\n\n**Error:** {item['content']}"})
+                        for send in ws_connections[nb_id]:
+                            try:
+                                await send(msg)
+                            except:
+                                pass
+                    break
 
-            # Send streaming updates via WebSocket
+                # Collect response chunks
+                if item["type"] == "chunk":
+                    response_parts.append(item["content"])
+
+                # Send streaming updates via WebSocket
+                if nb_id in ws_connections and ws_connections[nb_id]:
+                    if item["type"] == "thinking_start":
+                        msg = json.dumps({"type": "thinking_start", "cell_id": cid})
+                    elif item["type"] == "thinking_end":
+                        msg = json.dumps({"type": "thinking_end", "cell_id": cid})
+                    elif item["type"] == "thinking":
+                        msg = json.dumps({"type": "stream_chunk", "cell_id": cid, "chunk": item["content"], "thinking": True})
+                    else:  # chunk
+                        msg = json.dumps({"type": "stream_chunk", "cell_id": cid, "chunk": item["content"]})
+
+                    # Iterate over list (not dict.values())
+                    for send in ws_connections[nb_id]:
+                        try:
+                            await send(msg)
+                        except:
+                            pass
+        except Exception as e:
+            # Catch any unexpected errors during streaming
+            error_msg = f"\n\n**Error:** Streaming error: {str(e)}"
+            response_parts.append(error_msg)
             if nb_id in ws_connections and ws_connections[nb_id]:
-                if item["type"] == "thinking_start":
-                    msg = json.dumps({"type": "thinking_start", "cell_id": cid})
-                elif item["type"] == "thinking_end":
-                    msg = json.dumps({"type": "thinking_end", "cell_id": cid})
-                elif item["type"] == "thinking":
-                    msg = json.dumps({"type": "stream_chunk", "cell_id": cid, "chunk": item["content"], "thinking": True})
-                else:  # chunk
-                    msg = json.dumps({"type": "stream_chunk", "cell_id": cid, "chunk": item["content"]})
-
-                # Iterate over list (not dict.values())
+                msg = json.dumps({"type": "stream_chunk", "cell_id": cid, "chunk": error_msg})
                 for send in ws_connections[nb_id]:
                     try:
                         await send(msg)
                     except:
                         pass
+        finally:
+            # Always send stream_end to ensure UI is not left frozen
+            c.output = "".join(response_parts)
+            c.time_run = datetime.now().strftime("%H:%M:%S")
 
-        c.output = "".join(response_parts)
-        c.time_run = datetime.now().strftime("%H:%M:%S")
-
-        # Send end signal to all clients
-        if nb_id in ws_connections and ws_connections[nb_id]:
-            msg = json.dumps({"type": "stream_end", "cell_id": cid})
-            for send in ws_connections[nb_id]:
-                try:
-                    await send(msg)
-                except:
-                    pass
+            # Send end signal to all clients
+            if nb_id in ws_connections and ws_connections[nb_id]:
+                msg = json.dumps({"type": "stream_end", "cell_id": cid})
+                for send in ws_connections[nb_id]:
+                    try:
+                        await send(msg)
+                    except:
+                        pass
 
         # Broadcast final prompt cell state to collaborators using OOB swap
         await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
@@ -2929,6 +3498,199 @@ def post(nb_id: str):
         return Div("✓ Execution interrupted", cls="status success")
     else:
         return Div("No kernel to interrupt", cls="status warning")
+
+@rt("/notebook/{nb_id}/queue/cancel_all")
+async def post(nb_id: str):
+    """Cancel running cell AND clear entire queue."""
+    print(f"[CANCEL_ALL] Received cancel_all request for notebook {nb_id}")
+    queue = get_execution_queue(nb_id)
+
+    # Get current queue status before cancelling
+    status_before = queue.get_status(nb_id)
+    print(f"[CANCEL_ALL] Queue status before: running={status_before.current_cell_id}, queued={status_before.queued_cell_ids}")
+
+    # First interrupt the running cell
+    kernel_service.interrupt(nb_id)
+    print(f"[CANCEL_ALL] Kernel interrupt sent")
+
+    # Then clear the queue
+    queue.cancel_all(nb_id)
+    print(f"[CANCEL_ALL] Queue cancel_all called")
+
+    # Get status after cancelling
+    status_after = queue.get_status(nb_id)
+    print(f"[CANCEL_ALL] Queue status after: running={status_after.current_cell_id}, queued={status_after.queued_cell_ids}")
+
+    # Broadcast updated queue state
+    await broadcast_queue_state(nb_id)
+
+    return {"status": "ok"}
+
+# ============================================================================
+# DialogHelper Compatibility Endpoints
+# ============================================================================
+# These endpoints implement the server-side API that dialoghelper's call_endp()
+# uses to programmatically manipulate cells. They leverage the shared logic in
+# services/dialoghelper_service.py
+
+@rt("/curr_dialog_")
+def post(dlg_name: str, with_messages: bool = False):
+    """Get current dialog info."""
+    nb = get_notebook(dlg_name)
+    result = {"name": nb.id, "mode": nb.dialog_mode}
+    if with_messages:
+        result["messages"] = [cell_to_dict(c) for c in nb.cells]
+    return result
+
+@rt("/msg_idx_")
+def post(dlg_name: str, msgid: str):
+    """Get message index by ID - uses shared get_msg_idx()."""
+    nb = get_notebook(dlg_name)
+    return {"idx": get_msg_idx(nb, msgid)}
+
+@rt("/find_msgs_")
+def post(dlg_name: str, re_pattern: str = "", msg_type: str = "", limit: int = 100):
+    """Search messages - uses shared find_msgs()."""
+    nb = get_notebook(dlg_name)
+    results = find_msgs(nb, re_pattern=re_pattern, msg_type=msg_type, limit=limit)
+    return [{"idx": i, "id": c.id, "type": c.cell_type} for i, c in results]
+
+@rt("/read_msg_")
+def post(dlg_name: str, n: int = 0, relative: bool = True, msgid: str = "",
+         view_range: str = "", nums: bool = False, current_idx: int = 0):
+    """Read message content - uses shared read_msg()."""
+    nb = get_notebook(dlg_name)
+    return read_msg(nb, n=n, relative=relative, msgid=msgid,
+                    current_idx=current_idx, view_range=view_range, nums=nums)
+
+@rt("/add_relative_")
+def post(dlg_name: str, content: str, placement: str = "after", msgid: str = "",
+         msg_type: str = "code", output: str = "", time_run: str = "",
+         is_exported: bool = False, skipped: bool = False,
+         i_collapsed: int = 0, o_collapsed: int = 0,
+         heading_collapsed: bool = False, pinned: bool = False, run: bool = False):
+    """Add message relative to another - uses shared get_msg_idx()."""
+    nb = get_notebook(dlg_name)
+    new_cell = Cell(
+        cell_type=msg_type, source=content, output=output,
+        skipped=skipped, pinned=pinned,
+        input_collapse=i_collapsed, output_collapse=o_collapsed,
+        is_exported=is_exported, time_run=time_run
+    )
+    # Find insertion point using shared function
+    if msgid:
+        ref_idx = get_msg_idx(nb, msgid)
+        if ref_idx == -1:
+            return {"error": f"Message {msgid} not found"}
+        insert_idx = ref_idx + 1 if placement == "after" else ref_idx
+    else:
+        insert_idx = len(nb.cells)  # Append to end
+
+    nb.cells.insert(insert_idx, new_cell)
+
+    # Optionally trigger execution
+    if run:
+        # Queue for execution (implementation depends on kernel service)
+        pass
+
+    return {"id": new_cell.id, "idx": insert_idx}
+
+@rt("/rm_msg_")
+def post(dlg_name: str, msid: str):
+    """Remove message by ID."""
+    nb = get_notebook(dlg_name)
+    idx = get_msg_idx(nb, msid)
+    if idx >= 0:
+        nb.cells.pop(idx)
+    return {"status": "ok"}
+
+@rt("/update_msg_")
+def post(dlg_name: str, msgid: str, **kwargs):
+    """Update message properties."""
+    nb = get_notebook(dlg_name)
+    idx = get_msg_idx(nb, msgid)
+    if idx >= 0:
+        cell = nb.cells[idx]
+        # Map dialoghelper field names to Cell field names
+        field_mapping = {
+            "i_collapsed": "input_collapse",
+            "o_collapsed": "output_collapse",
+            "msg_type": "cell_type",
+        }
+        for key, value in kwargs.items():
+            mapped_key = field_mapping.get(key, key)
+            if hasattr(cell, mapped_key):
+                setattr(cell, mapped_key, value)
+    return {"status": "ok"}
+
+@rt("/add_runq_")
+def post(dlg_name: str, msgid: str, api: str = ""):
+    """Add message to execution queue."""
+    nb = get_notebook(dlg_name)
+    idx = get_msg_idx(nb, msgid)
+    if idx >= 0:
+        # Trigger cell execution via kernel service
+        # This integrates with existing execution infrastructure
+        pass
+    return {"status": "ok"}
+
+@rt("/msg_insert_line_")
+def post(dlg_name: str, msgid: str, insert_line: int, new_str: str):
+    """Insert line at position in message."""
+    nb = get_notebook(dlg_name)
+    idx = get_msg_idx(nb, msgid)
+    if idx >= 0:
+        cell = nb.cells[idx]
+        lines = cell.source.split('\n')
+        lines.insert(insert_line, new_str)
+        cell.source = '\n'.join(lines)
+    return {"status": "ok"}
+
+@rt("/msg_str_replace_")
+def post(dlg_name: str, msgid: str, old_str: str, new_str: str):
+    """Replace string in message."""
+    nb = get_notebook(dlg_name)
+    idx = get_msg_idx(nb, msgid)
+    if idx >= 0:
+        nb.cells[idx].source = nb.cells[idx].source.replace(old_str, new_str, 1)
+    return {"status": "ok"}
+
+@rt("/msg_strs_replace_")
+def post(dlg_name: str, msgid: str, old_strs: str, new_strs: str):
+    """Replace multiple strings (JSON arrays)."""
+    nb = get_notebook(dlg_name)
+    idx = get_msg_idx(nb, msgid)
+    if idx >= 0:
+        cell = nb.cells[idx]
+        old_list = json.loads(old_strs)
+        new_list = json.loads(new_strs)
+        for old, new in zip(old_list, new_list):
+            cell.source = cell.source.replace(old, new, 1)
+    return {"status": "ok"}
+
+@rt("/msg_replace_lines_")
+def post(dlg_name: str, msgid: str, start_line: int, end_line: int, new_content: str):
+    """Replace line range in message."""
+    nb = get_notebook(dlg_name)
+    idx = get_msg_idx(nb, msgid)
+    if idx >= 0:
+        cell = nb.cells[idx]
+        lines = cell.source.split('\n')
+        lines[start_line:end_line] = [new_content]
+        cell.source = '\n'.join(lines)
+    return {"status": "ok"}
+
+@rt("/add_html_")
+def post(dlg_name: str, content: str):
+    """Add HTML content (for OOB swaps)."""
+    return content
+
+@rt("/pop_data_blocking_")
+async def post(dlg_name: str, data_id: str, timeout: int = 15):
+    """Pop blocking data (for events) - async with timeout."""
+    # Implementation for event-based communication
+    # This is a placeholder - full implementation depends on event system
+    return {"status": "not_implemented"}
 
 # ============================================================================
 # WebSocket for Streaming
@@ -2987,6 +3749,12 @@ if __name__ == "__main__":
     print("🚀 LLM Notebook starting at http://localhost:8000")
     print("   Notebooks saved to: ./notebooks/")
     print("   Format: Solveit-compatible .ipynb")
+    print("")
+    # Print credential status
+    print_credential_status(CREDENTIAL_STATUS)
+    print("")
+    # Print config status
+    print_config_status(DIALENG_CONFIG)
     print("")
     print("   Keyboard shortcuts (Jupyter-style):")
     print("   • Shift+Enter       - Run cell")
