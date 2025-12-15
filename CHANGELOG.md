@@ -5,6 +5,196 @@ All notable changes to LLM Notebook will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2024-12-15
+
+### Added
+
+#### Multi-Provider LLM Support
+- **Automatic credential detection** - System detects available LLM credentials at startup in priority order:
+  1. Anthropic API key (`ANTHROPIC_API_KEY`)
+  2. AWS Bedrock credentials (env vars, profiles, IAM)
+  3. Claude Code CLI subscription
+- **claudette integration** - Direct Anthropic API and AWS Bedrock support via `claudette` library
+- **claudette-agent integration** - Claude Code subscription support via `claudette-agent` library
+- **Startup logging** - Clear credential status shown at startup with provider, backend, and source details
+- **Dynamic UI** - Mode selector only shows available options based on detected credentials
+
+#### Configurable LLM Settings (`dialeng_config.json`)
+- **Auto-generated config file** - `dialeng_config.json` created on first startup with sensible defaults
+- **Model configuration** - Define available models for UI picker with customizable names
+- **Backend-specific model mappings** - Separate model ID mappings for:
+  - `anthropic_api_map` - Direct Anthropic API (with date suffix)
+  - `bedrock_map` - AWS Bedrock (with region prefix and version suffix)
+  - `claudette_agent_map` - Claude Code subscription (simple names)
+- **AWS region configuration** - Configurable region for Bedrock API calls
+- **Default mode setting** - Configure default dialog mode for new notebooks
+- **Config status logging** - Shows loaded models and defaults at startup
+
+#### New Service Modules
+- **services/credential_service.py** - Credential detection with `CredentialStatus` dataclass
+- **services/dialeng_config.py** - Configuration management with `DialengConfig` dataclass
+
+### Changed
+
+- **Model selection** - Now supports Claude Sonnet 3.7 (default), Claude Sonnet 4.5, and Claude Haiku 4.5
+- **LLM service** - Refactored to use config-based model mappings instead of hardcoded values
+- **Error handling** - Improved error messages for streaming failures with detailed logging
+
+### Dependencies
+
+- Added `claudette>=0.2.0` - For direct Anthropic API and AWS Bedrock
+- Added `anthropic>=0.40.0` - Anthropic SDK
+- Added `boto3>=1.34.0` - AWS SDK for Bedrock
+- Added `botocore>=1.34.0` - AWS core library
+
+### Documentation
+
+- Updated `docs/how_it_works/06_llm_integration.md` with:
+  - Credential detection flow diagram
+  - Configuration options and examples
+  - Provider-specific implementation details
+  - Model mapping documentation
+
+---
+
+## [0.7.0] - 2024-12-11
+
+### Added
+
+#### FIFO Cell Execution Queue
+- **Proper execution queue** - Cells now execute in FIFO order like Jupyter, preventing output mixing when running multiple cells quickly
+- **Queue visual feedback** - Queued cells show:
+  - Yellow border with `queued` CSS class
+  - ⏳ icon on the run button
+  - "Queued (position N)..." message in output area
+- **Cancel All button** - Red "⏹ Cancel All" button in toolbar (visible when queue has items)
+  - Interrupts running cell AND clears entire queue
+  - Keyboard shortcut: `Escape Escape` (double-Escape, like Jupyter's `I I`)
+- **Real-time queue state via WebSocket** - New message types:
+  - `queue_update`: Broadcasts current running cell and queued cell IDs
+  - `cell_state_change`: Broadcasts individual cell state changes
+- **Duplicate run prevention** - Clicking run on already-queued cell is ignored
+- **Queue cleanup on cell delete** - Deleting a queued cell removes it from queue
+
+#### Backend Changes
+- **ExecutionQueue integration** - The previously unused `services/kernel/execution_queue.py` is now active
+- **New helper method** - Added `is_cell_queued(nb_id, cell_id)` to ExecutionQueue
+- **New endpoint** - `POST /notebook/{nb_id}/queue/cancel_all` - cancels running + clears queue
+- **Broadcast functions** - Added `broadcast_queue_state()`, `broadcast_cell_state()`, `broadcast_cell_output()`
+- **State callback system** - Queue emits callbacks for output chunks and state changes, enabling WebSocket broadcasting
+- **Cancel flag for queue** - Added `_cancelled` flag to ExecutionQueue to properly stop entire queue when Cancel All is triggered
+
+#### Frontend JavaScript
+- **Queue state tracking** - `cellQueueState` Map tracks each cell's queue state
+- **Visual state updates** - `updateCellVisualState()` manages queued/running/idle UI
+- **Cancel All function** - `cancelAllExecution()` calls cancel endpoint
+- **Ace editor focus handling** - Clicking inside code editor now properly highlights the cell
+- **Global cell selection** - Document-level event delegation ensures clicking anywhere on a cell highlights it
+- **Per-cell interrupt clears queue** - The interrupt button on individual cells now also clears the entire queue
+
+### Changed
+- **Run endpoint** - Now queues cells instead of executing inline; returns immediately
+- **prepareCodeRun()** - Shows "Queuing..." instead of "Running...", skips if already queued
+
+### Fixed
+- **Cancel All stops entire queue** - Previously, Cancel All only stopped the running cell; queued cells would still execute. Now the entire queue is properly cleared using a `_cancelled` flag
+- **Per-cell interrupt stops entire queue** - The interrupt button (⏹) on individual cells now calls `cancelAllExecution()` to stop the running cell AND clear the queue
+- **Shift+Enter moves focus immediately** - Focus now moves to next cell immediately when pressing Shift+Enter, matching Jupyter behavior (previously waited for server response which didn't work with queue system)
+- **Cell selection highlighting** - Clicking anywhere on a cell (not just the editor) now properly sets the cell as focused with visual highlighting, using document-level event delegation with capture phase
+
+### Documentation
+- Updated `docs/how_it_works/04_kernel_execution.md` with queue integration details
+
+---
+
+## [0.6.1] - 2024-12-11
+
+### Fixed
+
+#### Cell Execution State Management
+- **Separated code and prompt cell streaming** - Code cells now use dedicated `prepareCodeRun()` function instead of prompt-cell-specific `startStreaming()`, preventing state corruption between cell types
+- **Guaranteed code_stream_end delivery** - Wrapped server-side code execution in try/finally to ensure `code_stream_end` WebSocket message is always sent, even on errors
+- **Improved HTMX error handling** - New `resetCellOnError()` function properly resets both code and prompt cells on network errors, timeouts, and request failures
+- **Cell type-specific onclick handlers** - Run button now calls appropriate function based on cell type:
+  - Prompt cells: `startStreaming()` for LLM response streaming
+  - Code cells: `prepareCodeRun()` for kernel execution
+
+#### Code Cell Reliability
+- **Fixed HTMX bindings after WebSocket OOB swaps** - Added `htmx.process()` call after replacing DOM elements via WebSocket OOB swaps, ensuring Run buttons and other HTMX-powered elements continue to work after collaborative updates
+- **Reduced safety timeout to 30 seconds** - Changed from 2 minutes to 30 seconds for faster recovery from stuck cells
+- **Kernel busy detection** - Server now detects when kernel is busy executing another cell and sends "⏳ Kernel busy, waiting..." feedback message to the client
+- **Extended HTMX timeout** - Added `hx_timeout="120s"` to run button for long-running cells (e.g., matplotlib plots) that may take longer than the default HTMX timeout
+- **Improved interrupt handling** - `interruptCodeCell()` now waits 2 seconds after sending interrupt, then force-resets cell if still stuck
+- **Per-cell timeout tracking** - Using `codeStreamingTimeouts` Map to track timeouts individually for each cell, allowing multiple cells to stream independently
+- **Timeout reset on activity** - Timeouts reset when WebSocket messages (`code_stream_start`, `code_stream_chunk`, `code_display_data`) are received
+
+### Changed
+
+- **Immediate visual feedback for code cells** - New `prepareCodeRun()` shows "Running..." indicator immediately when user clicks run, before server responds
+- **Better error messages** - HTMX errors now display specific messages (network error, timeout, request failed) in cell output
+- **Enhanced interrupt UX** - Shows "Stopping..." while waiting for server to respond to interrupt, then "Execution interrupted" if timeout occurs
+
+### Developer/Debug
+
+- **Comprehensive WebSocket logging** - Added detailed console.log statements for tracking message flow:
+  - `[WS]` prefix for client-side WebSocket messages
+  - `[Code]` prefix for code cell streaming functions
+  - `[CODE RUN]` prefix for server-side execution logging
+- **Element validation** - `startCodeStreaming()` now validates cell and output elements exist before attempting to update them
+
+## [0.6.0] - 2024-12-10
+
+### Added
+
+#### Real LLM Integration via claudette-agent
+- **claudette-agent integration** - Real Claude API access for prompt cells
+- **Multiple AI modes** - Mock, Learning, Concise, Standard selectable from toolbar
+  - **Mock**: Fake responses for testing (no API calls, backwards compatible)
+  - **Learning**: Guides users to discover answers - asks leading questions
+  - **Concise**: Brief, code-focused responses with minimal explanation
+  - **Standard**: Balanced, helpful assistant (default behavior)
+- **Model selection** - Dropdown to choose Claude model (appears for non-Mock modes)
+  - **Claude Sonnet 4.5** (default) - Balanced performance and quality
+  - **Claude Haiku 4.5** - Faster, more cost-effective
+  - Model selection persisted in notebook metadata
+- **Context window management** - Up to 25 cells in LLM context
+  - Pinned cells always included first
+  - Recent non-pinned cells fill remaining slots
+  - Skipped cells excluded from context
+
+#### DialogHelper Compatibility
+- **Full dialoghelper API support** - All 14 endpoints implemented:
+  - Information: `curr_dialog_`, `msg_idx_`, `find_msgs_`, `read_msg_`
+  - Modification: `add_relative_`, `rm_msg_`, `update_msg_`, `add_runq_`
+  - Content editing: `msg_insert_line_`, `msg_str_replace_`, `msg_strs_replace_`, `msg_replace_lines_`
+  - Utility: `add_html_`, `pop_data_blocking_`
+- **Shared service layer** - `services/dialoghelper_service.py` provides core logic
+  - Reused by HTTP endpoints AND LLM context building
+  - Functions: `get_msg_idx()`, `find_msgs()`, `read_msg()`, `build_context_messages()`
+
+#### New Service Modules
+- **services/dialoghelper_service.py** - Shared dialoghelper logic and context building
+- **services/llm_service.py** - LLM streaming via claudette-agent with mode-specific prompts
+
+### Changed
+
+- **Mode selector** - Added "Mock" option, now shows: Mock | Learning | Concise | Standard
+- **Prompt execution** - Routes to mock or real LLM based on selected mode
+- **Context building** - Uses dialoghelper functions (`find_msgs()`) for consistency
+
+### Documentation
+
+- **docs/how_it_works/05_dialoghelper_integration.md** - DialogHelper API documentation
+- **docs/how_it_works/06_llm_integration.md** - LLM modes and context building docs
+- **README.md** - Added AI Modes and DialogHelper Compatibility sections
+
+### Dependencies
+
+- Added `claudette-agent` - LLM integration via Claude API
+- Added `dialoghelper` - Solveit compatibility (for reference)
+
+---
+
 ## [0.5.1] - 2024-12-10
 
 ### Fixed
