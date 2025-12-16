@@ -94,7 +94,12 @@ class KernelService:
         has_error = False
 
         try:
-            async for output in kernel.execute_streaming(cell.source):
+            # Pass notebook_id and cell.id for dialoghelper magic variables
+            async for output in kernel.execute_streaming(
+                cell.source,
+                notebook_id=notebook_id,
+                cell_id=cell.id
+            ):
                 # Append to cell's outputs
                 cell.outputs.append(output)
 

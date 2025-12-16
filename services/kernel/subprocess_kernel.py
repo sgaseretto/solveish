@@ -91,7 +91,12 @@ class SubprocessKernel:
             pid=self.pid
         )
 
-    async def execute_streaming(self, code: str) -> AsyncIterator[CellOutput]:
+    async def execute_streaming(
+        self,
+        code: str,
+        notebook_id: str = "",
+        cell_id: str = ""
+    ) -> AsyncIterator[CellOutput]:
         """
         Execute code and yield outputs as they stream.
 
@@ -100,6 +105,8 @@ class SubprocessKernel:
 
         Args:
             code: Python code to execute
+            notebook_id: Notebook identifier (for dialoghelper __dialog_name)
+            cell_id: Cell identifier (for dialoghelper __msg_id)
 
         Yields:
             CellOutput objects for each chunk of output
@@ -107,8 +114,13 @@ class SubprocessKernel:
         if not self.is_alive:
             self._start_process()
 
-        # Send execute request
-        self.input_queue.put({'type': 'execute', 'code': code})
+        # Send execute request with context for dialoghelper magic variables
+        self.input_queue.put({
+            'type': 'execute',
+            'code': code,
+            'notebook_id': notebook_id,
+            'cell_id': cell_id
+        })
         self._is_busy = True
 
         loop = asyncio.get_event_loop()

@@ -1,9 +1,134 @@
 # Changelog
 
-All notable changes to LLM Notebook will be documented in this file.
+All notable changes to Dialeng will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.9.2] - 2024-12-15
+
+### Fixed
+
+#### DialogHelper Response Format Fixes
+- **`read_msg_` endpoint** - Now returns `{'msg': {'content': ..., 'id': ..., 'type': ..., 'pinned': ...}}` format expected by dialoghelper library (previously returned flat dict with 'source' field)
+- **`find_msgs_` endpoint** - Uses 'content' field instead of 'source' for consistency with read_msg
+- **`update_msg_` endpoint** - Maps 'content' to 'source' for cell content updates; now returns cell ID (not `{"status": "ok"}`) so dialoghelper can maintain `__msg_id` for relative operations
+- **`update_msg_` boolean parameter fix** - Changed boolean parameters (`pinned`, `skipped`, `is_exported`, `heading_collapsed`) from `int` type to `str` type with `_str_to_bool()` conversion. HTTP form data sends Python's `True` as string `"True"`, and FastHTML couldn't convert `"True"` to `int`, causing a 422 error
+- **`add_relative_` boolean parameter fix** - Same fix applied to `is_exported`, `skipped`, `pinned`, `run`, and `heading_collapsed` parameters
+- **Test notebook** - Updated to access data via `.msg.content`, `.msg.type`, `.msg.pinned` etc.
+
+#### Real-time WebSocket Broadcasting
+- **`add_relative_` (add_msg)** - Now broadcasts `AllCellsOOB` when cells are created, so new cells appear immediately without refresh
+- **`rm_msg_` (del_msg)** - Now broadcasts `AllCellsOOB` when cells are deleted
+- **`update_msg_`** - Now broadcasts `CellViewOOB` when cell properties are updated
+- **OOB swap skip logic fix** - Client-side JavaScript now correctly distinguishes between "user typing" and "cell executing". Previously, the Ace editor's hidden textarea maintaining focus during code execution was incorrectly treated as "user typing", causing `add_msg()` cell updates to be skipped. Now only skips if user is typing in a cell that's NOT streaming (executing)
+
+#### JavaScript Injection (iife/add_scr)
+- **Script execution fix** - `processOOBSwap()` now properly handles scripts injected via `beforeend:#js-script` swap strategy. Scripts inserted via `innerHTML` don't execute automatically (browser security), so the function now manually creates `<script>` elements via `document.createElement('script')` which triggers actual execution
+- **fire_event() script handling** - Added handling for `<script hx-swap-oob="true">` elements used by `fire_event()`, ensuring they execute when broadcast via WebSocket
+
+#### Dialog Mode Detection
+- **Mock mode enforcement** - When no LLM credentials are available, `dialog_mode` is forced to "mock" regardless of saved value in notebook file (fixes issue where loaded notebooks showed "learning" mode without credentials)
+
+### Added
+
+- **Advanced test notebook** - Created `notebooks/test_dialoghelper_advanced.ipynb` with tests for:
+  - `msg_strs_replace()` - Multi-string replacement
+  - `msg_replace_lines()` - Line range replacement
+  - `add_scr()` - Lower-level script injection
+  - Advanced `iife()` - Async patterns, progress indicators, Fetch API, DOM queries
+  - `fire_event()` + `pop_data()` - Bidirectional browser/Python communication
+  - Utility patterns: cell duplication, backup before modify, find/replace all
+
+### Changed
+
+- **Cell 10 typo fix** - Changed `del_msg(msid=...)` to `del_msg(msgid=...)` in test notebook
+- **Test notebook pop_data() fix** - Fixed `pop_data()` calls to use correct parameter name `idx` (not `data_id`). The dialoghelper function signature is `pop_data(idx, timeout=15)` which internally maps to `data_id`.
+
+### Documentation
+
+- **05_dialoghelper_integration.md** - Comprehensive documentation of:
+  - Script execution mechanism (why `innerHTML` doesn't execute scripts and how `processOOBSwap()` handles it)
+  - `add_scr()` function documentation
+  - `fire_event()` and `pop_data()` with correct parameter names
+  - Complete bidirectional data transfer example (browser calculation pattern)
+  - Both test notebooks documented with full feature lists
+
+- **03_real_time_collaboration.md** - Added "Script Injection OOB" section explaining:
+  - Swap strategy pattern for `iife()`/`add_scr()`
+  - Direct script pattern for `fire_event()`
+  - Why `document.createElement('script')` triggers execution
+
+---
+
+## [0.9.1] - 2024-12-15
+
+### Fixed
+
+#### DialogHelper Magic Variable Injection
+- **`__dialog_name` and `__msg_id` injection** - Kernel now injects these magic variables into the execution namespace before running each cell, enabling dialoghelper functions like `read_msg(-1)` and `iife()` to work correctly
+- **Port configuration** - Updated test notebook to use correct port (8000) instead of 5001
+
+#### ExecutionQueue Missing Method
+- **Added `is_cell_queued()` method** - Fixed `AttributeError: 'ExecutionQueue' object has no attribute 'is_cell_queued'` by adding the missing method to check if a cell is queued or currently running
+
+### Changed
+
+- **Test notebook expanded** - `notebooks/test_dialoghelper.ipynb` now includes comprehensive tests for:
+  - `curr_dialog()` - Get dialog/notebook info
+  - `msg_idx()` - Get cell index by ID
+  - `read_msg()` - Read cell content (absolute and relative)
+  - `find_msgs()` - Search cells by type, pattern
+  - `update_msg()` - Update cell properties
+  - `add_msg()` - Create new cells
+  - `del_msg()` - Delete cells
+  - `msg_str_replace()` - Replace string in cell
+  - `msg_insert_line()` - Insert line in cell
+  - `iife()` - JavaScript injection (console.log, alert, DOM manipulation)
+  - `add_html()` - Direct HTML injection
+  - `event_get()` - Bidirectional browser communication
+  - `run_msg()` - Queue cells for execution
+
+### Technical Changes
+
+- Modified `services/kernel/subprocess_kernel.py` - `execute_streaming()` now accepts `notebook_id` and `cell_id` parameters
+- Modified `services/kernel/kernel_service.py` - Passes notebook_id and cell_id through to `execute_streaming()`
+- Modified `services/kernel/kernel_worker.py` - Injects `__dialog_name` and `__msg_id` into `shell.user_ns` before each cell execution
+
+---
+
+## [0.9.0] - 2024-12-15
+
+### Added
+
+#### Complete DialogHelper JavaScript Injection Support
+- **`iife()` support** - Execute JavaScript in browser from Python via IIFE pattern
+- **`add_html()` broadcast** - Fixed endpoint to broadcast HTML via WebSocket for HTMX OOB swaps
+- **`#js-script` container** - Frontend div for receiving injected scripts
+- **`window.NOTEBOOK_ID`** - Global JavaScript variable exposing notebook ID
+
+#### Bidirectional Browser Communication
+- **`/push_data_blocking_`** - New endpoint for browser-to-Python data transfer
+- **`/pop_data_blocking_`** - Fixed with async queue implementation and timeout support
+- **Data queue infrastructure** - Per-notebook async queues for `push_data`/`pop_data` operations
+- **`event_get()` support** - Fire events and wait for browser response
+
+#### Cell Execution via DialogHelper
+- **`/add_runq_`** - Implemented to queue cells for execution using `ExecutionQueue`
+- **`run_msg()` support** - Queue and execute code cells programmatically
+
+#### Test Notebook
+- **`notebooks/test_dialoghelper.ipynb`** - Comprehensive test notebook demonstrating:
+  - Basic cell operations (read_msg, find_msgs, add_msg)
+  - JavaScript injection via iife()
+  - DOM manipulation from Python
+  - Bidirectional data transfer (event_get)
+  - Programmatic cell execution (run_msg)
+
+### Changed
+
+- **`/add_html_`** - Now broadcasts via WebSocket instead of returning content
+- **Documentation** - Updated `docs/how_it_works/05_dialoghelper_integration.md` with iife and data transfer docs
 
 ## [0.8.0] - 2024-12-15
 

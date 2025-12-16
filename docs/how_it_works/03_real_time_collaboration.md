@@ -1,6 +1,6 @@
 # Real-Time Collaboration - How It Works
 
-This document explains the implementation of real-time collaboration in LLM Notebook, enabling multiple users to work on the same notebook simultaneously.
+This document explains the implementation of real-time collaboration in Dialeng, enabling multiple users to work on the same notebook simultaneously.
 
 ## Table of Contents
 
@@ -212,14 +212,30 @@ async def broadcast_to_notebook(nb_id: str, component, exclude_send: Any = None)
 ### Client-Side: Processing OOB Swaps
 
 ```javascript
-// Process incoming HTML (app.py:1723-1802)
+// Process incoming HTML (app.py:2669-2820)
 function processOOBSwap(html) {
     const template = document.createElement('template');
     template.innerHTML = html.trim();
 
     for (const element of template.content.children) {
         const oobAttr = element.getAttribute('hx-swap-oob');
+
+        // Handle swap strategies like "beforeend:#js-script"
+        // (see Script Injection OOB section below)
+        if (oobAttr && oobAttr.includes(':')) {
+            // Parse and handle swap strategy
+            // ...
+            continue;
+        }
+
         if (oobAttr !== 'true') continue;
+
+        // Handle script elements (fire_event)
+        if (element.tagName === 'SCRIPT') {
+            // Create and execute script
+            // ...
+            continue;
+        }
 
         const targetId = element.id;
         const target = document.getElementById(targetId);
@@ -256,6 +272,74 @@ function processOOBSwap(html) {
     }
 }
 ```
+
+### Script Injection OOB
+
+The `processOOBSwap()` function handles JavaScript injection from dialoghelper's `iife()`, `add_scr()`, and `fire_event()` functions. This requires special handling because scripts inserted via `innerHTML` don't execute automatically (browser security feature).
+
+**Two script injection patterns are supported:**
+
+#### 1. Swap Strategy Pattern (iife, add_scr)
+
+Used by `iife()` and `add_scr()`:
+
+```html
+<div hx-swap-oob="beforeend:#js-script">
+    <script>console.log('Hello from Python!');</script>
+</div>
+```
+
+```javascript
+// app.py:2684-2726
+if (oobAttr && oobAttr.includes(':')) {
+    const [swapStrategy, targetSelector] = oobAttr.split(':');
+    const target = document.querySelector(targetSelector);
+
+    if (target) {
+        const scripts = element.querySelectorAll('script');
+        scripts.forEach(script => {
+            // Create new script element (triggers execution)
+            const newScript = document.createElement('script');
+            Array.from(script.attributes).forEach(attr => {
+                newScript.setAttribute(attr.name, attr.value);
+            });
+            newScript.textContent = script.textContent;
+            target.appendChild(newScript);  // Executes here
+        });
+    }
+}
+```
+
+#### 2. Direct Script Pattern (fire_event)
+
+Used by `fire_event()`:
+
+```html
+<script hx-swap-oob="true" id="js-event">htmx.trigger(document.body, 'my-event', {...})</script>
+```
+
+```javascript
+// app.py:2731-2751
+if (element.tagName === 'SCRIPT') {
+    const newScript = document.createElement('script');
+    Array.from(element.attributes).forEach(attr => {
+        if (attr.name !== 'hx-swap-oob') {
+            newScript.setAttribute(attr.name, attr.value);
+        }
+    });
+    newScript.textContent = element.textContent;
+
+    // Replace or append
+    const existingScript = element.id ? document.getElementById(element.id) : null;
+    if (existingScript) {
+        existingScript.replaceWith(newScript);
+    } else {
+        document.body.appendChild(newScript);
+    }
+}
+```
+
+**Key insight**: `document.createElement('script')` followed by DOM insertion triggers execution, unlike `innerHTML` which doesn't.
 
 ---
 

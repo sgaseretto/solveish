@@ -1,6 +1,6 @@
 # Kernel Execution & Streaming Output
 
-This document explains how LLM Notebook executes code cells with real-time streaming output, hard interrupt support, and queue management.
+This document explains how Dialeng executes code cells with real-time streaming output, hard interrupt support, and queue management.
 
 ## Table of Contents
 

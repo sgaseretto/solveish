@@ -200,6 +200,15 @@ def kernel_worker_main(input_queue: Queue, output_queue: Queue):
             # Send busy status
             output_queue.put({'type': 'status', 'status': 'busy'})
 
+            # Inject dialoghelper magic variables into the namespace
+            # These are used by dialoghelper's find_var() to identify context
+            notebook_id = msg.get('notebook_id', '')
+            cell_id = msg.get('cell_id', '')
+            if notebook_id:
+                shell.user_ns['__dialog_name'] = notebook_id
+            if cell_id:
+                shell.user_ns['__msg_id'] = cell_id
+
             try:
                 # Execute with streaming output
                 shell._run_streaming(msg['code'], output_queue)

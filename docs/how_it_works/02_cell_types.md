@@ -1,6 +1,6 @@
 # Cell Types - Technical Documentation
 
-This document provides a comprehensive guide to the three cell types in LLM Notebook: **Code**, **Note**, and **Prompt**. It covers how each cell type is implemented, how they work, and their intended behavior.
+This document provides a comprehensive guide to the three cell types in Dialeng: **Code**, **Note**, and **Prompt**. It covers how each cell type is implemented, how they work, and their intended behavior.
 
 ## Table of Contents
 
@@ -17,7 +17,7 @@ This document provides a comprehensive guide to the three cell types in LLM Note
 
 ## Overview
 
-LLM Notebook has three distinct cell types, each serving a different purpose:
+Dialeng has three distinct cell types, each serving a different purpose:
 
 | Cell Type | Purpose | Input | Output | Editable Parts |
 |-----------|---------|-------|--------|----------------|
@@ -327,7 +327,7 @@ function switchToPreview(cellId, field) {
 
 ### Purpose
 
-Prompt cells are the unique innovation of LLM Notebook. They provide a chat interface where:
+Prompt cells are the unique innovation of Dialeng. They provide a chat interface where:
 - Users write prompts to the AI
 - AI responses stream in real-time
 - **Both** the prompt AND response are editable
@@ -509,11 +509,11 @@ When `use_thinking` is enabled:
 
 ## Serialization (.ipynb Format)
 
-LLM Notebook uses the Solveit convention for `.ipynb` files, ensuring compatibility with Jupyter and Solveit.
+Dialeng uses the Solveit convention for `.ipynb` files, ensuring compatibility with Jupyter and Solveit.
 
 ### Cell Type Mapping
 
-| LLM Notebook | Jupyter Cell Type | Key Metadata |
+| Dialeng | Jupyter Cell Type | Key Metadata |
 |--------------|-------------------|--------------|
 | Code | `code` | `time_run`, `skipped`, `execution_count` |
 | Note | `markdown` | (no `solveit_ai`) |

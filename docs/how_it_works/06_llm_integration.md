@@ -1,10 +1,10 @@
 # LLM Integration
 
-This document explains how Indianapolis integrates with LLMs for real AI responses in prompt cells.
+This document explains how Dialeng integrates with LLMs for real AI responses in prompt cells.
 
 ## Overview
 
-Indianapolis supports multiple AI modes for prompt cells, with **automatic credential detection** at startup to determine which providers are available:
+Dialeng supports multiple AI modes for prompt cells, with **automatic credential detection** at startup to determine which providers are available:
 
 | Mode | Description |
 |------|-------------|
@@ -15,7 +15,7 @@ Indianapolis supports multiple AI modes for prompt cells, with **automatic crede
 
 ## Credential Detection
 
-At startup, Indianapolis automatically detects available LLM credentials and configures the appropriate provider.
+At startup, Dialeng automatically detects available LLM credentials and configures the appropriate provider.
 
 ### Detection Order
 
@@ -48,7 +48,7 @@ flowchart TD
 The credential status is logged at startup:
 
 ```
-🚀 LLM Notebook starting at http://localhost:8000
+🚀 Dialeng starting at http://localhost:8000
    Notebooks saved to: ./notebooks/
    Format: Solveit-compatible .ipynb
 
@@ -393,7 +393,7 @@ Requires:
 
 ## Configuration
 
-Indianapolis uses a `dialeng_config.json` file for customizable LLM settings. On first startup, this file is created automatically with sensible defaults.
+Dialeng uses a `dialeng_config.json` file for customizable LLM settings. On first startup, this file is created automatically with sensible defaults.
 
 ### Config File Location
 
@@ -522,7 +522,7 @@ To make Sonnet 4.5 the default:
 The config status is logged at startup:
 
 ```
-🚀 LLM Notebook starting at http://localhost:8000
+🚀 Dialeng starting at http://localhost:8000
    Notebooks saved to: ./notebooks/
    Format: Solveit-compatible .ipynb
 

@@ -1,6 +1,6 @@
-# LLM Notebook Documentation
+# Dialeng Documentation
 
-Welcome to the LLM Notebook documentation. This folder contains detailed technical documentation for developers.
+Welcome to the Dialeng documentation. This folder contains detailed technical documentation for developers.
 
 ## Documentation Structure
 
