@@ -1,5 +1,5 @@
 """
-LLM Notebook - Open source Solveit-like notebook with FastHTML
+Dialeng - Open source Solveit-like notebook with FastHTML
 
 Features:
 - Three cell types: Code, Note, Prompt
@@ -258,10 +258,14 @@ class Notebook:
     def from_ipynb(cls, data: Dict[str, Any], notebook_id: str = None) -> "Notebook":
         metadata = data.get("metadata", {})
         cells = [Cell.from_jupyter_cell(c) for c in data.get("cells", [])]
+        # Get saved dialog mode, but override to "mock" if no credentials available
+        saved_mode = metadata.get("solveit_dialog_mode", DEFAULT_DIALOG_MODE)
+        # If no credentials available, force mock mode regardless of saved value
+        effective_mode = "mock" if not CREDENTIAL_STATUS.available else saved_mode
         return cls(
             id=notebook_id or uuid.uuid4().hex[:8],
             title="Imported Notebook", cells=cells,
-            dialog_mode=metadata.get("solveit_dialog_mode", "learning"),
+            dialog_mode=effective_mode,
             model=metadata.get("solveit_model", DEFAULT_MODEL)
         )
     
@@ -413,6 +417,18 @@ ws_connections: Dict[str, List[Any]] = {}
 # Track cancelled cell generations
 cancelled_cells: set = set()
 
+# DialogHelper data queues for bidirectional browser communication
+# Structure: {notebook_id: {data_id: asyncio.Queue}}
+data_queues: Dict[str, Dict[str, asyncio.Queue]] = {}
+
+def get_data_queue(dlg_name: str, data_id: str) -> asyncio.Queue:
+    """Get or create a data queue for dialoghelper push/pop operations."""
+    if dlg_name not in data_queues:
+        data_queues[dlg_name] = {}
+    if data_id not in data_queues[dlg_name]:
+        data_queues[dlg_name][data_id] = asyncio.Queue()
+    return data_queues[dlg_name][data_id]
+
 def get_notebook(notebook_id: str) -> Notebook:
     """Get or create a notebook - ALWAYS requires notebook_id"""
     if notebook_id not in notebooks:
@@ -422,7 +438,7 @@ def get_notebook(notebook_id: str) -> Notebook:
         else:
             nb = Notebook(id=notebook_id, title=notebook_id)
             nb.cells = [
-                Cell(cell_type="note", source="# Welcome to LLM Notebook! 🚀\n\nAn open-source notebook with **prompt cells** for AI interaction.\n\n**Keyboard Shortcuts (Jupyter-style):**\n- `Shift+Enter` - Run cell (recommended)\n- `Ctrl/Cmd+Enter` - Run cell (alternative)\n- `Ctrl/Cmd+S` - Save notebook\n- `D D` - Delete cell (press D twice)\n- `Ctrl/Cmd+Shift+C` - Add code cell\n- `Ctrl/Cmd+Shift+N` - Add note cell\n- `Ctrl/Cmd+Shift+P` - Add prompt cell\n- `Alt+↑/↓` - Move cell up/down\n- `Escape` - Exit edit mode\n- Double-click - Edit markdown/response"),
+                Cell(cell_type="note", source="# Welcome to Dialeng! 🚀\n\nAn open-source notebook with **prompt cells** for AI interaction.\n\n**Keyboard Shortcuts (Jupyter-style):**\n- `Shift+Enter` - Run cell (recommended)\n- `Ctrl/Cmd+Enter` - Run cell (alternative)\n- `Ctrl/Cmd+S` - Save notebook\n- `D D` - Delete cell (press D twice)\n- `Ctrl/Cmd+Shift+C` - Add code cell\n- `Ctrl/Cmd+Shift+N` - Add note cell\n- `Ctrl/Cmd+Shift+P` - Add prompt cell\n- `Alt+↑/↓` - Move cell up/down\n- `Escape` - Exit edit mode\n- Double-click - Edit markdown/response"),
                 Cell(cell_type="code", source="# Try running some Python (Shift+Enter)\nx = [1, 2, 3, 4, 5]\nprint(f'Sum: {sum(x)}')\nprint(f'Average: {sum(x)/len(x)}')\nx", output_collapse=1),
                 Cell(cell_type="note", source="## 🔄 Streaming Output Tests\n\nThe cells below demonstrate real-time streaming output. Run them to see output appear incrementally."),
                 Cell(cell_type="code", source="# Test 1: Basic streaming with sleep\nfrom time import sleep\n\nfor i in range(5):\n    print(f\"Step {i + 1}/5: Processing...\")\n    sleep(1)\n\nprint(\"Done!\")", output_collapse=1),
@@ -599,17 +615,21 @@ async def broadcast_to_notebook(nb_id: str, component, exclude_send: Any = None)
     alive = []
     sent_count = 0
 
-    for send in connections:
+    for i, send in enumerate(connections):
         if send is exclude_send:
             alive.append(send)  # Keep but don't send
             continue
         try:
             # Send the HTML string directly
+            print(f"[BROADCAST] Sending to connection {i}, send function: {send}", flush=True)
             await send(html_str)
+            print(f"[BROADCAST] Successfully sent to connection {i}", flush=True)
             alive.append(send)
             sent_count += 1
         except Exception as e:
-            print(f"[BROADCAST] Failed to send (removing dead connection): {e}")
+            print(f"[BROADCAST] Failed to send to connection {i} (removing dead connection): {e}", flush=True)
+            import traceback
+            traceback.print_exc()
             # Don't add to alive - this removes the dead connection
 
     # Replace with only alive connections
@@ -2061,8 +2081,11 @@ function connectWebSocket(notebookId) {
     ws.onmessage = function(event) {
         const msg = event.data;
 
+        // Debug: Log every message received
+        console.log('[WS] RAW message received, length:', msg?.length, 'type:', typeof msg, 'starts:', msg?.substring?.(0, 50));
+
         // Check if message is HTML (OOB swap from collaborator) or JSON (streaming)
-        if (msg.startsWith('<')) {
+        if (msg && typeof msg === 'string' && msg.startsWith('<')) {
             // HTML with hx-swap-oob - process as OOB swap
             console.log('[WS] Received OOB HTML swap, length:', msg.length);
             processOOBSwap(msg);
@@ -2074,7 +2097,7 @@ function connectWebSocket(notebookId) {
         try {
             data = JSON.parse(msg);
         } catch (e) {
-            console.error('[WS] Failed to parse JSON message:', msg.substring(0, 100), e);
+            console.error('[WS] Failed to parse JSON message:', msg?.substring?.(0, 100), e);
             return;
         }
         console.log('[WS] Received message:', data.type, 'cell_id:', data.cell_id || 'none');
@@ -2471,8 +2494,8 @@ function updateCellVisualState(cellId, state, queuePosition) {
 
     if (!cell) return;
 
-    // Remove all state classes
-    cell.classList.remove('streaming', 'queued');
+    // Remove queued class only - streaming is managed by startCodeStreaming/stopCodeStreaming
+    cell.classList.remove('queued');
 
     switch(state) {
         case 'queued':
@@ -2646,21 +2669,100 @@ function interruptCodeCell(notebookId, cellId) {
 function processOOBSwap(html) {
     // Process HTML with hx-swap-oob attributes from WebSocket
     // This handles both full cells container updates and single cell updates
+    console.log('[OOB] processOOBSwap called, HTML length:', html.length);
 
     // Parse the HTML to extract the element(s)
     const template = document.createElement('template');
     template.innerHTML = html.trim();
     const elements = template.content.children;
+    console.log('[OOB] Parsed elements count:', elements.length);
 
     for (const element of elements) {
         const oobAttr = element.getAttribute('hx-swap-oob');
+        console.log('[OOB] Element tag:', element.tagName, 'id:', element.id, 'oobAttr:', oobAttr);
+
+        // Handle swap strategies like "beforeend:#js-script" for script injection
+        if (oobAttr && oobAttr.includes(':')) {
+            const [swapStrategy, targetSelector] = oobAttr.split(':');
+            const target = document.querySelector(targetSelector);
+            console.log('[OOB] Swap strategy:', swapStrategy, 'target:', targetSelector, 'found:', !!target);
+
+            if (target) {
+                element.removeAttribute('hx-swap-oob');
+
+                // For script injection, we need to manually execute the scripts
+                // innerHTML doesn't auto-execute scripts for security reasons
+                const scripts = element.querySelectorAll('script');
+                if (scripts.length > 0) {
+                    console.log('[OOB] Found', scripts.length, 'script(s) to execute');
+                    scripts.forEach(script => {
+                        const newScript = document.createElement('script');
+                        // Copy all attributes
+                        Array.from(script.attributes).forEach(attr => {
+                            newScript.setAttribute(attr.name, attr.value);
+                        });
+                        newScript.textContent = script.textContent;
+
+                        if (swapStrategy === 'beforeend') {
+                            target.appendChild(newScript);
+                        } else if (swapStrategy === 'afterbegin') {
+                            target.insertBefore(newScript, target.firstChild);
+                        } else {
+                            target.appendChild(newScript);
+                        }
+                        console.log('[OOB] Script executed');
+                    });
+                } else {
+                    // Regular content, use innerHTML based on swap strategy
+                    if (swapStrategy === 'beforeend') {
+                        target.insertAdjacentHTML('beforeend', element.innerHTML);
+                    } else if (swapStrategy === 'afterbegin') {
+                        target.insertAdjacentHTML('afterbegin', element.innerHTML);
+                    } else if (swapStrategy === 'innerHTML') {
+                        target.innerHTML = element.innerHTML;
+                    }
+                }
+            }
+            continue;
+        }
+
         if (oobAttr !== 'true') continue;
 
+        // Handle script elements specially - they need to be manually executed
+        if (element.tagName === 'SCRIPT') {
+            console.log('[OOB] Executing script element with id:', element.id);
+            const newScript = document.createElement('script');
+            // Copy all attributes except hx-swap-oob
+            Array.from(element.attributes).forEach(attr => {
+                if (attr.name !== 'hx-swap-oob') {
+                    newScript.setAttribute(attr.name, attr.value);
+                }
+            });
+            newScript.textContent = element.textContent;
+
+            // If a script with this ID exists, replace it; otherwise append to body
+            const existingScript = element.id ? document.getElementById(element.id) : null;
+            if (existingScript) {
+                existingScript.replaceWith(newScript);
+            } else {
+                document.body.appendChild(newScript);
+            }
+            console.log('[OOB] Script executed successfully');
+            continue;
+        }
+
         const targetId = element.id;
-        if (!targetId) continue;
+        if (!targetId) {
+            console.log('[OOB] Skipping - no targetId');
+            continue;
+        }
 
         const target = document.getElementById(targetId);
-        if (!target) continue;
+        if (!target) {
+            console.log('[OOB] Skipping - target not found for id:', targetId);
+            continue;
+        }
+        console.log('[OOB] Found target element:', targetId);
 
         // Check if this is a cell update
         if (targetId.startsWith('cell-')) {
@@ -2694,24 +2796,30 @@ function processOOBSwap(html) {
             renderCellPreviews(cellId);
         }
         else if (targetId === 'cells') {
-            // Full cells container update
+            // Full cells container update (e.g., from dialoghelper add_msg)
+            console.log('[OOB] Processing cells container update');
             // Save currently focused cell ID before update
             const focusedCell = document.activeElement?.closest('.cell');
             const focusedCellId = focusedCell?.id?.replace('cell-', '');
 
-            // Check if any cell is being edited or streaming
-            const editingCell = focusedCell;
-            const streamingCell = document.querySelector('.cell.streaming');
+            // Only skip if user is actively typing AND no cell is currently streaming
+            // If ANY cell is streaming (executing), we need to allow updates for add_msg() to work
+            // The Ace editor's hidden textarea keeps focus during execution, but that's not "real typing"
+            const isInInput = document.activeElement?.matches('input, textarea, .ace_text-input');
+            const anyCellStreaming = document.querySelector('.cell.streaming') !== null;
+            const shouldSkip = isInInput && !anyCellStreaming;
+            console.log('[OOB] isInInput:', isInInput, 'anyCellStreaming:', anyCellStreaming, 'shouldSkip:', shouldSkip);
 
-            // If user is editing or a cell is streaming, skip update
-            if (editingCell || streamingCell) {
-                console.log('[WS] Skipping cells container update - user editing or streaming');
+            if (shouldSkip) {
+                console.log('[OOB] Skipping cells container update - user is typing and no cell is streaming');
                 continue;
             }
 
             // Replace the cells container
+            console.log('[OOB] Replacing cells container');
             element.removeAttribute('hx-swap-oob');
             target.replaceWith(element);
+            console.log('[OOB] Cells container replaced successfully');
 
             // CRITICAL: Reinitialize HTMX bindings on the new cells container
             // Without this, hx-post/hx-get attributes won't work!
@@ -3092,7 +3200,7 @@ def CellViewOOB(cell: Cell, notebook_id: str):
 
 def NotebookPage(nb: Notebook, notebook_list: List[str]):
     return Titled(
-        f"{nb.title} - LLM Notebook",
+        f"{nb.title} - Dialeng",
         Div(
             Div(
                 Div(Span("📓", cls="title-icon"), Span(nb.title, cls="title")),
@@ -3135,7 +3243,9 @@ def NotebookPage(nb: Notebook, notebook_list: List[str]):
                 cls="file-list"
             ) if notebook_list else None,
             AllCells(nb),
+            Script(f"window.NOTEBOOK_ID = '{nb.id}';"),  # Expose notebook ID for dialoghelper
             Script(f"document.addEventListener('DOMContentLoaded', () => connectWebSocket('{nb.id}'));"),
+            Div(id="js-script"),  # Container for dialoghelper script injection via HTMX OOB
             cls="container"
         )
     )
@@ -3546,14 +3656,25 @@ def post(dlg_name: str, with_messages: bool = False):
 def post(dlg_name: str, msgid: str):
     """Get message index by ID - uses shared get_msg_idx()."""
     nb = get_notebook(dlg_name)
-    return {"idx": get_msg_idx(nb, msgid)}
+    # dialoghelper expects {"msgid": idx} not {"idx": idx}
+    return {"msgid": get_msg_idx(nb, msgid)}
 
 @rt("/find_msgs_")
 def post(dlg_name: str, re_pattern: str = "", msg_type: str = "", limit: int = 100):
     """Search messages - uses shared find_msgs()."""
     nb = get_notebook(dlg_name)
     results = find_msgs(nb, re_pattern=re_pattern, msg_type=msg_type, limit=limit)
-    return [{"idx": i, "id": c.id, "type": c.cell_type} for i, c in results]
+    # dialoghelper expects {"msgs": [...]} - use 'content' for consistency with read_msg
+    msgs = [{
+        "idx": i,
+        "id": c.id,
+        "type": c.cell_type,
+        "content": c.source,  # Use 'content' to match dialoghelper's read_msg format
+        "output": c.output,
+        "pinned": c.pinned,
+        "skipped": c.skipped
+    } for i, c in results]
+    return {"msgs": msgs}
 
 @rt("/read_msg_")
 def post(dlg_name: str, n: int = 0, relative: bool = True, msgid: str = "",
@@ -3564,18 +3685,23 @@ def post(dlg_name: str, n: int = 0, relative: bool = True, msgid: str = "",
                     current_idx=current_idx, view_range=view_range, nums=nums)
 
 @rt("/add_relative_")
-def post(dlg_name: str, content: str, placement: str = "after", msgid: str = "",
+async def post(dlg_name: str, content: str, placement: str = "after", msgid: str = "",
          msg_type: str = "code", output: str = "", time_run: str = "",
-         is_exported: bool = False, skipped: bool = False,
-         i_collapsed: int = 0, o_collapsed: int = 0,
-         heading_collapsed: bool = False, pinned: bool = False, run: bool = False):
-    """Add message relative to another - uses shared get_msg_idx()."""
+         is_exported: str = "", skipped: str = "",
+         i_collapsed: str = "0", o_collapsed: str = "0",
+         heading_collapsed: str = "", pinned: str = "", run: str = ""):
+    """Add message relative to another - uses shared get_msg_idx().
+
+    Boolean params use str type because HTTP form data sends 'True'/'False' strings.
+    """
+    print(f"[ADD_RELATIVE] dlg_name={dlg_name}, ws_connections keys={list(ws_connections.keys())}", flush=True)
     nb = get_notebook(dlg_name)
     new_cell = Cell(
         cell_type=msg_type, source=content, output=output,
-        skipped=skipped, pinned=pinned,
-        input_collapse=i_collapsed, output_collapse=o_collapsed,
-        is_exported=is_exported, time_run=time_run
+        skipped=_str_to_bool(skipped), pinned=_str_to_bool(pinned),
+        input_collapse=int(i_collapsed) if i_collapsed else 0,
+        output_collapse=int(o_collapsed) if o_collapsed else 0,
+        is_exported=_str_to_bool(is_exported), time_run=time_run
     )
     # Find insertion point using shared function
     if msgid:
@@ -3588,51 +3714,108 @@ def post(dlg_name: str, content: str, placement: str = "after", msgid: str = "",
 
     nb.cells.insert(insert_idx, new_cell)
 
+    # Broadcast to all connected clients so they see the new cell immediately
+    try:
+        await broadcast_to_notebook(dlg_name, AllCellsOOB(nb))
+        print(f"[ADD_RELATIVE] Broadcast completed for {dlg_name}", flush=True)
+    except Exception as e:
+        print(f"[ADD_RELATIVE] Broadcast error: {e}", flush=True)
+
     # Optionally trigger execution
-    if run:
+    if _str_to_bool(run):
         # Queue for execution (implementation depends on kernel service)
         pass
 
-    return {"id": new_cell.id, "idx": insert_idx}
+    # dialoghelper expects just the cell ID as plain text (not JSON)
+    # This is used to set __msg_id for relative operations
+    return new_cell.id
 
 @rt("/rm_msg_")
-def post(dlg_name: str, msid: str):
+async def post(dlg_name: str, msid: str):
     """Remove message by ID."""
     nb = get_notebook(dlg_name)
     idx = get_msg_idx(nb, msid)
     if idx >= 0:
         nb.cells.pop(idx)
+        # Broadcast to all connected clients so they see the cell removed immediately
+        await broadcast_to_notebook(dlg_name, AllCellsOOB(nb))
     return {"status": "ok"}
 
+def _str_to_bool(val: str) -> bool:
+    """Convert string form value to boolean. Handles 'True', 'true', '1', etc."""
+    if val is None:
+        return None
+    return str(val).lower() in ('true', '1', 'yes', 'on')
+
+
 @rt("/update_msg_")
-def post(dlg_name: str, msgid: str, **kwargs):
-    """Update message properties."""
+async def post(dlg_name: str, msgid: str,
+               content: str = None, msg_type: str = None, output: str = None,
+               time_run: str = None, is_exported: str = None, skipped: str = None,
+               i_collapsed: str = None, o_collapsed: str = None,
+               heading_collapsed: str = None, pinned: str = None):
+    """Update message properties.
+
+    FastHTML requires explicit params (no **kwargs).
+    Boolean params use str type because HTTP form data sends 'True'/'False' strings,
+    and FastHTML can't convert 'True' to int.
+    """
+    print(f"[UPDATE_MSG] dlg_name={dlg_name}, msgid={msgid}, pinned={pinned}", flush=True)
     nb = get_notebook(dlg_name)
     idx = get_msg_idx(nb, msgid)
     if idx >= 0:
         cell = nb.cells[idx]
-        # Map dialoghelper field names to Cell field names
-        field_mapping = {
-            "i_collapsed": "input_collapse",
-            "o_collapsed": "output_collapse",
-            "msg_type": "cell_type",
-        }
-        for key, value in kwargs.items():
-            mapped_key = field_mapping.get(key, key)
-            if hasattr(cell, mapped_key):
-                setattr(cell, mapped_key, value)
-    return {"status": "ok"}
+        print(f"[UPDATE_MSG] Cell {cell.id} before: pinned={cell.pinned}", flush=True)
+
+        # Map and apply each field if provided (not None)
+        if content is not None:
+            cell.source = content
+        if msg_type is not None:
+            cell.cell_type = msg_type
+        if output is not None:
+            cell.output = output
+        if time_run is not None:
+            cell.time_run = time_run
+        if is_exported is not None:
+            cell.is_exported = _str_to_bool(is_exported)
+        if skipped is not None:
+            cell.skipped = _str_to_bool(skipped)
+        if i_collapsed is not None:
+            cell.input_collapse = int(i_collapsed) if i_collapsed else 0
+        if o_collapsed is not None:
+            cell.output_collapse = int(o_collapsed) if o_collapsed else 0
+        if heading_collapsed is not None:
+            cell.heading_collapsed = _str_to_bool(heading_collapsed)
+        if pinned is not None:
+            cell.pinned = _str_to_bool(pinned)
+            print(f"[UPDATE_MSG] Set pinned={cell.pinned}", flush=True)
+
+        print(f"[UPDATE_MSG] Cell {cell.id} after: pinned={cell.pinned}", flush=True)
+        # Broadcast the updated cell to all connected clients
+        await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
+    # Return the cell ID - dialoghelper uses this to set __msg_id for relative operations
+    return msgid
 
 @rt("/add_runq_")
-def post(dlg_name: str, msgid: str, api: str = ""):
+async def post(dlg_name: str, msgid: str, api: str = ""):
     """Add message to execution queue."""
     nb = get_notebook(dlg_name)
     idx = get_msg_idx(nb, msgid)
-    if idx >= 0:
-        # Trigger cell execution via kernel service
-        # This integrates with existing execution infrastructure
-        pass
-    return {"status": "ok"}
+    if idx < 0:
+        return {"error": f"Message {msgid} not found"}
+
+    cell = nb.cells[idx]
+    if cell.cell_type != "code":
+        return {"error": "Only code cells can be executed"}
+
+    # Get execution queue and queue the cell
+    queue = get_execution_queue(dlg_name)
+    queue.queue_cell(dlg_name, cell)
+
+    # Broadcast queue state to all clients
+    await broadcast_queue_state(dlg_name)
+
+    return {"status": "ok", "cell_id": cell.id}
 
 @rt("/msg_insert_line_")
 def post(dlg_name: str, msgid: str, insert_line: int, new_str: str):
@@ -3681,16 +3864,31 @@ def post(dlg_name: str, msgid: str, start_line: int, end_line: int, new_content:
     return {"status": "ok"}
 
 @rt("/add_html_")
-def post(dlg_name: str, content: str):
-    """Add HTML content (for OOB swaps)."""
-    return content
+async def post(dlg_name: str, content: str):
+    """Add HTML content (for OOB swaps) - broadcasts via WebSocket."""
+    await broadcast_to_notebook(dlg_name, Safe(content))
+    return {"status": "ok"}
+
+@rt("/push_data_blocking_")
+async def post(dlg_name: str, data_id: str, data: str = ""):
+    """Push data to a queue for pop_data_blocking_ to consume."""
+    queue = get_data_queue(dlg_name, data_id)
+    try:
+        parsed_data = json.loads(data) if data else {}
+    except json.JSONDecodeError:
+        parsed_data = {"raw": data}
+    await queue.put(parsed_data)
+    return {"status": "ok"}
 
 @rt("/pop_data_blocking_")
 async def post(dlg_name: str, data_id: str, timeout: int = 15):
     """Pop blocking data (for events) - async with timeout."""
-    # Implementation for event-based communication
-    # This is a placeholder - full implementation depends on event system
-    return {"status": "not_implemented"}
+    queue = get_data_queue(dlg_name, data_id)
+    try:
+        data = await asyncio.wait_for(queue.get(), timeout=timeout)
+        return data
+    except asyncio.TimeoutError:
+        return {"error": "timeout"}
 
 # ============================================================================
 # WebSocket for Streaming
@@ -3746,7 +3944,7 @@ async def ws(msg, send, nb_id: str):
 # ============================================================================
 
 if __name__ == "__main__":
-    print("🚀 LLM Notebook starting at http://localhost:8000")
+    print("🚀 Dialeng starting at http://localhost:8000")
     print("   Notebooks saved to: ./notebooks/")
     print("   Format: Solveit-compatible .ipynb")
     print("")

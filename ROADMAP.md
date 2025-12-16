@@ -1,6 +1,6 @@
-# LLM Notebook Roadmap 🗺️
+# Dialeng Roadmap 🗺️
 
-This document outlines the planned features and development direction for LLM Notebook.
+This document outlines the planned features and development direction for Dialeng.
 
 ## Current Status: v0.3.1
 
@@ -240,7 +240,7 @@ See [DEVELOPERS.md](DEVELOPERS.md) for technical guidance.
 
 Tracking parity with [Solveit](https://solve.it.com/):
 
-| Feature | Solveit | LLM Notebook | Status |
+| Feature | Solveit | Dialeng | Status |
 |---------|---------|--------------|--------|
 | Code cells | ✅ | ✅ | Done |
 | Note cells | ✅ | ✅ | Done |

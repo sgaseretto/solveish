@@ -1,6 +1,6 @@
-# LLM Notebook Developer Guide 🛠️
+# Dialeng Developer Guide 🛠️
 
-A comprehensive guide for developers who want to extend, customize, or contribute to LLM Notebook.
+A comprehensive guide for developers who want to extend, customize, or contribute to Dialeng.
 
 ## Table of Contents
 
@@ -193,7 +193,7 @@ Textarea(cell.source,
 
 ## Real-time Collaboration
 
-LLM Notebook supports real-time collaboration via WebSockets. Multiple users can view and edit the same notebook simultaneously.
+Dialeng supports real-time collaboration via WebSockets. Multiple users can view and edit the same notebook simultaneously.
 
 ### Architecture
 
@@ -835,6 +835,56 @@ document.addEventListener('keydown', e => {
 ---
 
 ## Testing
+
+### Testing DialogHelper Features
+
+Dialeng includes comprehensive test notebooks for verifying DialogHelper compatibility:
+
+#### Running the Test Notebooks
+
+1. **Start Dialeng server**:
+   ```bash
+   uv run python app.py
+   ```
+
+2. **Open the test notebooks** in the browser:
+   - Basic tests: `http://localhost:8000/notebook/test_dialoghelper`
+   - Advanced tests: `http://localhost:8000/notebook/test_dialoghelper_advanced`
+
+3. **Run cells sequentially** (some tests depend on previous cells):
+   - The first cell (`setup`) configures the port
+   - Run tests one by one or use Shift+Enter to execute and move to next
+
+#### Test Coverage
+
+| Notebook | Tests |
+|----------|-------|
+| `test_dialoghelper.ipynb` | Basic CRUD: `read_msg`, `find_msgs`, `update_msg`, `add_msg`, `del_msg`, `msg_str_replace`, `msg_insert_line`, `iife`, `add_html`, `event_get`, `run_msg` |
+| `test_dialoghelper_advanced.ipynb` | Advanced: `msg_strs_replace`, `msg_replace_lines`, `add_scr`, async `iife` patterns, `fire_event`/`pop_data` bidirectional communication |
+
+#### Debugging Tips
+
+- **Check browser console** for script injection (`iife`, `add_scr`) - look for `[OOB]` log messages
+- **Check terminal** for server-side processing - broadcasts show `[BROADCAST]` messages
+- **Verify WebSocket** connection in browser DevTools Network tab
+- **`pop_data()` parameter**: Use `idx=`, not `data_id=` (common mistake)
+
+#### Example: Verifying Script Injection
+
+```python
+# In a notebook cell
+from dialoghelper import iife
+
+iife("""
+    console.log('TEST: Script executed!');
+    alert('If you see this, script injection works!');
+""")
+```
+
+If working correctly:
+1. Browser console shows: `[OOB] Script executed`
+2. Alert popup appears
+3. Terminal shows: `[BROADCAST] Successfully sent to connection 0`
 
 ### Unit Tests
 

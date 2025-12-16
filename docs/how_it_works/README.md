@@ -1,6 +1,6 @@
 # How It Works - Technical Documentation
 
-This folder contains detailed technical documentation explaining how various features of LLM Notebook are implemented.
+This folder contains detailed technical documentation explaining how various features of Dialeng are implemented.
 
 ## Recommended Reading Order
 

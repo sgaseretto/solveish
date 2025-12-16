@@ -1,7 +1,7 @@
 """
 LLM Service - Streaming LLM responses via claudette or claudette-agent.
 
-This module provides the interface between Indianapolis notebooks and
+This module provides the interface between Dialeng notebooks and
 Claude models. It supports two providers:
 
 1. claudette: Direct Anthropic API or AWS Bedrock (requires credentials)

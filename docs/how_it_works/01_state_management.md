@@ -1,6 +1,6 @@
 # State Management - Technical Documentation
 
-This document explains how LLM Notebook manages notebook and cell state, including the in-memory data structures, persistence to disk, and state synchronization across the application.
+This document explains how Dialeng manages notebook and cell state, including the in-memory data structures, persistence to disk, and state synchronization across the application.
 
 ## Table of Contents
 
@@ -18,7 +18,7 @@ This document explains how LLM Notebook manages notebook and cell state, includi
 
 ## Overview
 
-LLM Notebook uses a simple but effective state management approach:
+Dialeng uses a simple but effective state management approach:
 
 - **In-memory dictionary** holds all active notebooks
 - **Lazy loading** - notebooks are loaded from disk on first access
@@ -432,7 +432,7 @@ def get_notebook(notebook_id: str) -> Notebook:
             # Create new with default cells
             nb = Notebook(id=notebook_id, title=notebook_id)
             nb.cells = [
-                Cell(cell_type="note", source="# Welcome to LLM Notebook..."),
+                Cell(cell_type="note", source="# Welcome to Dialeng..."),
                 Cell(cell_type="code", source="x = [1, 2, 3]...", output_collapse=1),
                 Cell(cell_type="prompt", source="Hello! What can you help me with?"),
             ]

@@ -1,4 +1,4 @@
-# LLM Notebook 📓
+# Dialeng 📓
 
 An open-source Solveit-like notebook built entirely with **FastHTML**. Features prompt cells with editable LLM responses, Python code execution, and markdown notes.
 
@@ -49,7 +49,7 @@ Notebooks are saved to `./notebooks/*.ipynb`.
 
 ## 🎯 The Prompt Cell Innovation
 
-Unlike traditional notebooks (Jupyter) or chat interfaces (ChatGPT), LLM Notebook introduces a **prompt cell** that bridges the gap:
+Unlike traditional notebooks (Jupyter) or chat interfaces (ChatGPT), Dialeng introduces a **prompt cell** that bridges the gap:
 
 | Cell Type | Purpose | Output | Editable? |
 |-----------|---------|--------|-----------|
@@ -76,11 +76,11 @@ flowchart TB
 
 ## 📄 .ipynb Format (Solveit-Compatible)
 
-LLM Notebook uses the Solveit convention for storing prompt cells in standard `.ipynb` files:
+Dialeng uses the Solveit convention for storing prompt cells in standard `.ipynb` files:
 
 ### Cell Type Mapping
 
-| LLM Notebook | Jupyter Cell | Key Metadata |
+| Dialeng | Jupyter Cell | Key Metadata |
 |--------------|--------------|--------------|
 | **Code** | `cell_type: "code"` | `time_run`, `skipped` |
 | **Note** | `cell_type: "markdown"` | *(no `solveit_ai`)* |
@@ -230,7 +230,7 @@ flowchart TB
 
 ---
 
-## 🔧 Extending LLM Notebook
+## 🔧 Extending Dialeng
 
 ### Swap LLM Provider
 
@@ -341,17 +341,68 @@ See **[ROADMAP.md](ROADMAP.md)** for detailed plans and contribution opportuniti
 
 ---
 
+## 🔌 DialogHelper Compatibility
+
+Dialeng is fully compatible with the [dialoghelper](https://github.com/AnswerDotAI/dialoghelper) library, enabling programmatic notebook manipulation from Python code:
+
+```python
+from dialoghelper import dh_settings
+dh_settings['port'] = 8000  # Dialeng server port
+
+from dialoghelper import read_msg, add_msg, iife, fire_event, pop_data
+
+# Read the previous cell
+prev = read_msg(-1)
+print(prev.msg.content)
+
+# Add a new cell
+add_msg("Created from Python!", msg_type="note", placement="after")
+
+# Execute JavaScript in the browser
+iife("""
+    console.log('Hello from Python!');
+    alert('JavaScript injection works!');
+""")
+
+# Bidirectional browser communication
+import uuid
+request_id = str(uuid.uuid4())[:8]
+fire_event('my-event', {'idx': request_id})
+response = pop_data(idx=request_id, timeout=5)  # Note: parameter is 'idx', not 'data_id'
+```
+
+### Test Notebooks
+
+Two test notebooks are included to verify and demonstrate DialogHelper features:
+
+| Notebook | Purpose |
+|----------|---------|
+| `notebooks/test_dialoghelper.ipynb` | Basic tests: read/write cells, iife, event_get |
+| `notebooks/test_dialoghelper_advanced.ipynb` | Advanced: multi-string replace, fire_event/pop_data, async iife patterns |
+
+See **[docs/how_it_works/05_dialoghelper_integration.md](docs/how_it_works/05_dialoghelper_integration.md)** for complete documentation.
+
+---
+
 ## 📁 Project Structure
 
 ```
-llm_notebook/
-├── app.py              # Main application
-├── requirements.txt    # Dependencies
-├── README.md          # This file
-├── DEVELOPERS.md      # Developer guide
-├── ROADMAP.md         # Feature roadmap
-└── notebooks/         # Saved notebooks (created at runtime)
-    └── *.ipynb
+dialeng/
+├── app.py                  # Main application (FastHTML)
+├── services/               # Service layer
+│   ├── kernel/            # Python kernel (subprocess, streaming)
+│   ├── llm_service.py     # LLM integration (multi-provider)
+│   └── dialoghelper_service.py  # DialogHelper shared logic
+├── notebooks/              # Saved notebooks
+│   ├── test_dialoghelper.ipynb          # Basic DialogHelper tests
+│   └── test_dialoghelper_advanced.ipynb # Advanced tests
+├── docs/                   # Documentation
+│   └── how_it_works/      # Technical deep dives
+├── requirements.txt        # Dependencies
+├── README.md              # This file
+├── DEVELOPERS.md          # Developer guide
+├── ROADMAP.md             # Feature roadmap
+└── CHANGELOG.md           # Version history
 ```
 
 ---

@@ -206,6 +206,25 @@ class ExecutionQueue:
             queued_cell_ids=[e.cell.id for e in queue]
         )
 
+    def is_cell_queued(self, notebook_id: str, cell_id: str) -> bool:
+        """
+        Check if a cell is currently queued or running.
+
+        Args:
+            notebook_id: Notebook identifier
+            cell_id: Cell ID to check
+
+        Returns:
+            True if cell is queued or currently running
+        """
+        # Check if currently running
+        if self._current_cell.get(notebook_id) == cell_id:
+            return True
+
+        # Check if in queue
+        queue = self._queues.get(notebook_id, deque())
+        return any(e.cell.id == cell_id for e in queue)
+
     def on_output(self, notebook_id: str, callback: OutputCallback):
         """
         Register callback for streaming output.
