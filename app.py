@@ -3085,6 +3085,7 @@ def CellView(cell: Cell, notebook_id: str):
                             id=f"prompt-{cell.id}",
                             placeholder="Ask the AI anything...",
                             hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/source",
+                            hx_include=f"#source-{cell.id}",
                             hx_trigger="blur changed", hx_swap="none",
                             style="display: none;",
                             oninput=f"document.getElementById('source-{cell.id}').value = this.value",
@@ -3104,6 +3105,7 @@ def CellView(cell: Cell, notebook_id: str):
                             id=f"prompt-{cell.id}",
                             placeholder="Ask the AI anything...",
                             hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/source",
+                            hx_include=f"#source-{cell.id}",
                             hx_trigger="blur changed", hx_swap="none",
                             oninput=f"document.getElementById('source-{cell.id}').value = this.value"),
                     cls=f"prompt-input {input_collapse_cls}".strip(),
@@ -3337,7 +3339,14 @@ def post(nb_id: str, cid: str, source: str):
     nb = get_notebook(nb_id)
     for c in nb.cells:
         if c.id == cid:
+            old_source = c.source
             c.source = source
+            # CRITICAL: Clear output when source changes to prevent stale data in context
+            # This ensures that when context is built for subsequent cells,
+            # we don't include an old assistant response that doesn't match the new source.
+            if old_source != source:
+                c.clear_outputs()
+                logger.info(f"Cell {cid}: Source changed, cleared outputs to prevent stale context")
             break
     return ""
 

@@ -1,0 +1,37 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Session and credential files
+.sesskey
+*.key
+
+# IDE settings
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Runtime configuration (contains environment-specific settings)
+dialeng_config.json
+
+# Debug logs
+debug_logs/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Test/demo files (development only)
+test_*.py
+*_demo.py

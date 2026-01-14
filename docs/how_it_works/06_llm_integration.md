@@ -103,17 +103,19 @@ flowchart TD
     D --> E[build_context_messages<br/>from dialoghelper_service]
     E --> F[Find pinned cells]
     E --> G[Find window cells]
-    F --> H[Combine up to 25 cells]
+    F --> H[Combine up to 25 cells<br/>Sort by notebook index]
     G --> H
     H --> I[cell_to_messages<br/>Convert to LLM format]
-    I --> J[claudette-agent.stream]
+    I --> J[Build single prompt<br/>with context]
+    J --> K[AsyncChat with<br/>setting_sources=[] and<br/>cwd=None and<br/>no-session-persistence]
+    K --> L[chat.stream for<br/>truly stateless query]
 
-    C --> K[Stream via WebSocket]
-    J --> K
+    C --> M[Stream via WebSocket]
+    L --> M
 
-    K --> L{Error?}
-    L -->|Yes| M[Show in cell output]
-    L -->|No| N[Update cell output]
+    M --> N{Error?}
+    N -->|Yes| O[Show in cell output]
+    N -->|No| P[Update cell output]
 ```
 
 ## Mode Selection
@@ -211,6 +213,134 @@ def cell_to_messages(cell):
         return msgs
 ```
 
+### Context Freshness and Cell Editing
+
+When a cell's source is edited, the outputs are automatically cleared to prevent stale context contamination. This ensures the LLM only sees the current state of the notebook.
+
+#### The Complete Flow
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant B as Browser (HTMX)
+    participant S as Server (app.py)
+    participant C as Cell Object
+    participant L as LLM Service
+
+    U->>B: Edits prompt cell text
+    Note over B: oninput syncs to hidden input
+    U->>B: Clicks away (blur)
+    B->>S: POST /cell/{cid}/source<br/>with hx-include=#source-{cid}
+    Note over S: Receives source parameter<br/>from hidden input
+    S->>C: Compare old_source vs new source
+    alt Source changed
+        C->>C: clear_outputs()
+        C->>C: version++
+        Note over C: Stale output removed
+    end
+    S-->>B: Response (empty)
+
+    U->>B: Runs next prompt cell
+    B->>S: POST /run/{cid}
+    S->>S: build_context_messages()
+    Note over S: Only fresh data included<br/>(edited source, no stale output)
+    S->>L: stream_response(context)
+    L-->>B: Fresh response based on "Mark"
+```
+
+#### Why This Matters (John → Mark Scenario)
+
+1. User types "Hello! My name is John" → Claude responds "Hello John!"
+2. User **edits** cell to "Hello! My name is Mark"
+3. **Without clearing**: Context includes both "Mark" (source) AND "Hello John!" (stale output)
+4. **With clearing**: Context only includes "Mark" (source), output is empty
+
+#### The HTMX Mechanism
+
+Prompt cells use a two-textarea pattern:
+
+```html
+<!-- Hidden input with name="source" (sent to server) -->
+<input type="hidden" id="source-{cell.id}" name="source" value="...">
+
+<!-- Visible textarea with name="prompt_source" (for editing) -->
+<textarea name="prompt_source" id="prompt-{cell.id}"
+          hx-post="/notebook/{nb_id}/cell/{cid}/source"
+          hx-include="#source-{cell.id}"
+          hx-trigger="blur changed"
+          oninput="document.getElementById('source-{cell.id}').value = this.value">
+```
+
+Key elements:
+1. **`oninput`**: Syncs textarea value to hidden input as user types
+2. **`hx-include`**: Includes the hidden input when posting (ensures `source` parameter is sent)
+3. **`hx-trigger="blur changed"`**: Posts only when textarea loses focus AND value changed
+
+Without `hx-include`, HTMX would only send `prompt_source` (the textarea's name), but the endpoint expects `source`. The hidden input has `name="source"`, and `hx-include` ensures it's included in the POST.
+
+#### Server-Side Output Clearing
+
+The Cell class tracks modifications:
+
+```python
+@dataclass
+class Cell:
+    version: int = 0  # Incremented on each source change
+    last_modified: Optional[datetime] = None
+
+    def update_source(self, new_source: str) -> bool:
+        if self.source != new_source:
+            self.source = new_source
+            self.version += 1
+            self.last_modified = datetime.now()
+            self.clear_outputs()  # CRITICAL: Prevents stale context
+            return True
+        return False
+```
+
+The `/cell/{cid}/source` endpoint enforces this:
+
+```python
+@rt("/notebook/{nb_id}/cell/{cid}/source")
+def post(nb_id: str, cid: str, source: str):
+    for c in nb.cells:
+        if c.id == cid:
+            old_source = c.source
+            c.source = source
+            if old_source != source:
+                c.clear_outputs()  # Clear stale output
+                logger.info(f"Cell {cid}: Source changed, cleared outputs")
+            break
+```
+
+#### Context Building with Fresh Data
+
+When `build_context_messages()` runs, it converts each cell to messages:
+
+```python
+def cell_to_messages(cell):
+    if cell.cell_type == "prompt":
+        msgs = [{"role": "user", "content": cell.source}]
+        if cell.output:  # Only if output exists
+            msgs.append({"role": "assistant", "content": cell.output})
+        return msgs
+```
+
+After editing and clearing:
+- `cell.source` = "Hello! My name is Mark" (new)
+- `cell.output` = "" (cleared)
+
+So the context only contains:
+```
+User: Hello! My name is Mark
+```
+
+Not:
+```
+User: Hello! My name is Mark
+Assistant: Hello John! Nice to meet you!  ← This stale data is gone
+```
+
 ## LLM Service
 
 The `services/llm_service.py` module provides a unified interface to both providers:
@@ -283,27 +413,115 @@ Model name mappings are defined in `dialeng_config.json` (see [Configuration](#c
 
 #### claudette-agent (Claude Code Subscription)
 
-[claudette-agent](https://github.com/sgaseretto/claudette-agent) uses AsyncChat with a `.stream()` method:
+[claudette-agent](https://github.com/sgaseretto/claudette-agent) uses AsyncChat with a `.stream()` method for **truly stateless queries**:
 
 ```python
 from claudette_agent import AsyncChat
 
-# Initialize with model and system prompt
-chat = AsyncChat(model="claude-sonnet-4-5", sp="You are helpful")
+# Create chat with fully stateless configuration:
+# - setting_sources=[] prevents loading settings files
+# - cwd=None allows SDK to create fresh session each time
+# - extra_args={'no-session-persistence': None} prevents saving new sessions
+# Note: claudette-agent's _build_options() also sets continue_conversation=False
+# and resume=None to ensure no session continuation or resumption.
+chat = AsyncChat(
+    model="claude-sonnet-4-5",
+    sp="You are helpful",
+    setting_sources=[],  # Don't load settings files
+    cwd=None,  # No cwd - SDK creates fresh session each time
+    extra_args={"no-session-persistence": None}  # Don't save new sessions
+)
 
 # Add context to history
-for msg in context_messages:
-    chat.h.append(msg)
+chat.h.append({"role": "user", "content": full_prompt})
 
-# Stream response - uses .stream() method
-async for block in chat.stream(prompt):
-    print(block, end='')
+# Stream response with extended thinking
+async for block in chat.stream(None, maxthinktok=10000):
+    if hasattr(block, 'type') and block.type == 'thinking':
+        print(f"Thinking: {block.thinking}")
+    elif hasattr(block, 'text'):
+        print(block.text, end='')
+
+# Access usage and cost after streaming
+print(f"Tokens used: {chat.use}")
+print(f"Cost: ${chat.cost:.6f}")
 ```
 
-Key differences:
+Key features:
+- **Truly stateless queries** via four mechanisms:
+  - `setting_sources=[]` prevents Claude from loading settings files
+  - `cwd=None` allows SDK to create fresh session each time (no per-project sessions loaded)
+  - `extra_args={'no-session-persistence': None}` passes `--no-session-persistence` to the
+    Claude CLI, which prevents new sessions from being saved to disk
+  - claudette-agent's `_build_options()` explicitly sets `continue_conversation=False` and
+    `resume=None` to prevent session continuation or resumption
+- **Notebook as source of truth** - Edits to cells are immediately reflected in subsequent queries
 - Model names without date suffix: `"claude-sonnet-4-5"`
-- Streaming via: `chat.stream(prompt)` (method, not callable)
+- Streaming via: `chat.stream(prompt, maxthinktok=N)`
+- Extended thinking via `maxthinktok` parameter
+- Usage tracking: `chat.use` and `chat.cost` properties
+- Model capability checks: `can_use_extended_thinking(model)`
 - Async by default
+
+#### claude-agent-sdk Direct Mode (Maximum Isolation)
+
+For maximum session isolation, Dialeng can use `claude-agent-sdk.query()` directly instead of the claudette-agent wrapper. This is enabled by default via `use_sdk_direct: true` in `dialeng_config.json`.
+
+```python
+from claude_agent_sdk import query, ClaudeAgentOptions
+import tempfile
+import shutil
+
+# Create unique temp directory for complete isolation
+temp_cwd = tempfile.mkdtemp(prefix="dialeng_sdk_")
+
+try:
+    options = ClaudeAgentOptions(
+        # Core stateless settings
+        continue_conversation=False,  # Don't continue any conversation
+        resume=None,  # Don't resume any session
+        # Session isolation
+        setting_sources=[],  # Don't load any settings files
+        cwd=temp_cwd,  # Use unique temp cwd per query
+        # Model and system prompt
+        model="claude-sonnet-4-5",
+        system_prompt="You are a helpful assistant.",
+    )
+
+    # Use query() directly - fully stateless
+    async for message in query(prompt=full_prompt, options=options):
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if hasattr(block, 'text'):
+                    print(block.text, end='')
+finally:
+    # Clean up temp directory
+    shutil.rmtree(temp_cwd, ignore_errors=True)
+```
+
+Key advantages over claudette-agent wrapper:
+- **Complete subprocess isolation** - Each query creates a fresh Claude Code subprocess
+- **No wrapper-level state** - Bypasses any potential caching in the wrapper library
+- **Explicit option control** - All `ClaudeAgentOptions` are set directly
+- **Guaranteed cleanup** - Temp directory removed after each query
+
+Configuration in `dialeng_config.json`:
+
+```json
+{
+  "llm": {
+    "use_sdk_direct": true,
+    "debug_mode": false,
+    "debug_log_dir": "./debug_logs"
+  }
+}
+```
+
+| Option | Description |
+|--------|-------------|
+| `use_sdk_direct` | `true` = use SDK directly (default), `false` = use claudette-agent wrapper |
+| `debug_mode` | When `true`, saves prompts and responses to JSON files |
+| `debug_log_dir` | Directory for debug logs (default: `./debug_logs`) |
 
 ### System Prompts
 
@@ -321,6 +539,68 @@ Answer with code examples when possible. Skip pleasantries.""",
     "standard": """You are a helpful coding assistant. Provide clear, accurate answers
 with appropriate code examples and explanations.""",
 }
+```
+
+## Extended Thinking
+
+Extended thinking allows Claude to reason through complex problems before responding. This is supported on thinking-capable models (Claude Sonnet 3.7+, Sonnet 4+, Opus 4+).
+
+### How It Works
+
+1. **Model capability check** - Before enabling thinking, `can_use_extended_thinking(model)` is called
+2. **Token budget** - When enabled, `chat.stream(prompt, maxthinktok=N)` is used
+3. **Block types** - Stream yields thinking blocks (type='thinking') and text blocks separately
+4. **Graceful fallback** - If model doesn't support thinking, it's automatically disabled with a warning
+
+### Configuration
+
+Set the maximum thinking tokens in `dialeng_config.json`:
+
+```json
+{
+  "thinking": {
+    "max_tokens": 10000,
+    "comment": "Maximum tokens for extended thinking (0 to disable)"
+  }
+}
+```
+
+### WebSocket Message Types for Thinking
+
+```javascript
+// Extended thinking phase
+{"type": "thinking_start", "cell_id": "abc123"}
+{"type": "stream_chunk", "cell_id": "abc123", "chunk": "...", "thinking": true}
+{"type": "thinking_end", "cell_id": "abc123"}
+```
+
+## Usage and Cost Tracking
+
+claudette-agent tracks token usage and estimated costs. After each streaming response, the service captures these values.
+
+### Accessing Usage Data
+
+```python
+from services.llm_service import llm_service
+
+# After streaming completes
+usage = llm_service.last_usage  # Usage object with token counts
+cost = llm_service.last_cost    # Estimated cost in USD
+```
+
+### Usage Object Fields
+
+- `input_tokens` - Tokens in the prompt
+- `output_tokens` - Tokens in the response
+- `cache_creation_input_tokens` - Tokens for cache creation
+- `cache_read_input_tokens` - Tokens read from cache
+
+### Logging
+
+Usage and cost are logged automatically after each streaming response:
+
+```
+INFO:services.llm_service:claudette-agent: Usage=Usage(input_tokens=1234, output_tokens=567), Cost=$0.012345
 ```
 
 ## Streaming Response Flow
@@ -439,6 +719,10 @@ The config file is created in the project root directory:
   "modes": {
     "default": "mock",
     "comment": "Default dialog mode when opening a notebook. Options: mock, learning, concise, standard"
+  },
+  "thinking": {
+    "max_tokens": 10000,
+    "comment": "Maximum tokens for extended thinking. Set to 0 to disable."
   }
 }
 ```
@@ -453,6 +737,7 @@ The config file is created in the project root directory:
 | `models.bedrock_map` | Bedrock model IDs | Maps UI model IDs to AWS Bedrock model ARNs (with version suffix) |
 | `models.claudette_agent_map` | Claude Code model IDs | Maps UI model IDs to claudette-agent model names (simple names) |
 | `modes.default` | Default mode | Initial dialog mode for new notebooks (`mock`, `learning`, `concise`, `standard`) |
+| `thinking.max_tokens` | Thinking token budget | Maximum tokens for extended thinking (0 to disable). Only applies to thinking-capable models. |
 
 ### Customization Examples
 
