@@ -63,6 +63,7 @@ class Cell:
     - Multiple outputs for streaming
     - Execution state tracking
     - Queue position awareness
+    - Version tracking for change detection
     """
     id: str = field(default_factory=lambda: f"_{uuid.uuid4().hex[:8]}")
     cell_type: CellType = CellType.CODE
@@ -73,6 +74,11 @@ class Cell:
     state: CellState = CellState.IDLE
     execution_count: Optional[int] = None
     time_run: Optional[str] = None
+
+    # Version tracking (for detecting changes and rebuilding context)
+    # Incremented whenever source is modified
+    version: int = 0
+    last_modified: Optional[datetime] = None
 
     # Cell metadata (persisted)
     skipped: bool = False
@@ -118,6 +124,21 @@ class Cell:
         self.outputs = []
         self.state = CellState.IDLE
 
+    def update_source(self, new_source: str) -> bool:
+        """
+        Update cell source with change tracking.
+
+        Returns True if source was actually changed.
+        Increments version and clears outputs if source changed.
+        """
+        if self.source != new_source:
+            self.source = new_source
+            self.version += 1
+            self.last_modified = datetime.now()
+            self.clear_outputs()  # Clear stale output that doesn't match new source
+            return True
+        return False
+
     def append_output(self, output: CellOutput):
         """Append a new output (for streaming)."""
         self.outputs.append(output)
@@ -142,6 +163,8 @@ class Cell:
             ],
             'execution_count': self.execution_count,
             'time_run': self.time_run,
+            'version': self.version,
+            'last_modified': self.last_modified.isoformat() if self.last_modified else None,
             'skipped': self.skipped,
             'pinned': self.pinned,
             'use_thinking': self.use_thinking,
@@ -166,6 +189,14 @@ class Cell:
                 metadata=o.get('metadata'),
             ))
 
+        # Parse last_modified if present
+        last_modified = None
+        if data.get('last_modified'):
+            try:
+                last_modified = datetime.fromisoformat(data['last_modified'])
+            except (ValueError, TypeError):
+                pass
+
         return cls(
             id=data.get('id', f"_{uuid.uuid4().hex[:8]}"),
             cell_type=CellType(data.get('cell_type', 'code')),
@@ -173,6 +204,8 @@ class Cell:
             outputs=outputs,
             execution_count=data.get('execution_count'),
             time_run=data.get('time_run'),
+            version=data.get('version', 0),
+            last_modified=last_modified,
             skipped=data.get('skipped', False),
             pinned=data.get('pinned', False),
             use_thinking=data.get('use_thinking', False),

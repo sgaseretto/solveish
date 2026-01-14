@@ -10,7 +10,10 @@ programmatic manipulation of notebook cells from within notebook code. This
 service implements the server-side logic that dialoghelper's call_endp() calls.
 """
 import re
+import logging
 from typing import List, Dict, Optional, Tuple, Any
+
+logger = logging.getLogger(__name__)
 
 MAX_CONTEXT_CELLS = 25
 
@@ -219,10 +222,11 @@ def build_context_messages(notebook, current_cell_id: str) -> List[Dict]:
     Build LLM context messages using dialoghelper functions.
 
     Strategy:
-    1. Use find_msgs() to get pinned cells (always included first)
+    1. Use find_msgs() to get pinned cells (always included)
     2. Use find_msgs() to get the window of recent non-pinned cells
     3. Combine up to MAX_CONTEXT_CELLS total (pinned count towards limit)
-    4. Convert to claudette-agent message format
+    4. Sort all cells by original index to maintain chronological order
+    5. Convert to claudette-agent message format
 
     Args:
         notebook: Notebook object with cells list
@@ -232,18 +236,25 @@ def build_context_messages(notebook, current_cell_id: str) -> List[Dict]:
         List of message dicts in claudette-agent format:
         [{"role": "user"/"assistant", "content": "..."}]
     """
+    logger.info(f"build_context_messages: Building context for cell {current_cell_id}")
+
     current_idx = get_msg_idx(notebook, current_cell_id)
     if current_idx == -1:
+        logger.warning(f"build_context_messages: Cell {current_cell_id} not found")
         return []
 
+    logger.info(f"build_context_messages: Current cell is at index {current_idx}")
+
     # 1. Find pinned cells before current (using find_msgs)
+    # Keep (index, cell) tuples to preserve order information
     pinned_results = find_msgs(
         notebook,
         pinned_only=True,
         skipped=False,  # Exclude skipped cells
         before_idx=current_idx
     )
-    pinned_cells = [cell for _, cell in pinned_results]
+    pinned_indices = {idx for idx, _ in pinned_results}
+    logger.info(f"build_context_messages: Found {len(pinned_results)} pinned cells")
 
     # 2. Find non-pinned, non-skipped cells before current
     non_pinned_results = find_msgs(
@@ -253,21 +264,33 @@ def build_context_messages(notebook, current_cell_id: str) -> List[Dict]:
         before_idx=current_idx,
         limit=1000  # Get all, we'll slice later
     )
-    # Filter out pinned cells (already included)
-    non_pinned_cells = [cell for _, cell in non_pinned_results if not cell.pinned]
+    # Filter out pinned cells (already included) - keep (index, cell) tuples
+    non_pinned_tuples = [(idx, cell) for idx, cell in non_pinned_results if idx not in pinned_indices]
+    logger.info(f"build_context_messages: Found {len(non_pinned_tuples)} non-pinned cells")
 
     # 3. Calculate window size (pinned cells count towards the 25 limit)
-    remaining_slots = MAX_CONTEXT_CELLS - len(pinned_cells)
-    window_cells = non_pinned_cells[-remaining_slots:] if remaining_slots > 0 else []
+    remaining_slots = MAX_CONTEXT_CELLS - len(pinned_results)
+    window_tuples = non_pinned_tuples[-remaining_slots:] if remaining_slots > 0 else []
 
-    # 4. Combine: pinned first, then window
-    all_cells = pinned_cells + window_cells
+    # 4. Combine and sort by index to maintain chronological order
+    # This is the key fix: cells must appear in notebook order, not pinned-first
+    all_tuples = list(pinned_results) + window_tuples
+    all_tuples.sort(key=lambda x: x[0])  # Sort by index
 
-    # 5. Convert to messages
+    logger.info(f"build_context_messages: Total {len(all_tuples)} cells in context")
+
+    # 5. Convert to messages (in chronological order)
     messages = []
-    for cell in all_cells:
-        messages.extend(cell_to_messages(cell))
+    for idx, cell in all_tuples:
+        cell_messages = cell_to_messages(cell)
+        messages.extend(cell_messages)
+        # Log each cell being included
+        logger.info(f"build_context_messages: Cell[{idx}] type={cell.cell_type} id={cell.id}")
+        logger.info(f"  source: {cell.source[:80]}..." if len(cell.source) > 80 else f"  source: {cell.source}")
+        logger.info(f"  output: {cell.output[:80]}..." if cell.output and len(cell.output) > 80 else f"  output: {cell.output}")
+        logger.info(f"  -> {len(cell_messages)} messages")
 
+    logger.info(f"build_context_messages: Final context has {len(messages)} messages")
     return messages
 
 

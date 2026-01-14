@@ -5,6 +5,152 @@ All notable changes to Dialeng will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5] - 2025-01-13
+
+### Added
+
+#### Direct SDK Mode for Maximum Session Isolation
+- **New `use_sdk_direct` option** - Uses `claude-agent-sdk.query()` directly instead of claudette-agent wrapper for maximum isolation. Each query:
+  - Creates a completely fresh subprocess
+  - Uses a unique temporary directory as `cwd`
+  - Sets all stateless options explicitly (`continue_conversation=False`, `resume=None`, `setting_sources=[]`)
+  - Cleans up the temp directory after completion
+- **New `debug_mode` option** - When enabled, saves full prompts and responses to timestamped JSON files in `debug_log_dir`
+- **New configuration section** - `llm` section in `dialeng_config.json`:
+  ```json
+  {
+    "llm": {
+      "use_sdk_direct": true,
+      "debug_mode": false,
+      "debug_log_dir": "./debug_logs"
+    }
+  }
+  ```
+- **Automated test harness** - `test_stateless_dialoghelper.py` verifies stateless behavior with the John→Mark scenario
+
+#### Cell Version Tracking and Context Freshness
+- **Cell version tracking** - Added `version: int` and `last_modified: datetime` fields to `Cell` class to track when cells are modified
+- **Automatic output clearing** - When cell source is edited, outputs are automatically cleared to prevent stale context contamination
+- **`Cell.update_source()` method** - New method that:
+  - Detects if source actually changed
+  - Increments version counter
+  - Updates `last_modified` timestamp
+  - Clears outputs to ensure fresh context
+- **Detailed context logging** - Added comprehensive logging to `build_context_messages()` and `_stream_claudette()` to trace exactly what context is sent to LLM
+
+### Changed
+
+- **`llm_service.py`** - Added `_stream_claude_sdk_direct()` method that bypasses claudette-agent wrapper entirely
+- **`llm_service.py`** - Added detailed logging to `_stream_claudette()` showing all context messages being sent
+- **`dialeng_config.py`** - Added `use_sdk_direct`, `debug_mode`, and `debug_log_dir` fields to `DialengConfig`
+- **`dialoghelper_service.py`** - Added comprehensive logging to `build_context_messages()` showing each cell being included
+- **`app.py`** - `/cell/{cid}/source` endpoint now clears cell output when source changes
+- **`document/cell.py`** - Added version tracking fields and `update_source()` method
+- **Startup logging** - Now shows which LLM provider mode is active (SDK direct vs claudette-agent)
+
+### Fixed
+
+- **Stale context contamination** - When editing a prompt cell (e.g., changing "John" to "Mark"), the old assistant response was still included in context for subsequent queries. Now the output is automatically cleared when the source changes.
+- **Prompt cell source updates not being sent to server** - The prompt textarea used `name="prompt_source"` but the endpoint expected `source`. Added `hx_include` to include the hidden source input when posting, ensuring the correct parameter is sent. Without this fix, editing a prompt cell after running it would not update the server-side source or clear the output.
+
+### Documentation
+
+- Updated `docs/how_it_works/06_llm_integration.md`:
+  - Added SDK direct mode documentation
+  - Updated configuration options table
+
+---
+
+## [0.9.4] - 2025-01-13
+
+### Fixed
+
+#### Truly Stateless Queries via claudette-agent
+- **Fixed session contamination issue** - Claude was remembering conversation history from previous sessions even after editing notebook cells. For example, changing "John" to "Mark" in a notebook cell would still result in Claude responding with "John" because it loaded the original session.
+- **Root cause**: The `--no-session-persistence` flag only prevents SAVING new sessions, but doesn't prevent LOADING existing sessions. Claude Code stores session transcripts per-project based on the working directory (`cwd`).
+- **Solution**: Use stateless configuration with `cwd=None`:
+  1. `setting_sources=[]` - Prevents loading settings files
+  2. `cwd=None` - No working directory specified, SDK creates fresh session each time
+  3. `extra_args={'no-session-persistence': None}` - Prevents saving new sessions
+  4. claudette-agent's `_build_options()` sets `continue_conversation=False` and `resume=None` to prevent session continuation/resumption
+- **Verified stateless behavior** - Test confirms that editing notebook cells (e.g., changing "John" to "Mark") is correctly reflected in subsequent queries
+
+### Changed
+
+- **claudette-agent Chat._build_options** - Fixed missing `extra_args` handling and added explicit stateless options:
+  - Merges `self.c.extra_args` into SDK options for CLI flags like `--no-session-persistence`
+  - Explicitly sets `continue_conversation=False` to prevent session continuation
+  - Explicitly sets `resume=None` to prevent session resumption
+- **llm_service.py** - Simplified stateless configuration to use `cwd=None` instead of creating temporary directories
+
+### Updated
+
+- **claudette-agent dependency** - Updated to latest version with `extra_args` parameter support and stateless options
+
+### Documentation
+
+- Updated `docs/how_it_works/06_llm_integration.md`:
+  - Updated stateless query code example with `cwd=None` approach
+  - Documented four-mechanism stateless configuration
+  - Updated architecture diagram to reflect new stateless mechanism
+
+---
+
+## [0.9.3] - 2025-01-12
+
+### Changed
+
+#### Extended Thinking Support
+- **Real extended thinking** - Now uses claudette-agent's `maxthinktok` parameter instead of placeholder markers. When a thinking-capable model (Claude Sonnet 3.7+, Sonnet 4+, Opus 4+) is used with thinking enabled, the `stream()` method receives `maxthinktok=N` to enable actual extended reasoning.
+- **Model capability checks** - Uses `can_use_extended_thinking()` from claudette-agent to verify model support before enabling thinking. If a model doesn't support thinking, it gracefully disables with a warning log.
+- **Configurable token budget** - New `thinking.max_tokens` setting in `dialeng_config.json` (default: 10000) controls the maximum tokens allocated for extended thinking.
+
+#### Usage and Cost Tracking
+- **Token usage tracking** - `llm_service.last_usage` now exposes token counts from the last API call after each streaming response completes
+- **Cost estimation** - `llm_service.last_cost` provides estimated cost in USD from the last streaming response
+- **Automatic logging** - Usage and cost are logged automatically after each streaming response: `claudette-agent: Usage=..., Cost=$...`
+
+#### Truly Stateless Queries via claudette-agent (legacy approach)
+- **Stateless by default** - `_stream_claudette_agent()` uses `AsyncChat` with two stateless mechanisms:
+  1. `setting_sources=[]` to prevent loading settings files
+  2. **Unique temporary `cwd` per query** to prevent loading transcripts from previous sessions (Claude Code stores transcripts per project based on cwd)
+- **Notebook as sole source of truth** - Edits to notebook cells are immediately reflected in subsequent LLM queries. No "memory leak" from previous Claude Code sessions.
+- **Automatic cleanup** - Temporary directories are cleaned up after each streaming response completes
+- **claudette-agent updated** - Now uses updated claudette-agent library (v0.1.0) with `setting_sources` and `cwd` parameter support
+- **Note:** This approach was replaced in v0.9.4 with the cleaner `--no-session-persistence` CLI flag approach
+
+### Added
+
+- **`_check_thinking_support()` method** - New method in `LLMService` that checks if a model supports extended thinking using claudette-agent's capability checks
+- **`last_usage` property** - Returns usage stats from the last API call
+- **`last_cost` property** - Returns cost estimate from the last API call
+- **`thinking` config section** - New configuration section in `dialeng_config.json` and `DialengConfig` dataclass
+
+### Fixed
+
+- **Session persistence issue (complete fix)** - Fixed bug where Claude Code's session tracking caused LLM to remember conversation history separately from notebook cells. When users edited notebook cells (e.g., changing a name from "John" to "Mark"), Claude would still remember the original conversation. Root cause: Claude Code stores transcripts per project based on the working directory (`cwd`). **Complete fix uses two mechanisms:**
+  1. `setting_sources=[]` - Prevents loading settings files
+  2. **Unique temporary `cwd` per query** - Creates a fresh temp directory for each LLM call, preventing Claude Code from loading any previous transcripts. The temp directory is cleaned up after streaming completes.
+  This ensures truly stateless queries where the notebook cells are the sole source of truth for conversation history.
+- **Conversation history chronological ordering** - Fixed bug where pinned cells were placed before all non-pinned cells regardless of their actual notebook position, breaking chronological order. Now all context cells are sorted by their original notebook index before being converted to messages. This fixes LLM confusion when previous prompt/response pairs appeared out of order.
+- **Off-by-one prompt/response issue** - Fixed bug where LLM responses were consistently one prompt behind the current question. Two issues were found: (1) multiple "User:" messages in history confused the SDK, and (2) `AsyncChat._append_pr` is async but `stream()` calls it without await, so prompts were never added to history. Fix: build a single prompt string with context, manually append to `chat.h`, then call `stream(None)` to skip the broken `_append_pr` call.
+- **Claude Code credential detection** - Now uses direct `claude_agent_sdk` probe instead of searching for CLI binary. This fixes an issue where credentials weren't detected on first startup even when logged in, but worked after running any script using `claude_agent_sdk` first.
+- **System prompt context clarification** - System prompts now include a preamble explaining that conversation history may include code cells and notes from the notebook. This prevents Claude from analyzing/listing notebook cells when the user asks a simple question like "Hello".
+- **Streaming block handling** - Properly handles claudette-agent's message block format, distinguishing between thinking blocks (`type='thinking'`) and text blocks (`text` attribute)
+- **Thinking state management** - Correctly tracks thinking phase start/end across streaming, ensuring `thinking_end` is always yielded even if no text blocks follow
+
+### Documentation
+
+- Updated `docs/how_it_works/06_llm_integration.md` with:
+  - Extended thinking implementation details and configuration
+  - Usage and cost tracking documentation
+  - Updated claudette-agent code examples with `maxthinktok` parameter
+  - New configuration options table entry for `thinking.max_tokens`
+  - **Stateless query mechanism** - Explained unique `cwd` approach for truly stateless queries
+  - Updated architecture diagram to show unique temp cwd creation step
+
+---
+
 ## [0.9.2] - 2024-12-15
 
 ### Fixed

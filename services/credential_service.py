@@ -272,6 +272,59 @@ def _check_claudette_agent_available() -> bool:
         return False
 
 
+def _check_claude_agent_sdk_credentials() -> Tuple[bool, str]:
+    """
+    Check Claude Code subscription credentials via claude_agent_sdk directly.
+
+    This is more reliable than searching for the CLI binary because:
+    1. The SDK handles finding/bundling the CLI internally
+    2. The SDK may have credentials cached from previous runs
+    3. This matches how the SDK is actually used at runtime
+    """
+    try:
+        import asyncio
+        from claude_agent_sdk import query, ClaudeAgentOptions
+
+        async def _probe():
+            """Run a minimal probe to check if SDK auth works."""
+            options = ClaudeAgentOptions(
+                model="sonnet",
+                max_turns=0,  # Don't actually run a turn
+            )
+            # Just initialize - if auth fails, this will raise
+            # We use a simple prompt that will be rejected due to max_turns=0
+            # but the auth check happens before that
+            try:
+                async for _ in query(prompt="test", options=options):
+                    pass
+            except Exception as e:
+                err_str = str(e).lower()
+                # These errors indicate auth is working but something else failed
+                if "max_turns" in err_str or "turn" in err_str:
+                    return True, "claude_agent_sdk: auth verified (max_turns reached)"
+                # Auth-specific failures
+                if "login" in err_str or "auth" in err_str or "credential" in err_str:
+                    return False, f"claude_agent_sdk: auth failed: {e}"
+                # Unknown error - might still work, be optimistic
+                return True, f"claude_agent_sdk: probe completed with: {e}"
+            return True, "claude_agent_sdk: probe completed successfully"
+
+        # Run the async probe
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_probe())
+        finally:
+            loop.close()
+
+    except ImportError:
+        return False, "claude_agent_sdk: not installed"
+    except Exception as e:
+        err_str = str(e).lower()
+        if "login" in err_str or "auth" in err_str:
+            return False, f"claude_agent_sdk: auth failed: {e}"
+        return False, f"claude_agent_sdk: probe failed: {e}"
+
+
 def detect_credentials(dotenv_path: Optional[Path] = None) -> CredentialStatus:
     """
     Detect available LLM credentials.
@@ -318,6 +371,19 @@ def detect_credentials(dotenv_path: Optional[Path] = None) -> CredentialStatus:
             return _credential_status
 
     # Step 3: Check Claude Code subscription
+    # First try direct SDK probe (more reliable as SDK handles CLI internally)
+    if has_claudette_agent:
+        ok, msg = _check_claude_agent_sdk_credentials()
+        if ok:
+            _credential_status = CredentialStatus(
+                available=True, provider="claudette_agent", backend="claude_code_subscription",
+                source="claude_agent_sdk", details=msg
+            )
+            return _credential_status
+        else:
+            logger.info(f"claude_agent_sdk probe: {msg}")
+
+    # Fallback: try CLI-based detection
     cli_path, cli_src = _find_claude_cli_path()
     if cli_path:
         ok, msg = _check_claude_code_credentials(cli_path)

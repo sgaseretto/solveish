@@ -42,15 +42,25 @@ DEFAULT_CONFIG = {
             "comment": "Model IDs for AWS Bedrock (with region prefix and version suffix)"
         },
         "claudette_agent_map": {
-            "claude-sonnet-4-5": "claude-sonnet-4-5",
-            "claude-haiku-4-5": "claude-haiku-4-5",
-            "claude-sonnet-3-7": "claude-sonnet-3-7",
-            "comment": "Model IDs for claudette-agent (Claude Code subscription) - uses simple names"
+            "claude-sonnet-4-5": "sonnet",
+            "claude-haiku-4-5": "haiku",
+            "claude-sonnet-3-7": "sonnet",
+            "comment": "Model IDs for Claude Code subscription - uses simple names (sonnet, haiku, opus)"
         }
     },
     "modes": {
         "default": "mock",
         "comment": "Default dialog mode when opening a notebook. Options: mock, learning, concise, standard"
+    },
+    "thinking": {
+        "max_tokens": 10000,
+        "comment": "Maximum tokens for extended thinking. Set to 0 to disable. Requires thinking-capable model (Claude Sonnet 3.7+, Sonnet 4+, Opus 4+)"
+    },
+    "llm": {
+        "use_sdk_direct": True,
+        "debug_mode": False,
+        "debug_log_dir": "./debug_logs",
+        "comment": "LLM provider settings. use_sdk_direct=true uses claude-agent-sdk directly for maximum isolation (stateless). Set to false to use claudette-agent wrapper."
     }
 }
 
@@ -79,6 +89,14 @@ class DialengConfig:
 
     # Default mode
     default_mode: str = "mock"
+
+    # Extended thinking settings
+    thinking_max_tokens: int = 10000
+
+    # LLM provider settings
+    use_sdk_direct: bool = True  # Use claude-agent-sdk directly for maximum isolation
+    debug_mode: bool = False  # Enable debug logging to files
+    debug_log_dir: str = "./debug_logs"  # Directory for debug logs
 
     # Raw config for reference
     raw_config: Dict[str, Any] = field(default_factory=dict)
@@ -158,6 +176,16 @@ def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
     modes = raw.get("modes", {})
     config.default_mode = modes.get("default", "mock")
 
+    # Thinking settings
+    thinking = raw.get("thinking", {})
+    config.thinking_max_tokens = thinking.get("max_tokens", 10000)
+
+    # LLM provider settings
+    llm = raw.get("llm", {})
+    config.use_sdk_direct = llm.get("use_sdk_direct", True)
+    config.debug_mode = llm.get("debug_mode", False)
+    config.debug_log_dir = llm.get("debug_log_dir", "./debug_logs")
+
     return config
 
 
@@ -235,8 +263,12 @@ def print_config_status(config: DialengConfig) -> None:
     """Print config status for startup logging."""
     models = ", ".join(m.name for m in config.available_models)
     default_model = config.get_default_model()
+    sdk_mode = "SDK direct" if config.use_sdk_direct else "claudette-agent"
     print(f"   Config: dialeng_config.json")
     print(f"      AWS Region:     {config.aws_region}")
     print(f"      Models:         {models}")
     print(f"      Default Model:  {default_model}")
     print(f"      Default Mode:   {config.default_mode}")
+    print(f"      LLM Provider:   {sdk_mode}")
+    if config.debug_mode:
+        print(f"      Debug Mode:     ON (logs to {config.debug_log_dir})")
