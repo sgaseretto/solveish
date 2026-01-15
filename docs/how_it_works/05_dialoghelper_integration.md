@@ -120,7 +120,7 @@ Without these magic variables, users would need to explicitly pass the notebook 
 
 ```python
 # Without magic variables (tedious):
-read_msg(dlg_name="my_notebook", msgid="abc123", n=-1)
+read_msg(dname="/my_notebook", id="abc123", n=-1)
 
 # With magic variables (convenient):
 read_msg(-1)
@@ -169,27 +169,31 @@ All endpoints receive `dlg_name` parameter (the notebook ID).
 | Endpoint | Purpose | Parameters |
 |----------|---------|------------|
 | `POST /curr_dialog_` | Get dialog info | `with_messages: bool` |
-| `POST /msg_idx_` | Get cell index | `msgid: str` |
+| `POST /msg_idx_` | Get cell index | `id_: str` |
 | `POST /find_msgs_` | Search cells | `re_pattern, msg_type, limit` |
-| `POST /read_msg_` | Read cell content | `n, relative, msgid, view_range, nums` |
+| `POST /read_msg_` | Read cell content | `n, relative, id_, view_range, nums` |
 
 ### Modification Endpoints
 
 | Endpoint | Purpose | Parameters |
 |----------|---------|------------|
-| `POST /add_relative_` | Add new cell | `content, placement, msgid, msg_type, ...` |
+| `POST /add_relative_` | Add new cell | `content, placement, id_, msg_type, ...` |
 | `POST /rm_msg_` | Remove cell | `msid: str` |
-| `POST /update_msg_` | Update properties | `msgid, **kwargs` |
-| `POST /add_runq_` | Queue for execution | `msgid, api` |
+| `POST /update_msg_` | Update properties | `id_, **kwargs` |
+| `POST /add_runq_` | Queue for execution | `id_, api` |
 
 ### Content Editing Endpoints
 
 | Endpoint | Purpose | Parameters |
 |----------|---------|------------|
-| `POST /msg_insert_line_` | Insert line | `msgid, insert_line, new_str` |
-| `POST /msg_str_replace_` | Replace string | `msgid, old_str, new_str` |
-| `POST /msg_strs_replace_` | Replace multiple | `msgid, old_strs, new_strs` (JSON arrays) |
-| `POST /msg_replace_lines_` | Replace line range | `msgid, start_line, end_line, new_content` |
+| `POST /msg_insert_line_` | Insert line | `id_, insert_line, new_str` |
+| `POST /msg_str_replace_` | Replace string | `id_, old_str, new_str` |
+| `POST /msg_strs_replace_` | Replace multiple | `id_, old_strs, new_strs` (JSON arrays) |
+| `POST /msg_replace_lines_` | Replace line range | `id_, start_line, end_line, new_content` |
+
+> **Note:** The server endpoints use `id_` (with underscore) as the parameter name due to FastHTML conventions, but the dialoghelper library uses `id=` in its function calls and handles the mapping internally.
+
+> **Note:** Line-based functions (`msg_insert_line`, `msg_replace_lines`, `msg_del_lines`) use **1-based line indexing** in the dialoghelper library.
 
 ### Utility Endpoints
 
@@ -525,20 +529,39 @@ The server maintains async queues per `(notebook_id, data_id)` pair for thread-s
 from dialoghelper import read_msg, update_msg, find_msgs, add_msg
 
 # Read the previous cell
+# Note: read_msg() returns an AttrDict with flat structure (.content, .type, .id, etc.)
 prev = read_msg(-1)
-print(prev['source'])
+print(prev.content)  # Access via attribute (recommended)
+print(prev['content'])  # Or via dict key
 
 # Find all code cells
+# Note: find_msgs() returns a list of AttrDicts
 code_cells = find_msgs(msg_type="code")
 for cell in code_cells:
-    print(f"Cell {cell['idx']}: {cell['id']}")
+    print(f"Cell {cell.idx}: {cell.id} - {cell.content[:30]}...")
 
 # Pin the current cell (keeps it in LLM context)
 update_msg(pinned=True)
 
 # Add a new note cell after the current one
-add_msg("This is a note", msg_type="note", placement="after")
+# Returns the new cell's ID as a string
+new_id = add_msg("This is a note", msg_type="note", placement="after")
+print(f"Created cell: {new_id}")
 ```
+
+### Response Format
+
+DialogHelper functions return **flat** AttrDict objects (not nested). Available fields:
+
+| Field | Description |
+|-------|-------------|
+| `.id` | Cell ID (string) |
+| `.idx` | Cell index (int) |
+| `.type` | Cell type: "code", "note", or "prompt" |
+| `.content` | Cell source content |
+| `.output` | Cell output (if any) |
+| `.pinned` | Whether cell is pinned (bool) |
+| `.skipped` | Whether cell is skipped (bool) |
 
 ### How Context Building Uses These Functions
 

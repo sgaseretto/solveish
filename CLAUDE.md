@@ -4,3 +4,21 @@
 - Maintain and expand **guides** that explain how to navigate the codebase and use new or updated functionality.
 - Use **Mermaid diagrams** within markdown files for architecture, flows, and visual explanations.
 - After implementing new features or fixes—and before submitting a PR—update `docs/how_it_works` to reflect the project's internal mechanics.
+
+- Some docs and repos you can check are the following when you want to understand how things we are using work:
+    - https://www.fastht.ml/docs/tutorials/e2e.html.md
+    - https://www.fastht.ml/docs/explains/explaining_xt_components.html.md
+    - https://www.fastht.ml/docs/ref/concise_guide.html#js
+    - https://www.fastht.ml/docs/api/xtend.html#script
+    - https://www.fastht.ml/docs/api/js.html
+    - https://www.fastht.ml/docs/api/xtend.html#scriptx
+    - https://www.fastht.ml/docs/api/components.html.md
+    - Dialoghelper:
+        - repo: https://github.com/AnswerDotAI/dialoghelper
+        - docs: https://answerdotai.github.io/dialoghelper/
+    - Fastcore:
+        - repo: https://github.com/AnswerDotAI/fastcore/tree/main
+        - docs: https://fastcore.fast.ai/
+    - NBDev:
+        - repo: https://github.com/AnswerDotAI/nbdev
+        - docs: https://nbdev.fast.ai/getting_started.html
