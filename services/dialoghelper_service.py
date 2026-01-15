@@ -153,18 +153,16 @@ def read_msg(
         lines = content.split('\n')
         content = '\n'.join(f"{i+1}: {line}" for i, line in enumerate(lines))
 
-    # dialoghelper expects {'msg': {...}} format with 'content' field (not 'source')
-    # Functions like msg_str_replace use: read_msg()['msg']['content']
+    # dialoghelper expects flat dict format - msg_str_replace uses read_msg()['content']
+    # dict2obj converts this so both result.content and result['content'] work
     return {
-        "msg": {
-            "id": cell.id,
-            "idx": idx,
-            "type": cell.cell_type,
-            "content": content,  # dialoghelper uses 'content', not 'source'
-            "output": cell.output,
-            "pinned": cell.pinned,
-            "skipped": cell.skipped
-        }
+        "id": cell.id,
+        "idx": idx,
+        "type": cell.cell_type,
+        "content": content,  # dialoghelper uses 'content', not 'source'
+        "output": cell.output,
+        "pinned": cell.pinned,
+        "skipped": cell.skipped
     }
 
 

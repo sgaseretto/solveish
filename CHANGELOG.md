@@ -5,6 +5,86 @@ All notable changes to Dialeng will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.6] - 2025-01-13
+
+### Changed
+
+#### Major Code Modularization
+- **Reduced app.py from ~4,000 to ~1,500 lines** - Extracted CSS, JavaScript, and UI components to separate modules
+- **External static assets** - CSS and JavaScript now served from `static/` directory for easier maintenance and browser caching
+- **UI component package** - New `ui/` package with modular, reusable FastHTML components
+
+### Added
+
+#### Static Assets (`static/`)
+- **`static/css/themes.css`** - CSS custom properties for dark/light themes
+- **`static/css/base.css`** - Reset, typography, responsive layout rules
+- **`static/css/components.css`** - Cell, button, badge, markdown preview styles
+- **`static/css/editor.css`** - Ace editor container and focus styles
+- **`static/js/app.js`** - All client-side logic (~1,700 lines) with clear section headers:
+  - Global State Management
+  - Ace Editor Management
+  - Cell Focus & Selection
+  - Keyboard Shortcuts
+  - Preview/Edit Toggle (with event delegation fix)
+  - WebSocket & Streaming
+  - Initialization
+
+#### UI Components Package (`ui/`)
+- **`ui/__init__.py`** - Public exports for all UI components
+- **`ui/base.py`** - Shared utilities (`get_collapse_class`)
+- **`ui/controls.py`** - Interactive controls:
+  - `TypeSelect` - Cell type dropdown
+  - `CollapseBtn` - Collapse level toggle button
+  - `AddButtons` - "+ Code", "+ Note", "+ Prompt" buttons
+- **`ui/layout.py`** - Page-level components:
+  - `NotebookPage` - Complete page with header, cells, footer
+  - `AllCells` - Container with all cells
+  - `AllCellsContent` - Cells without wrapper ID (for innerHTML swaps)
+- **`ui/oob.py`** - Out-of-Band variants for WebSocket:
+  - `AllCellsOOB` - AllCells with `hx-swap-oob`
+  - `CellViewOOB` - CellView with `hx-swap-oob`
+- **`ui/cells/`** - Cell type components:
+  - `ui/cells/base.py` - `CellView` dispatcher and `CellHeader`
+  - `ui/cells/code_cell.py` - `CodeCellView` (Ace editor + output)
+  - `ui/cells/note_cell.py` - `NoteCellView` (markdown preview)
+  - `ui/cells/prompt_cell.py` - `PromptCellView` (user input + AI response)
+
+#### Documentation
+- **`docs/how_it_works/07_code_organization.md`** - Comprehensive guide covering:
+  - Directory structure and architecture overview
+  - Static assets organization (CSS/JS)
+  - UI component hierarchy and patterns
+  - Data flow diagrams (code/prompt execution, OOB updates)
+  - How to add new cell types, keyboard shortcuts, themes
+  - Common FastHTML patterns and examples
+  - Testing procedures
+
+### Fixed
+
+#### GUI Reliability (Double-Click Editing)
+- **Fixed unreliable double-click editing on note/prompt cells** - Changed from per-element event listeners to event delegation pattern
+- **Root cause**: `setupPreviewEditing()` was not called after WebSocket OOB updates, causing listeners to be lost when cells were replaced
+- **Solution**: Single document-level `dblclick` listener using event delegation, which works regardless of DOM changes:
+  ```javascript
+  document.addEventListener('dblclick', function(e) {
+      const preview = e.target.closest('.md-preview, .ai-preview, .prompt-preview');
+      if (!preview) return;
+      const cellId = preview.dataset.cellId;
+      const field = preview.dataset.field;
+      if (cellId && field) switchToEdit(cellId, field);
+  });
+  ```
+
+### Technical Details
+
+- **External JavaScript via static route** - Uses `Script(src="/static/js/app.js")` to load JS externally (not `ScriptX` which embeds inline and escapes backslashes)
+- **Static file serving route** - New `@rt("/static/{path:path}")` route serves files from `static/` directory
+- **Component pattern** - All UI components follow FastHTML conventions with `*args` for children and `**kwargs` for attributes
+- **Import structure** - Clean imports: `from ui import CellView, NotebookPage, AllCells, AddButtons`
+
+---
+
 ## [0.9.5] - 2025-01-13
 
 ### Added

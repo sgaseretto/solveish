@@ -1,0 +1,375 @@
+/* ==========================================================================
+   Dialeng Component Styles
+
+   This file contains styles for all UI components:
+   - Header and toolbar
+   - Buttons
+   - Cells (code, note, prompt)
+   - Badges and status indicators
+   - Markdown rendering
+   - Forms and inputs
+   ========================================================================== */
+
+/* ==========================================================================
+   Header and Toolbar
+   ========================================================================== */
+
+.header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 0; border-bottom: 1px solid var(--border); margin-bottom: 20px;
+}
+.title { font-size: 1.3rem; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+.title-icon { font-size: 1.5rem; }
+.toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* ==========================================================================
+   Buttons
+   ========================================================================== */
+
+.btn {
+    padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg-secondary); color: var(--text-primary);
+    cursor: pointer; font-size: 0.85rem; transition: all 0.15s;
+    display: inline-flex; align-items: center; gap: 4px;
+}
+.btn:hover { background: var(--bg-cell); border-color: var(--accent-blue); }
+.btn-sm { padding: 4px 8px; font-size: 0.75rem; }
+.btn-icon { padding: 4px 6px; font-size: 0.9rem; }
+.btn-run { background: var(--accent-green); border-color: var(--accent-green); color: #000; }
+.btn-run:hover { background: #2ea043; }
+.btn-cancel-all { background: var(--accent-red); border-color: var(--accent-red); color: white; }
+.btn-cancel-all:hover { background: #c62828; }
+.btn-save { background: var(--accent-blue); border-color: var(--accent-blue); }
+.btn-cancel { background: var(--accent-red); border-color: var(--accent-red); color: #fff; }
+.btn-cancel:hover { background: #d73a49; }
+
+/* Theme toggle button */
+.theme-toggle {
+    background: var(--bg-cell); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 10px; cursor: pointer;
+    font-size: 1rem; transition: all 0.15s;
+}
+.theme-toggle:hover { border-color: var(--accent-blue); }
+
+/* Dropdowns/Selects */
+.mode-select, .model-select {
+    padding: 4px 8px; background: var(--bg-cell); border: 1px solid var(--border);
+    border-radius: 4px; color: var(--text-primary); font-size: 0.8rem;
+}
+.model-select { margin-left: 4px; }
+.type-select {
+    padding: 3px 6px; background: var(--bg-primary); border: 1px solid var(--border);
+    border-radius: 4px; color: var(--text-primary); font-size: 0.7rem;
+}
+
+/* ==========================================================================
+   Cells - Base Styles
+   ========================================================================== */
+
+.cell {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 12px;
+    overflow: hidden;
+    transition: border-color 0.15s;
+}
+.cell:focus-within { border-color: var(--accent-blue); }
+.cell.streaming { border-color: var(--accent-orange); }
+.cell.queued { border-color: var(--accent-yellow, #f0c000); }
+
+.cell.queued .btn-run {
+    background: var(--accent-yellow, #f0c000);
+    color: #000;
+    cursor: not-allowed;
+}
+
+/* Cell header */
+.cell-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 6px 12px; background: var(--bg-cell);
+    border-bottom: 1px solid var(--border);
+}
+
+/* Cell type badges */
+.cell-badge {
+    font-size: 0.65rem; font-weight: 700; text-transform: uppercase;
+    padding: 2px 8px; border-radius: 4px; letter-spacing: 0.5px;
+}
+.cell-badge.code { background: var(--accent-green); color: #000; }
+.cell-badge.note { background: var(--accent-purple); color: #000; }
+.cell-badge.prompt { background: var(--accent-orange); color: #000; }
+
+.cell-meta { font-size: 0.7rem; color: var(--text-muted); display: flex; align-items: center; gap: 8px; }
+.cell-actions { display: flex; gap: 4px; }
+.cell-body { padding: 0; }
+
+/* ==========================================================================
+   Cells - Source/Input
+   ========================================================================== */
+
+.source {
+    width: 100%; min-height: 60px; padding: 12px;
+    background: var(--bg-input); border: none;
+    color: var(--text-primary);
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.9rem; resize: vertical;
+    border-bottom: 1px solid var(--border);
+}
+.source:focus { outline: none; background: #0a0c10; }
+.source:last-child { border-bottom: none; }
+
+/* ==========================================================================
+   Cells - Output
+   ========================================================================== */
+
+.cell-output {
+    background: var(--bg-input);
+    border-top: 1px solid var(--border);
+}
+.cell-output:empty { display: none; }
+.cell-output.error { }
+
+/* Stream output (print, tqdm, etc.) */
+.cell-output .stream-output {
+    margin: 0;
+    padding: 12px;
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    font-size: 0.85rem;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 400px;
+    overflow-y: auto;
+    background: transparent;
+}
+.cell-output .stream-output.stderr,
+.cell-output.error .stream-output {
+    color: var(--accent-red);
+}
+
+/* Display data (images, HTML, plots, etc.) */
+.cell-output .display-data { padding: 12px; }
+.cell-output .mime-image { max-width: 100%; height: auto; display: block; }
+.cell-output .mime-svg svg { max-width: 100%; height: auto; }
+.cell-output .mime-text,
+.cell-output .mime-json {
+    margin: 0;
+    font-family: 'SF Mono', Monaco, monospace;
+    font-size: 0.85rem;
+    white-space: pre-wrap;
+}
+.cell-output .mime-html { /* Allow full HTML rendering - trusted user code */ }
+.cell-output pre {
+    margin: 0;
+    padding: 12px;
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    font-size: 0.85rem;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+/* Legacy output class for backwards compatibility */
+.output {
+    padding: 12px; background: var(--bg-input);
+    font-family: monospace; font-size: 0.85rem;
+    white-space: pre-wrap; border-top: 1px solid var(--border);
+}
+.output.error { color: var(--accent-red); }
+.output:empty { display: none; }
+
+/* ==========================================================================
+   Prompt Cells
+   ========================================================================== */
+
+.prompt-section { border-bottom: 1px solid var(--border); }
+.prompt-section:last-child { border-bottom: none; }
+
+.prompt-label {
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px 12px; background: var(--bg-cell);
+    font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+    color: var(--text-muted); border-bottom: 1px solid var(--border);
+}
+.prompt-label.user { color: var(--accent-blue); }
+.prompt-label.ai { color: var(--accent-orange); }
+
+.prompt-content {
+    width: 100%; min-height: 50px; padding: 12px;
+    background: var(--bg-input); border: none;
+    color: var(--text-primary); font-size: 0.9rem;
+    font-family: inherit; resize: vertical;
+}
+.prompt-content:focus { outline: none; background: #0a0c10; }
+
+/* ==========================================================================
+   Markdown Preview
+   ========================================================================== */
+
+.md-preview, .ai-preview {
+    padding: 12px; min-height: 40px;
+    cursor: pointer;
+}
+.md-preview:hover, .ai-preview:hover { background: rgba(88, 166, 255, 0.05); }
+.md-preview h1, .ai-preview h1 { font-size: 1.5em; margin-bottom: 10px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+.md-preview h2, .ai-preview h2 { font-size: 1.3em; margin-bottom: 8px; }
+.md-preview h3, .ai-preview h3 { font-size: 1.1em; margin-bottom: 6px; }
+.md-preview p, .ai-preview p { margin-bottom: 10px; }
+.md-preview ul, .md-preview ol, .ai-preview ul, .ai-preview ol { margin: 10px 0; padding-left: 24px; }
+.md-preview li, .ai-preview li { margin-bottom: 4px; }
+.md-preview strong, .ai-preview strong { color: var(--accent-blue); }
+.md-preview em, .ai-preview em { color: var(--accent-purple); }
+
+/* Code blocks in markdown */
+.md-preview pre, .ai-preview pre {
+    background: var(--bg-cell); padding: 12px; border-radius: 6px;
+    overflow-x: auto; margin: 10px 0; position: relative;
+}
+.md-preview code, .ai-preview code {
+    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.9em;
+}
+.md-preview p code, .ai-preview p code {
+    background: var(--bg-cell); padding: 2px 6px; border-radius: 3px;
+}
+
+/* Copy button for code blocks */
+.copy-btn {
+    position: absolute; top: 8px; right: 8px;
+    padding: 4px 8px; font-size: 0.7rem;
+    background: var(--bg-secondary); border: 1px solid var(--border);
+    border-radius: 4px; color: var(--text-muted); cursor: pointer;
+    opacity: 0; transition: opacity 0.2s;
+}
+.md-preview pre:hover .copy-btn, .ai-preview pre:hover .copy-btn { opacity: 1; }
+.copy-btn:hover { background: var(--accent-blue); color: #000; }
+.copy-btn.copied { background: var(--accent-green); color: #000; }
+
+/* Edit hint */
+.edit-hint {
+    font-size: 0.7rem; color: var(--text-muted); opacity: 0.5;
+    padding: 4px 12px; text-align: right;
+}
+
+/* ==========================================================================
+   Add Cell Buttons
+   ========================================================================== */
+
+.add-row {
+    display: flex; justify-content: center; gap: 8px;
+    padding: 6px; opacity: 0.3; transition: opacity 0.2s;
+}
+.add-row:hover { opacity: 1; }
+
+/* ==========================================================================
+   Status Messages
+   ========================================================================== */
+
+.status {
+    padding: 8px 12px; border-radius: 4px; font-size: 0.85rem;
+    display: inline-flex; align-items: center; gap: 6px; margin-bottom: 12px;
+}
+.status.success { background: rgba(63, 185, 80, 0.2); color: var(--accent-green); }
+.status.error { background: rgba(248, 81, 73, 0.2); color: var(--accent-red); }
+
+/* ==========================================================================
+   File List
+   ========================================================================== */
+
+.file-list {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    padding: 12px; background: var(--bg-secondary);
+    border-radius: 6px; margin-bottom: 16px;
+}
+.file-item {
+    padding: 6px 12px; background: var(--bg-cell);
+    border: 1px solid var(--border); border-radius: 4px;
+    font-size: 0.85rem; cursor: pointer; transition: all 0.15s;
+    text-decoration: none; color: var(--text-primary);
+}
+.file-item:hover { border-color: var(--accent-blue); }
+.file-item.active { border-color: var(--accent-blue); background: rgba(88, 166, 255, 0.1); }
+
+/* ==========================================================================
+   Streaming and Thinking Indicators
+   ========================================================================== */
+
+.streaming-indicator {
+    display: inline-block; width: 8px; height: 8px;
+    background: var(--accent-orange); border-radius: 50%;
+    animation: pulse 1s infinite;
+    margin-left: 8px;
+}
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+.thinking-indicator {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 0.85rem; color: var(--accent-purple);
+    animation: thinking-pulse 1.5s ease-in-out infinite;
+}
+@keyframes thinking-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+/* ==========================================================================
+   Cell Collapse/Fold
+   ========================================================================== */
+
+/* Legacy full collapse */
+.cell.collapsed .cell-body { display: none; }
+.cell.collapsed { opacity: 0.7; }
+.collapse-btn {
+    background: none; border: none; cursor: pointer;
+    color: var(--text-muted); font-size: 0.85rem;
+    padding: 2px 4px; transition: transform 0.2s;
+}
+.collapse-btn:hover { color: var(--text-primary); }
+.cell.collapsed .collapse-btn { transform: rotate(-90deg); }
+
+/* Multi-level collapse: Scrollable mode - limited height with scroll */
+.collapse-scrollable {
+    max-height: 168px !important;
+    overflow-y: auto !important;
+    min-height: 40px !important;
+}
+.collapse-scrollable::-webkit-scrollbar { width: 6px; }
+.collapse-scrollable::-webkit-scrollbar-track { background: var(--bg-secondary); }
+.collapse-scrollable::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.collapse-scrollable::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* Multi-level collapse: Summary mode - first line only with ellipsis */
+.collapse-summary {
+    max-height: 2.25em !important;
+    overflow: hidden !important;
+    white-space: nowrap !important;
+    text-overflow: ellipsis !important;
+    padding: 6px 12px !important;
+}
+.collapse-summary * {
+    display: inline !important;
+    white-space: nowrap !important;
+}
+
+/* Section collapse buttons */
+.section-collapse-btn {
+    background: none; border: none; cursor: pointer;
+    color: var(--text-muted); font-size: 0.7rem;
+    padding: 2px 6px; margin-left: 8px;
+    border-radius: 3px; transition: all 0.15s;
+}
+.section-collapse-btn:hover {
+    background: var(--bg-cell);
+    color: var(--text-primary);
+}
+/* Collapse level indicators */
+.section-collapse-btn[data-level="0"]::after { content: ""; }
+.section-collapse-btn[data-level="1"]::after { content: ""; }
+.section-collapse-btn[data-level="2"]::after { content: ""; }
+
+/* Cell header collapse controls */
+.collapse-controls {
+    display: flex; align-items: center; gap: 4px;
+    font-size: 0.7rem; color: var(--text-muted);
+}
+.collapse-controls .label {
+    font-size: 0.6rem; text-transform: uppercase; opacity: 0.7;
+}
