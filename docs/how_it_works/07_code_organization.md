@@ -6,31 +6,51 @@ This document explains the modular architecture of the Dialeng codebase, includi
 
 Dialeng follows a **layered architecture** with clear separation of concerns:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        app.py                                │
-│              (Entry point, routes, app config)               │
-└─────────────────────────────────────────────────────────────┘
-                              │
-        ┌─────────────────────┼─────────────────────┐
-        ▼                     ▼                     ▼
-┌───────────────┐    ┌───────────────┐    ┌───────────────┐
-│    static/    │    │      ui/      │    │   services/   │
-│  CSS/JS assets│    │  Components   │    │ Business logic│
-└───────────────┘    └───────────────┘    └───────────────┘
-                              │                     │
-                              └─────────┬───────────┘
-                                        ▼
-                        ┌─────────────────────────────┐
-                        │         document/           │
-                        │    (Cell, Notebook models)  │
-                        └─────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph APP["app.py"]
+        ENTRY["Entry point, routes, app config"]
+    end
+
+    subgraph ASSETS["static/"]
+        CSS["CSS/JS assets"]
+    end
+
+    subgraph UI["ui/"]
+        COMP["Components"]
+    end
+
+    subgraph SVC["services/"]
+        FEAT["Features"]
+    end
+
+    subgraph CORE["core/"]
+        EXT_INFRA["Extension Infra"]
+    end
+
+    subgraph EXT["extensions/"]
+        USER_EXT["User Extensions"]
+    end
+
+    subgraph DOC["document/"]
+        MODELS["Cell, Notebook models"]
+    end
+
+    APP --> ASSETS
+    APP --> UI
+    APP --> SVC
+    UI --> CORE
+    UI --> EXT
+    SVC --> CORE
+    SVC --> EXT
+    CORE --> DOC
+    EXT --> DOC
 ```
 
 ## Directory Structure
 
 ```
-west-monroe/
+dialeng/
 ├── app.py                    # Main application (~1,500 lines)
 ├── state.py                  # Global state documentation
 ├── static/                   # Frontend assets
@@ -53,13 +73,25 @@ west-monroe/
 │       ├── code_cell.py      # CodeCellView
 │       ├── note_cell.py      # NoteCellView
 │       └── prompt_cell.py    # PromptCellView
-├── services/                 # Business logic (existing)
+├── core/                     # Extension infrastructure (NEW)
+│   ├── __init__.py           # Public exports
+│   ├── dispatch.py           # Type dispatch (render_cell, cell_to_llm_messages)
+│   ├── callbacks.py          # 2-way callback system (ExecutionContext, Callback)
+│   ├── registry.py           # Extension registry (register_callback, etc.)
+│   └── extensions.py         # Extension loading from extensions/
+├── extensions/               # User extensions (NEW)
+│   ├── __init__.py
+│   └── example_callbacks.py  # Example: ExecutionTimingCallback
+├── services/                 # Feature implementations
 │   ├── kernel/               # Python code execution
+│   │   ├── kernel_service.py
+│   │   ├── execution_queue.py
+│   │   └── subprocess_kernel.py
 │   ├── llm_service.py        # LLM provider abstraction
-│   ├── dialoghelper_service.py
+│   ├── dialoghelper_service.py  # Remote notebook API
 │   ├── credential_service.py
 │   └── dialeng_config.py
-├── document/                 # Data models (existing)
+├── document/                 # Data models
 │   ├── cell.py               # Cell, CellOutput, CellState
 │   ├── notebook.py           # Notebook model
 │   └── serialization.py      # .ipynb serialization
@@ -605,6 +637,111 @@ uv run pytest test_stateless_dialoghelper.py -v
 
 ---
 
+## 8. Architecture Design: `core/` vs `services/`
+
+A key architectural decision in Dialeng is the separation between **extension infrastructure** (`core/`) and **feature implementations** (`services/`). Understanding this distinction helps you decide where new code belongs.
+
+### The Distinction
+
+```mermaid
+flowchart TB
+    subgraph HTTP["HTTP interface"]
+        APP["app.py (Routes)"]
+    end
+
+    subgraph SERVICES["services/ - WHAT the system does"]
+        direction LR
+        DH["dialoghelper_service.py<br/>(remote notebook API)"]
+        LLM["llm_service.py<br/>(LLM integration)"]
+        KERN["kernel/<br/>(code execution)"]
+    end
+
+    subgraph CORE["core/ - HOW to extend it"]
+        direction LR
+        DISP["dispatch.py<br/>(type dispatch)"]
+        CB["callbacks.py<br/>(callback system)"]
+        REG["registry.py<br/>(registration)"]
+        EXTN["extensions.py<br/>(extension loading)"]
+    end
+
+    subgraph DATA["Data models"]
+        DOC["document/"]
+    end
+
+    HTTP --> SERVICES
+    SERVICES --> CORE
+    CORE --> DATA
+```
+
+### `core/` = Extension Infrastructure ("How to extend")
+
+The `core/` package contains **mechanisms** - patterns that enable extensibility:
+
+| File | Purpose | Extension Author Uses It To... |
+|------|---------|-------------------------------|
+| `dispatch.py` | Type dispatch routing | Register new cell type renderers, LLM converters |
+| `callbacks.py` | 2-way callback system | Hook into cell execution lifecycle |
+| `registry.py` | Registration system | Register cell types, callbacks, services |
+| `extensions.py` | Extension loading | (Automatic - loads from `extensions/`) |
+
+These are **meta-level** concerns about *how* to extend the system.
+
+### `services/` = Feature Implementations ("What the system does")
+
+The `services/` package contains **features** - actual functionality that users interact with:
+
+| File | Purpose | What It Does |
+|------|---------|--------------|
+| `dialoghelper_service.py` | Remote notebook API | `get_msg_idx()`, `find_msgs()`, `read_msg()`, etc. |
+| `llm_service.py` | LLM integration | Talk to Claude/other LLMs |
+| `kernel/` | Code execution | Execute Python code in subprocess |
+| `credential_service.py` | Credentials | Detect and manage API credentials |
+
+These are **domain-level** concerns about *what* the system does.
+
+### The Key Test
+
+> **"Would an extension author need to modify this to add a new cell type?"**
+
+| File | Answer | Reasoning |
+|------|--------|-----------|
+| `core/dispatch.py` | **Yes** | Register new renderer with `@register_renderer("mytype")` |
+| `core/callbacks.py` | **Yes** | Create callback with `class MyCallback(Callback)` |
+| `services/dialoghelper_service.py` | **No** | It just queries cells, doesn't define how to handle them |
+| `services/llm_service.py` | **No** | It uses cells, doesn't define new cell behavior |
+
+### The Integration Point
+
+Services **consume** core infrastructure - they don't define it:
+
+```python
+# services/dialoghelper_service.py
+def cell_to_messages(cell) -> List[Dict]:
+    from core.dispatch import cell_to_llm_messages  # Uses core infrastructure
+    return cell_to_llm_messages(cell)
+```
+
+### Why This Matters
+
+This separation enables:
+
+1. **Clean extensibility** - Extension authors only need to understand `core/`
+2. **Feature isolation** - Services can be modified without affecting extensions
+3. **Clear boundaries** - Easy to decide where new code belongs
+4. **Testability** - Infrastructure and features can be tested independently
+
+### Where Should My Code Go?
+
+| If you're building... | Put it in... | Example |
+|-----------------------|--------------|---------|
+| A new cell type | `extensions/` using `core/` | Custom "diagram" cell |
+| A new execution hook | `extensions/` using `core/` | Auto-import callback |
+| A new API endpoint feature | `services/` + `app.py` route | New dialoghelper command |
+| A new LLM provider | `services/llm_service.py` | Ollama integration |
+| A new dispatch mechanism | `core/` | New type dispatch function |
+
+---
+
 ## Summary
 
 | Layer | Files | Purpose |
@@ -612,6 +749,8 @@ uv run pytest test_stateless_dialoghelper.py -v
 | **Static** | `static/css/*.css`, `static/js/app.js` | Frontend assets |
 | **UI** | `ui/*.py`, `ui/cells/*.py` | FastHTML components |
 | **App** | `app.py` | Routes, state, app config |
-| **Services** | `services/*.py` | Business logic |
+| **Core** | `core/*.py` | Extension infrastructure (how to extend) |
+| **Extensions** | `extensions/*.py` | User extensions (custom cell types, callbacks) |
+| **Services** | `services/*.py` | Feature implementations (what the system does) |
 | **Document** | `document/*.py` | Data models |
 | **Docs** | `docs/how_it_works/*.md` | Documentation |

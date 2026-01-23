@@ -296,7 +296,10 @@ def cell_to_messages(cell) -> List[Dict]:
     """
     Convert a cell to claudette-agent message format.
 
-    Cell type mapping:
+    Uses the extensible dispatch system from core.dispatch.
+    Extensions can register custom converters for new cell types.
+
+    Cell type mapping (defaults):
     - code: User message with python code block + output
     - note: User message with markdown content
     - prompt: User message (source) + Assistant message (output)
@@ -307,16 +310,5 @@ def cell_to_messages(cell) -> List[Dict]:
     Returns:
         List of message dicts with "role" and "content" keys
     """
-    if cell.cell_type == "code":
-        content = f"```python\n{cell.source}\n```"
-        if cell.output:
-            content += f"\nOutput:\n```\n{cell.output}\n```"
-        return [{"role": "user", "content": content}]
-    elif cell.cell_type == "note":
-        return [{"role": "user", "content": cell.source}]
-    elif cell.cell_type == "prompt":
-        msgs = [{"role": "user", "content": cell.source}]
-        if cell.output:
-            msgs.append({"role": "assistant", "content": cell.output})
-        return msgs
-    return []
+    from core.dispatch import cell_to_llm_messages
+    return cell_to_llm_messages(cell)

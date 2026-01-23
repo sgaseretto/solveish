@@ -2,6 +2,42 @@
 
 This document explains how Dialeng notebooks maintain compatibility with the [dialoghelper](https://github.com/AnswerDotAI/dialoghelper) library for programmatic cell manipulation.
 
+## Key Implementation Files
+
+For headless interaction with Dialeng (e.g., a remote Jupyter notebook calling Dialeng's API), these are the core files:
+
+| File | Purpose | Lines of Interest |
+|------|---------|-------------------|
+| `services/dialoghelper_service.py` | **Core logic** - Cell queries, search, context building | All |
+| `app.py` | **HTTP endpoints** - Routes that dialoghelper calls | ~1190-1400 |
+| `services/kernel/kernel_worker.py` | **Magic variable injection** - `__dialog_name`, `__msg_id` | ~80-90 |
+| `services/kernel/subprocess_kernel.py` | **Context forwarding** - Passes notebook/cell IDs to worker | ~45-55 |
+
+### File Responsibilities
+
+**`services/dialoghelper_service.py`** - The shared service layer:
+- `get_msg_idx()` - Find cell index by ID
+- `find_msgs()` - Search cells by pattern, type, properties
+- `read_msg()` - Read cell content with view range options
+- `cell_to_dict()` - Convert cell to JSON-serializable format
+- `build_context_messages()` - Build LLM context from notebook cells
+- `cell_to_messages()` - Convert cell to LLM message format (uses dispatch)
+
+**`app.py` endpoints** - HTTP API for dialoghelper library:
+- Information: `/curr_dialog_`, `/msg_idx_`, `/find_msgs_`, `/read_msg_`
+- Modification: `/add_relative_`, `/rm_msg_`, `/update_msg_`, `/add_runq_`
+- Content editing: `/msg_insert_line_`, `/msg_str_replace_`, `/msg_strs_replace_`, `/msg_replace_lines_`
+- Utility: `/add_html_`, `/push_data_blocking_`, `/pop_data_blocking_`
+
+**`services/kernel/kernel_worker.py`** - Magic variable injection:
+```python
+# Inject dialoghelper magic variables into the namespace
+shell.user_ns['__dialog_name'] = notebook_id
+shell.user_ns['__msg_id'] = cell_id
+```
+
+This allows `read_msg(-1)` to work without explicit context parameters.
+
 ## Overview
 
 DialogHelper is a library that allows programmatic manipulation of notebook cells (called "messages" in dialoghelper terminology) from within notebook code. Dialeng implements the server-side API that dialoghelper's `call_endp()` function uses.
@@ -212,18 +248,18 @@ The `iife()` and `add_scr()` functions allow executing JavaScript in the browser
 ```mermaid
 flowchart LR
     subgraph "Python Notebook"
-        IIFE[iife code]
-        ADDSCR[add_scr code]
+        IIFE["iife(code)"]
+        ADDSCR["add_scr(code)"]
     end
 
     subgraph "Server"
-        ADD[/add_html_]
-        WS[WebSocket Broadcast]
+        ADD["/add_html_ endpoint"]
+        WS["WebSocket Broadcast"]
     end
 
     subgraph "Browser"
         PROC["processOOBSwap()"]
-        JS[#js-script div]
+        JS["#js-script div"]
         EXEC["Script Execution<br/>(via createElement)"]
     end
 

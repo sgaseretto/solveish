@@ -5,6 +5,98 @@ All notable changes to Dialeng will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2025-01-15
+
+### Added
+
+#### Extensibility Framework (fastai-inspired)
+- **New `core/` package** - Foundation for dialeng's hackable, extensible architecture using fastcore-inspired patterns
+
+##### Type Dispatch System (`core/dispatch.py`)
+- **Extensible cell rendering** - `render_cell()` dispatch function routes to appropriate renderer based on cell type
+- **Extensible LLM conversion** - `cell_to_llm_messages()` dispatch function for converting cells to LLM context
+- **Extensible serialization** - `cell_to_jupyter()` and `jupyter_to_cell()` dispatch functions
+- **Registration decorators** - `@register_renderer()`, `@register_llm_converter()`, `@register_jupyter_serializer()`
+
+##### 2-Way Callback System (`core/callbacks.py`)
+- **ExecutionContext** - Shared mutable context that callbacks can modify during execution
+- **Callback base class** - Extensible hooks for `before_execution`, `on_output`, `after_execution`
+- **Code transformation** - Callbacks can modify `ctx.source` before execution (e.g., auto-imports)
+- **Output filtering** - Callbacks can filter or transform outputs via `on_output` hook
+- **Flow control** - `CancelCellException` and `CancelQueueException` for callback-driven cancellation
+- **Built-in callbacks** - `TimingCallback`, `LoggingCallback`, `OutputTruncateCallback`
+
+##### Extension Registry (`core/registry.py`)
+- **Central registry** - `ExtensionRegistry` class for cell types, callbacks, and services
+- **Registration decorators** - `@register_cell_type()`, `@register_callback()`, `@register_service()`
+- **Global registry instance** - `registry` singleton accessible throughout the application
+
+##### Extension Loading (`core/extensions.py`)
+- **Automatic extension loading** - Extensions in `extensions/` directory loaded at startup
+- **Extension extraction** - `extract_extension()` utility to extract code from notebooks marked with `# @extension`
+- **Hot reload support** - `reload_extension()` for development without restart
+
+#### Extensions Directory (`extensions/`)
+- **Example callbacks** - `extensions/example_callbacks.py` demonstrates:
+  - `ExecutionTimingCallback` - Track and log execution time for all cells
+  - Commented examples for `AutoImportCallback` and `OutputLimitCallback`
+
+### Changed
+
+- **`ui/cells/base.py`** - `CellView()` now uses `render_cell()` from dispatch system
+- **`services/dialoghelper_service.py`** - `cell_to_messages()` now uses `cell_to_llm_messages()` from dispatch
+- **`services/kernel/execution_queue.py`** - Integrated 2-way callback system:
+  - `ExecutionQueue` now accepts optional `CallbackHandler`
+  - `_process_queue()` creates `ExecutionContext` and runs callbacks
+  - Callbacks can modify source code before execution
+  - Callbacks can filter/transform outputs during streaming
+- **`services/kernel/kernel_service.py`** - `execute_cell()` accepts optional `source` parameter for transformed code
+- **`app.py`** - Loads extensions at startup and passes callback handler to execution queues
+
+### Technical Details
+
+- **No breaking changes** - Existing code continues to work; extension system is additive
+- **Backward compatible callbacks** - Legacy `on_output` and `on_state_change` callbacks still work
+- **Lazy imports** - Dispatch functions use lazy imports to avoid circular dependencies
+
+### Developer Experience
+
+- **Experiment in notebooks** - Write extension code in dialeng notebooks with `# @extension` marker
+- **Extract to extension** - Use `extract_extension()` to create standalone extension file
+- **Hot reload** - Use `reload_extension()` during development
+
+### Documentation
+
+- **`docs/how_it_works/07_code_organization.md`** - Added Section 8: "Architecture Design: `core/` vs `services/`"
+  - Explains that `core/` contains extension infrastructure (HOW to extend)
+  - Explains that `services/` contains feature implementations (WHAT the system does)
+  - Updated architecture diagram to include `core/` and `extensions/` packages
+  - Updated directory structure with new packages
+
+- **`docs/how_it_works/05_dialoghelper_integration.md`** - Added "Key Implementation Files" section
+  - Lists the core files for headless interaction: `dialoghelper_service.py`, `app.py`, `kernel_worker.py`, `subprocess_kernel.py`
+  - Documents file responsibilities and function summaries
+  - Provides quick reference for developers working with remote/headless interaction
+
+- **`docs/how_it_works/README.md`** - Updated quick reference table
+  - Added entry for "Extension system" pointing to `08_extension_system.md`
+  - Added entry for "`core/` vs `services/`" pointing to Section 8 of `07_code_organization.md`
+
+### Fixed
+
+- **Empty notebook ID routing** - Fixed `/notebook/` (with trailing slash) matching `/notebook/{nb_id}` with empty string
+  - Added explicit `/notebook/` redirect route to `/notebook/default`
+  - Added guard in `/notebook/{nb_id}` route to redirect empty notebook IDs
+
+- **Cell `clear_outputs()` method** - Added missing method to Cell class in `app.py`
+  - Clears `output`, `execution_count`, and `time_run` when source changes
+  - Prevents stale context in subsequent LLM calls
+
+- **Logger undefined error** - Changed `logger.info()` to `print()` in source update handler
+  - Matches `app.py`'s existing logging style
+
+---
+
 ## [0.9.6] - 2025-01-13
 
 ### Changed

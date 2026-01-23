@@ -96,26 +96,26 @@ AVAILABLE_DIALOG_MODES = get_available_modes(CREDENTIAL_STATUS)
 
 ```mermaid
 flowchart TD
-    A[Prompt Cell Executed] --> B{Mode?}
-    B -->|Mock| C[mock_llm_stream<br/>Fake responses]
-    B -->|Learning/Concise/Standard| D[LLM Service]
+    A["Prompt Cell Executed"] --> B{Mode?}
+    B -->|Mock| C["mock_llm_stream<br/>Fake responses"]
+    B -->|Learning/Concise/Standard| D["LLM Service"]
 
-    D --> E[build_context_messages<br/>from dialoghelper_service]
-    E --> F[Find pinned cells]
-    E --> G[Find window cells]
-    F --> H[Combine up to 25 cells<br/>Sort by notebook index]
+    D --> E["build_context_messages<br/>from dialoghelper_service"]
+    E --> F["Find pinned cells"]
+    E --> G["Find window cells"]
+    F --> H["Combine up to 25 cells<br/>Sort by notebook index"]
     G --> H
-    H --> I[cell_to_messages<br/>Convert to LLM format]
-    I --> J[Build single prompt<br/>with context]
-    J --> K[AsyncChat with<br/>setting_sources=[] and<br/>cwd=None and<br/>no-session-persistence]
-    K --> L[chat.stream for<br/>truly stateless query]
+    H --> I["cell_to_messages<br/>Convert to LLM format"]
+    I --> J["Build single prompt<br/>with context"]
+    J --> K["AsyncChat with<br/>stateless config"]
+    K --> L["chat.stream for<br/>truly stateless query"]
 
-    C --> M[Stream via WebSocket]
+    C --> M["Stream via WebSocket"]
     L --> M
 
     M --> N{Error?}
-    N -->|Yes| O[Show in cell output]
-    N -->|No| P[Update cell output]
+    N -->|Yes| O["Show in cell output"]
+    N -->|No| P["Update cell output"]
 ```
 
 ## Mode Selection

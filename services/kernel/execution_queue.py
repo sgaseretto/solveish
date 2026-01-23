@@ -4,8 +4,14 @@ Execution queue for cell execution.
 Provides FIFO queue semantics for cell execution, allowing
 users to queue multiple cells while one is running. The UI
 stays responsive while the queue is processed in the background.
+
+Now with 2-way callback support:
+- Callbacks can observe AND modify execution behavior
+- ExecutionContext allows code transformation before execution
+- Output filtering/transformation during streaming
 """
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import Optional, Callable, Awaitable, Dict, List
 from collections import deque
@@ -13,6 +19,14 @@ from datetime import datetime
 
 from document.cell import Cell, CellState, CellOutput
 from .kernel_service import KernelService
+from core.callbacks import (
+    CallbackHandler,
+    ExecutionContext,
+    CancelCellException,
+    CancelQueueException,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -48,21 +62,32 @@ class ExecutionQueue:
     - Cancel individual cells or all queued
     - Callbacks for streaming output and state changes
     - Support for WebSocket updates
+    - 2-way callbacks: observe AND modify execution behavior
     """
 
-    def __init__(self, kernel_service: KernelService):
+    def __init__(
+        self,
+        kernel_service: KernelService,
+        callback_handler: Optional[CallbackHandler] = None
+    ):
         """
         Initialize the execution queue.
 
         Args:
             kernel_service: KernelService instance for code execution
+            callback_handler: Optional CallbackHandler for 2-way callbacks.
+                            If not provided, creates an empty handler.
         """
         self.kernel = kernel_service
         self._queues: Dict[str, deque[QueuedExecution]] = {}
         self._processing: Dict[str, bool] = {}
         self._current_cell: Dict[str, Optional[str]] = {}
 
-        # Callbacks for output streaming and state changes
+        # 2-way callback handler (for code transformation, output filtering)
+        self.callback_handler = callback_handler or CallbackHandler()
+
+        # Legacy callbacks for output streaming and state changes
+        # These are kept for backward compatibility
         self._on_output: Dict[str, OutputCallback] = {}
         self._on_state_change: Dict[str, StateCallback] = {}
 
@@ -261,6 +286,7 @@ class ExecutionQueue:
         Process execution queue for a notebook.
 
         This runs as a background task, processing cells one at a time.
+        Now with 2-way callback support for code transformation and output filtering.
         """
         self._processing[notebook_id] = True
 
@@ -278,19 +304,65 @@ class ExecutionQueue:
                 # Track current cell
                 self._current_cell[notebook_id] = cell.id
 
-                # Notify state change to RUNNING
-                await self._notify_state(notebook_id, cell, CellState.RUNNING)
+                # Create execution context for 2-way callbacks
+                ctx = ExecutionContext(
+                    cell=cell,
+                    notebook_id=notebook_id,
+                    source=cell.source,  # Modifiable by callbacks
+                    outputs=[]
+                )
 
-                # Execute with streaming
-                async for output in self.kernel.execute_cell(notebook_id, cell):
-                    # Notify output callback
-                    await self._notify_output(notebook_id, cell, output)
+                try:
+                    # Run before_execution callbacks (can modify ctx.source)
+                    await self.callback_handler.run_before_execution(ctx)
 
-                # Clear current cell
-                self._current_cell[notebook_id] = None
+                    # Check if callbacks want to skip kernel execution
+                    if ctx.skip_execution:
+                        logger.info(f"Skipping kernel execution for cell {cell.id}")
+                        cell.state = CellState.SUCCESS
+                        await self._notify_state(notebook_id, cell, cell.state)
+                        continue
 
-                # Notify final state
-                await self._notify_state(notebook_id, cell, cell.state)
+                    # Notify state change to RUNNING
+                    await self._notify_state(notebook_id, cell, CellState.RUNNING)
+
+                    # Execute with streaming, using potentially modified source
+                    async for output in self.kernel.execute_cell(
+                        notebook_id, cell, source=ctx.source
+                    ):
+                        # Run on_output callbacks (can filter/transform)
+                        filtered_output = await self.callback_handler.run_on_output(ctx, output)
+
+                        if filtered_output is not None:
+                            ctx.outputs.append(filtered_output)
+                            # Notify legacy output callback
+                            await self._notify_output(notebook_id, cell, filtered_output)
+
+                    # Run after_execution callbacks
+                    await self.callback_handler.run_after_execution(ctx, None)
+
+                except CancelCellException:
+                    # Cell was cancelled by a callback
+                    cell.state = CellState.IDLE
+                    logger.info(f"Cell {cell.id} cancelled by callback")
+
+                except CancelQueueException:
+                    # Queue was cancelled by a callback
+                    logger.info(f"Queue cancelled by callback")
+                    self.cancel_all(notebook_id)
+                    break
+
+                except Exception as e:
+                    # Execution failed
+                    logger.error(f"Cell {cell.id} execution failed: {e}")
+                    await self.callback_handler.run_after_execution(ctx, e)
+
+                finally:
+                    # Clear current cell
+                    self._current_cell[notebook_id] = None
+
+                    # Notify final state
+                    await self._notify_state(notebook_id, cell, cell.state)
 
         finally:
             self._processing[notebook_id] = False

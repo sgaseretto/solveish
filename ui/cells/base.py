@@ -119,6 +119,9 @@ def _cancel_button(cell, notebook_id: str):
 def CellView(cell, notebook_id: str):
     """Dispatch to appropriate cell view based on cell type.
 
+    Uses the extensible dispatch system from core.dispatch.
+    Extensions can register custom renderers for new cell types.
+
     Args:
         cell: Cell dataclass instance
         notebook_id: Parent notebook ID
@@ -126,15 +129,5 @@ def CellView(cell, notebook_id: str):
     Returns:
         Complete cell Div with header and body
     """
-    from .code_cell import CodeCellView
-    from .note_cell import NoteCellView
-    from .prompt_cell import PromptCellView
-
-    views = {
-        "code": CodeCellView,
-        "note": NoteCellView,
-        "prompt": PromptCellView,
-    }
-
-    view_func = views.get(cell.cell_type, CodeCellView)
-    return view_func(cell, notebook_id)
+    from core.dispatch import render_cell
+    return render_cell(cell, notebook_id)
