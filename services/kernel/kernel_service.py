@@ -66,7 +66,8 @@ class KernelService:
     async def execute_cell(
         self,
         notebook_id: str,
-        cell: Cell
+        cell: Cell,
+        source: Optional[str] = None
     ) -> AsyncIterator[CellOutput]:
         """
         Execute a code cell with streaming output.
@@ -80,11 +81,16 @@ class KernelService:
         Args:
             notebook_id: Notebook identifier
             cell: Cell to execute
+            source: Optional source code to execute (overrides cell.source).
+                   This allows callbacks to transform code before execution.
 
         Yields:
             CellOutput objects for each chunk of output
         """
         kernel = self.get_kernel(notebook_id)
+
+        # Use provided source or fall back to cell's source
+        code_to_execute = source if source is not None else cell.source
 
         # Update cell state
         cell.state = CellState.RUNNING
@@ -96,7 +102,7 @@ class KernelService:
         try:
             # Pass notebook_id and cell.id for dialoghelper magic variables
             async for output in kernel.execute_streaming(
-                cell.source,
+                code_to_execute,
                 notebook_id=notebook_id,
                 cell_id=cell.id
             ):

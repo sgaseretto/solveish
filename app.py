@@ -46,6 +46,10 @@ from ui import (
     TypeSelect, CollapseBtn, get_collapse_class
 )
 
+# Extension system
+from core.extensions import load_extensions
+from core.registry import registry
+
 # ============================================================================
 # Constants
 # ============================================================================
@@ -62,6 +66,12 @@ AVAILABLE_DIALOG_MODES = get_available_modes(CREDENTIAL_STATUS)
 # Models from config
 AVAILABLE_MODELS = DIALENG_CONFIG.get_model_choices()
 DEFAULT_MODEL = DIALENG_CONFIG.get_default_model()
+
+# Load extensions (cell types, callbacks, services)
+# Extensions are Python files in the extensions/ directory
+_loaded_extensions = load_extensions(silent=True)
+if _loaded_extensions:
+    print(f"Loaded {len(_loaded_extensions)} extension(s): {', '.join(_loaded_extensions)}")
 
 SEPARATOR_PREFIX = "##### 🤖Reply🤖<!-- SOLVEIT_SEPARATOR_"
 SEPARATOR_SUFFIX = " -->"
@@ -119,7 +129,13 @@ class Cell:
     output_collapse: int = 0  # CollapseLevel: 0=expanded, 1=scrollable, 2=summary
     pinned: bool = False
     is_exported: bool = False
-    
+
+    def clear_outputs(self):
+        """Clear all outputs and reset execution state."""
+        self.output = ""
+        self.execution_count = None
+        self.time_run = ""
+
     def to_jupyter_cell(self) -> Dict[str, Any]:
         """Convert to Jupyter .ipynb cell format"""
         if self.cell_type == CellType.CODE.value:
@@ -305,7 +321,9 @@ execution_queues: Dict[str, ExecutionQueue] = {}
 def get_execution_queue(nb_id: str) -> ExecutionQueue:
     """Get or create execution queue for a notebook."""
     if nb_id not in execution_queues:
-        queue = ExecutionQueue(kernel_service)
+        # Get callback handler from registry (includes registered 2-way callbacks)
+        callback_handler = registry.get_callback_handler()
+        queue = ExecutionQueue(kernel_service, callback_handler=callback_handler)
         execution_queues[nb_id] = queue
         # Register callbacks for WebSocket broadcasting
         queue.on_output(nb_id, _make_output_callback(nb_id))
@@ -776,6 +794,11 @@ async def get(path: str):
 def get():
     return RedirectResponse("/notebook/default", status_code=302)
 
+@rt("/notebook/")
+def get():
+    """Redirect /notebook/ (with trailing slash) to /notebook/default."""
+    return RedirectResponse("/notebook/default", status_code=302)
+
 @rt("/notebook/new")
 def get():
     new_id = uuid.uuid4().hex[:8]
@@ -787,6 +810,9 @@ def get():
 
 @rt("/notebook/{nb_id}")
 def get(nb_id: str):
+    # Guard against empty notebook_id (can happen with trailing slash routing)
+    if not nb_id or not nb_id.strip():
+        return RedirectResponse("/notebook/default", status_code=302)
     nb = get_notebook(nb_id)
     nb_list = list_notebooks() or [nb_id]
     return NotebookPage(nb, nb_list, AVAILABLE_DIALOG_MODES, AVAILABLE_MODELS)
@@ -862,7 +888,7 @@ def post(nb_id: str, cid: str, source: str):
             # we don't include an old assistant response that doesn't match the new source.
             if old_source != source:
                 c.clear_outputs()
-                logger.info(f"Cell {cid}: Source changed, cleared outputs to prevent stale context")
+                print(f"[SOURCE UPDATE] Cell {cid}: Source changed, cleared outputs to prevent stale context")
             break
     return ""
 
