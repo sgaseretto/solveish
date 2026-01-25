@@ -465,7 +465,7 @@ Key features:
 
 #### claude-agent-sdk Direct Mode (Maximum Isolation)
 
-For maximum session isolation, Dialeng can use `claude-agent-sdk.query()` directly instead of the claudette-agent wrapper. This is enabled by default via `use_sdk_direct: true` in `dialeng_config.json`.
+For maximum session isolation, Dialeng can use `claude-agent-sdk.query()` directly instead of the claudette-agent wrapper. This is disabled by default but can be enabled via `use_sdk_directly: true` in `dialeng_config.json`.
 
 ```python
 from claude_agent_sdk import query, ClaudeAgentOptions
@@ -510,7 +510,7 @@ Configuration in `dialeng_config.json`:
 ```json
 {
   "llm": {
-    "use_sdk_direct": true,
+    "use_sdk_directly": false,
     "debug_mode": false,
     "debug_log_dir": "./debug_logs"
   }
@@ -519,7 +519,7 @@ Configuration in `dialeng_config.json`:
 
 | Option | Description |
 |--------|-------------|
-| `use_sdk_direct` | `true` = use SDK directly (default), `false` = use claudette-agent wrapper |
+| `use_sdk_directly` | `true` = use SDK directly, `false` = use claudette-agent wrapper (default) |
 | `debug_mode` | When `true`, saves prompts and responses to JSON files |
 | `debug_log_dir` | Directory for debug logs (default: `./debug_logs`) |
 

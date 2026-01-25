@@ -467,9 +467,85 @@ function syncAllContent(cellId) {
 }
 
 // ==================== Markdown Rendering ====================
+
+/**
+ * Extract leading HTML blocks from text, properly handling nested tags.
+ * Returns [htmlPrefix, remainingText]
+ */
+function extractLeadingHtmlBlocks(text) {
+    if (!text) return ['', text];
+
+    const trimmedText = text.trimStart();
+    const blockTags = ['details', 'div', 'table', 'ul', 'ol', 'pre', 'section'];
+
+    // Check if text starts with an HTML block tag
+    const openTagMatch = trimmedText.match(/^<(details|div|table|ul|ol|pre|section)(\s[^>]*)?>/i);
+    if (!openTagMatch) return ['', text];
+
+    const tagName = openTagMatch[1].toLowerCase();
+    let htmlPrefix = '';
+    let remaining = trimmedText;
+
+    // Keep extracting complete HTML blocks
+    while (remaining) {
+        const nextOpenTag = remaining.match(/^<(details|div|table|ul|ol|pre|section)(\s[^>]*)?>/i);
+        if (!nextOpenTag) break;
+
+        const currentTagName = nextOpenTag[1].toLowerCase();
+        let depth = 0;
+        let pos = 0;
+        let inString = false;
+        let blockEnd = -1;
+
+        // Find the matching closing tag by counting depth
+        const openPattern = new RegExp(`<${currentTagName}(\\s[^>]*)?>`, 'gi');
+        const closePattern = new RegExp(`</${currentTagName}>`, 'gi');
+
+        // Simple approach: count all opens and closes
+        const opens = [...remaining.matchAll(new RegExp(`<${currentTagName}(\\s[^>]*)?>`, 'gi'))];
+        const closes = [...remaining.matchAll(new RegExp(`</${currentTagName}>`, 'gi'))];
+
+        if (opens.length === 0 || closes.length === 0) break;
+
+        // Build a list of all tag positions with type
+        const tagPositions = [];
+        opens.forEach(m => tagPositions.push({ pos: m.index, type: 'open' }));
+        closes.forEach(m => tagPositions.push({ pos: m.index, type: 'close', len: m[0].length }));
+        tagPositions.sort((a, b) => a.pos - b.pos);
+
+        // Walk through and find where depth returns to 0
+        depth = 0;
+        for (const tag of tagPositions) {
+            if (tag.type === 'open') {
+                depth++;
+            } else {
+                depth--;
+                if (depth === 0) {
+                    blockEnd = tag.pos + tag.len;
+                    break;
+                }
+            }
+        }
+
+        if (blockEnd === -1) break; // Malformed HTML, stop
+
+        htmlPrefix += remaining.slice(0, blockEnd);
+        remaining = remaining.slice(blockEnd).trimStart();
+    }
+
+    return [htmlPrefix, remaining];
+}
+
 function renderMarkdown(text) {
     if (!text) return '<p style="color: var(--text-muted);">Click to edit...</p>';
-    
+
+    // Check if content starts with raw HTML (like tool-steps)
+    // These should be rendered as-is, not wrapped in paragraph tags
+    let htmlPrefix = '';
+
+    // Extract leading HTML blocks (like <details>) properly handling nesting
+    [htmlPrefix, text] = extractLeadingHtmlBlocks(text);
+
     // Process code blocks first and store them
     const codeBlocks = [];
     text = text.replace(/```(\w*)\n([\s\S]*?)```/g, (match, lang, code) => {
@@ -478,7 +554,7 @@ function renderMarkdown(text) {
         codeBlocks.push(`<pre data-lang="${lang || 'text'}"><code class="language-${lang || 'text'}">${escaped}</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>`);
         return `__CODE_BLOCK_${idx}__`;
     });
-    
+
     // Inline code
     text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
     // Bold
@@ -497,13 +573,18 @@ function renderMarkdown(text) {
     // Paragraphs
     text = text.replace(/\n\n/g, '</p><p>');
     text = text.replace(/\n/g, '<br>');
-    
+
     // Restore code blocks
     codeBlocks.forEach((block, idx) => {
         text = text.replace(`__CODE_BLOCK_${idx}__`, block);
     });
-    
-    return '<p>' + text + '</p>';
+
+    // Return with HTML prefix preserved (not wrapped in p tags)
+    if (text.trim()) {
+        return htmlPrefix + '<p>' + text + '</p>';
+    } else {
+        return htmlPrefix;
+    }
 }
 
 // Copy code to clipboard
@@ -980,6 +1061,26 @@ function connectWebSocket(notebookId) {
             // Cell state change (queued, running, idle)
             console.log('[WS] cell_state_change received:', data.cell_id, data.state);
             // State changes are now handled via queue_update for consistency
+        } else if (data.type === 'var_substituted') {
+            // Variable was substituted in prompt
+            console.log('[WS] var_substituted:', data.var_name, '->', data.var_value?.substring?.(0, 50));
+            ToolUI.showVarSubstitution(data.cell_id, data.var_name, data.var_value);
+        } else if (data.type === 'tool_available') {
+            // Tool became available
+            console.log('[WS] tool_available:', data.tool_name, 'type:', data.tool_type);
+            ToolUI.showToolAvailable(data.cell_id, data.tool_name, data.tool_type);
+        } else if (data.type === 'tool_call') {
+            // AI is calling a tool
+            console.log('[WS] tool_call:', data.tool_name, 'input:', data.tool_input);
+            ToolUI.showToolCall(data.cell_id, data.tool_id, data.tool_name, data.tool_input);
+        } else if (data.type === 'tool_result') {
+            // Tool returned a result
+            console.log('[WS] tool_result:', data.tool_name, 'status:', data.status);
+            ToolUI.showToolResult(data.cell_id, data.tool_id, data.tool_name, data.result, data.status);
+        } else if (data.type === 'tool_confirmation_request') {
+            // Server requesting confirmation for file-modifying tool
+            console.log('[WS] tool_confirmation_request:', data.tool_name);
+            ToolConfirmation.show(data.cell_id, data.tool_name, data.tool_input, data.confirmation_id);
         }
     };
 
@@ -1736,3 +1837,227 @@ function renderCellPreviews(cellId) {
         }
     }
 }
+
+// ==================== Tool UI Management (IIFE) ====================
+// Handles displaying tool calls, results, and variable substitutions in the UI
+
+const ToolUI = (function() {
+    // Track tool calls for each cell
+    const cellToolCalls = new Map();  // cellId -> array of tool call objects
+
+    // Get or create the tool results area for a cell
+    function getToolArea(cellId) {
+        const cell = document.getElementById(`cell-${cellId}`);
+        if (!cell) return null;
+
+        let toolArea = cell.querySelector('.tool-results-area');
+        if (!toolArea) {
+            // Create tool results area before the AI response preview
+            const outputSection = cell.querySelector('[data-collapse-section="output"]');
+            if (outputSection) {
+                toolArea = document.createElement('div');
+                toolArea.className = 'tool-results-area';
+                outputSection.insertBefore(toolArea, outputSection.firstChild);
+            }
+        }
+        return toolArea;
+    }
+
+    // Format JSON for display
+    function formatJson(obj) {
+        try {
+            return JSON.stringify(obj, null, 2);
+        } catch (e) {
+            return String(obj);
+        }
+    }
+
+    // Truncate long strings for display
+    function truncate(str, maxLen = 100) {
+        if (!str) return '';
+        str = String(str);
+        return str.length > maxLen ? str.substring(0, maxLen) + '...' : str;
+    }
+
+    return {
+        // Show variable substitution indicator
+        showVarSubstitution: function(cellId, varName, varValue) {
+            const toolArea = getToolArea(cellId);
+            if (!toolArea) return;
+
+            const varEl = document.createElement('div');
+            varEl.className = 'tool-var-substitution';
+            varEl.innerHTML = `
+                <span class="tool-var-icon">📝</span>
+                <span class="tool-var-name">$\`${escapeHtml(varName)}\`</span>
+                <span class="tool-var-arrow">→</span>
+                <span class="tool-var-value" title="${escapeHtml(varValue)}">${escapeHtml(truncate(varValue, 50))}</span>
+            `;
+            toolArea.appendChild(varEl);
+        },
+
+        // Show tool available indicator
+        showToolAvailable: function(cellId, toolName, toolType) {
+            const toolArea = getToolArea(cellId);
+            if (!toolArea) return;
+
+            const toolEl = document.createElement('div');
+            toolEl.className = 'tool-available';
+            toolEl.innerHTML = `
+                <span class="tool-icon">${toolType === 'builtin' ? '🔧' : '⚡'}</span>
+                <span class="tool-name">${escapeHtml(toolName)}</span>
+                <span class="tool-badge">${toolType === 'builtin' ? 'built-in' : 'dynamic'}</span>
+            `;
+            toolArea.appendChild(toolEl);
+        },
+
+        // Show tool call in progress
+        showToolCall: function(cellId, toolId, toolName, toolInput) {
+            const toolArea = getToolArea(cellId);
+            if (!toolArea) return;
+
+            // Track this call
+            if (!cellToolCalls.has(cellId)) {
+                cellToolCalls.set(cellId, []);
+            }
+            cellToolCalls.get(cellId).push({ id: toolId, name: toolName, input: toolInput });
+
+            const callEl = document.createElement('div');
+            callEl.className = 'tool-call';
+            callEl.id = `tool-call-${toolId}`;
+            callEl.innerHTML = `
+                <div class="tool-call-header">
+                    <span class="tool-call-icon">🔄</span>
+                    <span class="tool-call-name">${escapeHtml(toolName)}</span>
+                    <span class="tool-call-status">Running...</span>
+                </div>
+                <div class="tool-call-input">
+                    <button class="tool-toggle-btn" onclick="ToolUI.toggleDetails('${toolId}')">▶ Input</button>
+                    <pre class="tool-call-details" id="tool-input-${toolId}" style="display:none;">${escapeHtml(formatJson(toolInput))}</pre>
+                </div>
+            `;
+            toolArea.appendChild(callEl);
+        },
+
+        // Show tool result
+        showToolResult: function(cellId, toolId, toolName, result, status) {
+            const callEl = document.getElementById(`tool-call-${toolId}`);
+            if (!callEl) return;
+
+            // Update status
+            const statusEl = callEl.querySelector('.tool-call-status');
+            if (statusEl) {
+                statusEl.textContent = status === 'success' ? 'Done' : 'Error';
+                statusEl.className = `tool-call-status ${status === 'success' ? 'success' : 'error'}`;
+            }
+
+            // Update icon
+            const iconEl = callEl.querySelector('.tool-call-icon');
+            if (iconEl) {
+                iconEl.textContent = status === 'success' ? '✅' : '❌';
+            }
+
+            // Add result section
+            const resultContent = result?.content || result?.error || JSON.stringify(result);
+            const resultHtml = `
+                <div class="tool-call-result ${status === 'success' ? '' : 'error'}">
+                    <button class="tool-toggle-btn" onclick="ToolUI.toggleDetails('result-${toolId}')">▶ Result</button>
+                    <pre class="tool-call-details" id="tool-result-${toolId}" style="display:none;">${escapeHtml(truncate(resultContent, 500))}</pre>
+                </div>
+            `;
+            callEl.insertAdjacentHTML('beforeend', resultHtml);
+        },
+
+        // Toggle visibility of details section
+        toggleDetails: function(id) {
+            const detailsEl = document.getElementById(`tool-input-${id}`) || document.getElementById(`tool-result-${id}`);
+            if (!detailsEl) return;
+
+            const btn = detailsEl.previousElementSibling;
+            if (detailsEl.style.display === 'none') {
+                detailsEl.style.display = 'block';
+                if (btn) btn.textContent = btn.textContent.replace('▶', '▼');
+            } else {
+                detailsEl.style.display = 'none';
+                if (btn) btn.textContent = btn.textContent.replace('▼', '▶');
+            }
+        },
+
+        // Clear tool area for a cell
+        clear: function(cellId) {
+            const toolArea = getToolArea(cellId);
+            if (toolArea) {
+                toolArea.innerHTML = '';
+            }
+            cellToolCalls.delete(cellId);
+        }
+    };
+})();
+
+// ==================== Tool Confirmation Management (IIFE) ====================
+// Handles confirmation dialogs for file-modifying tools
+
+const ToolConfirmation = (function() {
+    const pendingConfirmations = new Map();  // confirmationId -> { cellId, toolName, toolInput }
+
+    return {
+        // Show confirmation dialog
+        show: function(cellId, toolName, toolInput, confirmationId) {
+            pendingConfirmations.set(confirmationId, { cellId, toolName, toolInput });
+
+            const toolArea = document.querySelector(`#cell-${cellId} .tool-results-area`);
+            if (!toolArea) return;
+
+            const dialogHtml = `
+                <div class="tool-confirmation-dialog" id="tool-confirm-${confirmationId}">
+                    <div class="tool-confirm-content">
+                        <div class="tool-confirm-title">
+                            <span class="tool-confirm-icon">⚠️</span>
+                            Confirm: ${escapeHtml(toolName)}
+                        </div>
+                        <pre class="tool-confirm-preview">${escapeHtml(JSON.stringify(toolInput, null, 2))}</pre>
+                        <div class="tool-confirm-actions">
+                            <button class="btn-secondary" onclick="ToolConfirmation.cancel('${confirmationId}')">Cancel</button>
+                            <button class="btn-primary" onclick="ToolConfirmation.confirm('${confirmationId}')">Execute</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            toolArea.insertAdjacentHTML('beforeend', dialogHtml);
+        },
+
+        // User confirms execution
+        confirm: function(confirmationId) {
+            const pending = pendingConfirmations.get(confirmationId);
+            if (pending && ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'tool_confirmation_response',
+                    confirmation_id: confirmationId,
+                    approved: true
+                }));
+            }
+            this.removeDialog(confirmationId);
+            pendingConfirmations.delete(confirmationId);
+        },
+
+        // User cancels execution
+        cancel: function(confirmationId) {
+            const pending = pendingConfirmations.get(confirmationId);
+            if (pending && ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'tool_confirmation_response',
+                    confirmation_id: confirmationId,
+                    approved: false
+                }));
+            }
+            this.removeDialog(confirmationId);
+            pendingConfirmations.delete(confirmationId);
+        },
+
+        // Remove dialog from DOM
+        removeDialog: function(confirmationId) {
+            const dialog = document.getElementById(`tool-confirm-${confirmationId}`);
+            if (dialog) dialog.remove();
+        }
+    };
+})();

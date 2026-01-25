@@ -57,10 +57,16 @@ DEFAULT_CONFIG = {
         "comment": "Maximum tokens for extended thinking. Set to 0 to disable. Requires thinking-capable model (Claude Sonnet 3.7+, Sonnet 4+, Opus 4+)"
     },
     "llm": {
-        "use_sdk_direct": True,
+        "use_sdk_directly": False,
         "debug_mode": False,
         "debug_log_dir": "./debug_logs",
-        "comment": "LLM provider settings. use_sdk_direct=true uses claude-agent-sdk directly for maximum isolation (stateless). Set to false to use claudette-agent wrapper."
+        "comment": "LLM provider settings. use_sdk_directly=true uses claude-agent-sdk directly for maximum isolation (stateless). Set to false (default) to use claudette-agent wrapper."
+    },
+    "tool_settings": {
+        "max_steps": 5,
+        "require_confirmation": False,
+        "builtin_tools_enabled": True,
+        "comment": "Tool calling settings. max_steps: max tool calls per prompt (1-10). require_confirmation: prompt before file-modifying tools. builtin_tools_enabled: always-available file tools (view, rg, create, str_replace, insert)."
     }
 }
 
@@ -94,9 +100,14 @@ class DialengConfig:
     thinking_max_tokens: int = 10000
 
     # LLM provider settings
-    use_sdk_direct: bool = True  # Use claude-agent-sdk directly for maximum isolation
+    use_sdk_directly: bool = False  # Use claude-agent-sdk directly for maximum isolation
     debug_mode: bool = False  # Enable debug logging to files
     debug_log_dir: str = "./debug_logs"  # Directory for debug logs
+
+    # Tool calling settings
+    tool_max_steps: int = 5  # Maximum tool calls per prompt
+    tool_require_confirmation: bool = False  # Require confirmation for file-modifying tools
+    tool_builtin_enabled: bool = True  # Enable built-in file tools (view, rg, etc.)
 
     # Raw config for reference
     raw_config: Dict[str, Any] = field(default_factory=dict)
@@ -182,9 +193,15 @@ def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
 
     # LLM provider settings
     llm = raw.get("llm", {})
-    config.use_sdk_direct = llm.get("use_sdk_direct", True)
+    config.use_sdk_directly = llm.get("use_sdk_directly", False)
     config.debug_mode = llm.get("debug_mode", False)
     config.debug_log_dir = llm.get("debug_log_dir", "./debug_logs")
+
+    # Tool calling settings
+    tool_settings = raw.get("tool_settings", {})
+    config.tool_max_steps = tool_settings.get("max_steps", 5)
+    config.tool_require_confirmation = tool_settings.get("require_confirmation", False)
+    config.tool_builtin_enabled = tool_settings.get("builtin_tools_enabled", True)
 
     return config
 
@@ -263,7 +280,7 @@ def print_config_status(config: DialengConfig) -> None:
     """Print config status for startup logging."""
     models = ", ".join(m.name for m in config.available_models)
     default_model = config.get_default_model()
-    sdk_mode = "SDK direct" if config.use_sdk_direct else "claudette-agent"
+    sdk_mode = "SDK direct" if config.use_sdk_directly else "claudette-agent"
     print(f"   Config: dialeng_config.json")
     print(f"      AWS Region:     {config.aws_region}")
     print(f"      Models:         {models}")
@@ -272,3 +289,7 @@ def print_config_status(config: DialengConfig) -> None:
     print(f"      LLM Provider:   {sdk_mode}")
     if config.debug_mode:
         print(f"      Debug Mode:     ON (logs to {config.debug_log_dir})")
+    # Tool settings
+    tools_status = "enabled" if config.tool_builtin_enabled else "disabled"
+    confirm_status = "required" if config.tool_require_confirmation else "off"
+    print(f"      Tool Calling:   {tools_status} (max {config.tool_max_steps} steps, confirm: {confirm_status})")

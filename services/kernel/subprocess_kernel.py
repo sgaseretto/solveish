@@ -260,6 +260,153 @@ class SubprocessKernel:
         """Cleanup on garbage collection."""
         self.shutdown()
 
+    async def introspect_variable(self, name: str, timeout: float = 5.0) -> dict:
+        """
+        Introspect a variable in the kernel namespace.
+
+        Args:
+            name: Variable name to introspect
+            timeout: Max time to wait for response
+
+        Returns:
+            Dict with 'exists', 'var_type', 'repr' on success,
+            or 'exists': False, 'error' on failure
+        """
+        if not self.is_alive:
+            self._start_process()
+
+        self.input_queue.put({
+            'type': 'introspect_var',
+            'name': name
+        })
+
+        loop = asyncio.get_event_loop()
+        start_time = asyncio.get_event_loop().time()
+
+        while True:
+            try:
+                msg = await loop.run_in_executor(
+                    None,
+                    lambda: self.output_queue.get(timeout=0.1)
+                )
+                if msg.get('type') == 'introspect_var_reply':
+                    return msg
+            except Empty:
+                if asyncio.get_event_loop().time() - start_time > timeout:
+                    return {
+                        'name': name,
+                        'exists': False,
+                        'error': 'Timeout waiting for introspection response'
+                    }
+                if not self.is_alive:
+                    return {
+                        'name': name,
+                        'exists': False,
+                        'error': 'Kernel died during introspection'
+                    }
+
+    async def introspect_function(self, name: str, timeout: float = 5.0) -> dict:
+        """
+        Introspect a function in the kernel namespace.
+
+        Args:
+            name: Function name to introspect
+            timeout: Max time to wait for response
+
+        Returns:
+            Dict with 'exists', 'signature', 'docstring', 'parameters' on success,
+            or 'exists': False, 'error' on failure
+        """
+        if not self.is_alive:
+            self._start_process()
+
+        self.input_queue.put({
+            'type': 'introspect_function',
+            'name': name
+        })
+
+        loop = asyncio.get_event_loop()
+        start_time = asyncio.get_event_loop().time()
+
+        while True:
+            try:
+                msg = await loop.run_in_executor(
+                    None,
+                    lambda: self.output_queue.get(timeout=0.1)
+                )
+                if msg.get('type') == 'introspect_function_reply':
+                    return msg
+            except Empty:
+                if asyncio.get_event_loop().time() - start_time > timeout:
+                    return {
+                        'name': name,
+                        'exists': False,
+                        'error': 'Timeout waiting for introspection response'
+                    }
+                if not self.is_alive:
+                    return {
+                        'name': name,
+                        'exists': False,
+                        'error': 'Kernel died during introspection'
+                    }
+
+    async def execute_tool(self, name: str, kwargs: dict, timeout: float = 60.0) -> dict:
+        """
+        Execute a function as a tool with the given arguments.
+
+        Args:
+            name: Function name to execute
+            kwargs: Keyword arguments to pass to the function
+            timeout: Max time to wait for execution
+
+        Returns:
+            Dict with 'status', 'result' on success,
+            or 'status': 'error', 'error' message on failure
+        """
+        if not self.is_alive:
+            self._start_process()
+
+        self.input_queue.put({
+            'type': 'execute_tool',
+            'name': name,
+            'kwargs': kwargs
+        })
+        self._is_busy = True
+
+        loop = asyncio.get_event_loop()
+        start_time = asyncio.get_event_loop().time()
+
+        try:
+            while True:
+                try:
+                    msg = await loop.run_in_executor(
+                        None,
+                        lambda: self.output_queue.get(timeout=0.1)
+                    )
+                    msg_type = msg.get('type')
+
+                    if msg_type == 'execute_tool_reply':
+                        return msg
+                    elif msg_type == 'status':
+                        self._is_busy = msg.get('status') == 'busy'
+                        # Keep waiting for the actual reply
+
+                except Empty:
+                    if asyncio.get_event_loop().time() - start_time > timeout:
+                        return {
+                            'name': name,
+                            'status': 'error',
+                            'error': f'Timeout after {timeout}s waiting for tool execution'
+                        }
+                    if not self.is_alive:
+                        return {
+                            'name': name,
+                            'status': 'error',
+                            'error': 'Kernel died during tool execution'
+                        }
+        finally:
+            self._is_busy = False
+
 
 # Convenience function for one-off execution
 async def execute_code(code: str) -> list[CellOutput]:

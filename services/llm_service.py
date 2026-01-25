@@ -9,7 +9,7 @@ Claude models. It supports three providers:
 3. claude-agent-sdk (direct): Uses Claude Code subscription via SDK directly (most isolated)
 
 The provider is selected based on available credentials via credential_service.
-When using Claude Code subscription, the `use_sdk_direct` config option controls
+When using Claude Code subscription, the `use_sdk_directly` config option controls
 whether to use claudette-agent wrapper or the SDK directly.
 
 Modes:
@@ -179,14 +179,14 @@ class LLMService:
                 # Check if we should use SDK directly (more isolated) or claudette-agent wrapper
                 from .dialeng_config import get_config
                 config = get_config()
-                use_sdk_direct = getattr(config, 'use_sdk_direct', True)  # Default to True for isolation
+                use_sdk_directly = getattr(config, 'use_sdk_directly', False)  # Default to False
 
-                if use_sdk_direct:
-                    logger.info("Using claude-agent-sdk directly (use_sdk_direct=True)")
+                if use_sdk_directly:
+                    logger.info("Using claude-agent-sdk directly (use_sdk_directly=True)")
                     async for item in self._stream_claude_sdk_direct(prompt, context_messages, mode, model, use_thinking):
                         yield item
                 else:
-                    logger.info("Using claudette-agent wrapper (use_sdk_direct=False)")
+                    logger.info("Using claudette-agent wrapper (use_sdk_directly=False)")
                     async for item in self._stream_claudette_agent(prompt, context_messages, mode, model, use_thinking):
                         yield item
             else:
@@ -633,6 +633,516 @@ Now respond to my latest message:
 {prompt}"""
 
         return full_prompt
+
+    async def stream_response_with_tools(
+        self,
+        prompt: str,
+        context_messages: List[Dict],
+        mode: str,
+        model: str = "claude-sonnet-4-5",
+        use_thinking: bool = False,
+        kernel=None,
+        notebook_id: str = "",
+        max_steps: int = 5,
+        include_builtins: bool = True
+    ) -> AsyncIterator[Dict]:
+        """
+        Stream LLM response with tool calling support.
+
+        This method handles:
+        1. Parsing $`var` and &`func` syntax in prompt
+        2. Substituting variable values from kernel
+        3. Building tool schemas from functions
+        4. Running the tool loop (up to max_steps iterations)
+
+        Args:
+            prompt: User's prompt (may contain $`var` and &`func` syntax)
+            context_messages: Previous conversation context
+            mode: Dialog mode (learning, concise, standard)
+            model: Claude model to use
+            use_thinking: Enable extended thinking
+            kernel: SubprocessKernel instance for tool execution
+            notebook_id: Notebook identifier
+            max_steps: Maximum tool loop iterations (default 5)
+            include_builtins: Include built-in file tools
+
+        Yields:
+            Dicts with 'type' key:
+            - {"type": "var_substituted", "name": ..., "value": ...}
+            - {"type": "tool_available", "name": ..., "schema": ...}
+            - {"type": "thinking_start/thinking/thinking_end", ...}
+            - {"type": "chunk", "content": ...}
+            - {"type": "tool_call", "id": ..., "name": ..., "input": ...}
+            - {"type": "tool_result", "id": ..., "name": ..., "result": ...}
+            - {"type": "error", "content": ...}
+        """
+        from .prompt_parser import parse_prompt, substitute_variables, has_special_syntax
+        from .tool_registry import get_tool_registry, is_file_modifying_tool
+
+        try:
+            await self._ensure_initialized()
+
+            # Parse prompt for special syntax
+            var_names, func_names = parse_prompt(prompt)
+
+            # Also parse context_messages (includes note cells) for $`var` and &`func` syntax
+            # This allows declaring variables/functions in note cells that become available
+            for msg in context_messages:
+                content = msg.get('content', '')
+                if content:
+                    ctx_vars, ctx_funcs = parse_prompt(content)
+                    # Add unique vars/funcs from context
+                    for v in ctx_vars:
+                        if v not in var_names:
+                            var_names.append(v)
+                    for f in ctx_funcs:
+                        if f not in func_names:
+                            func_names.append(f)
+
+            # If no special syntax and no kernel, fall back to regular streaming
+            if not var_names and not func_names and not include_builtins:
+                async for item in self.stream_response(prompt, context_messages, mode, model, use_thinking):
+                    yield item
+                return
+
+            # Substitute variables if kernel is available
+            processed_prompt = prompt
+            if var_names and kernel:
+                processed_prompt, var_info = await substitute_variables(prompt, kernel, notebook_id, var_names)
+                for name, info in var_info.items():
+                    if info.get('exists'):
+                        yield {
+                            "type": "var_substituted",
+                            "name": name,
+                            "var_type": info.get('var_type'),
+                            "value": info.get('repr', '')[:100]
+                        }
+
+            # Determine if we actually need tool calling
+            # For claudette_agent, only enable tool loop when there are actual &`func` references
+            # (the SDK doesn't support custom tool definitions, so built-ins alone don't help)
+            needs_tool_loop = len(func_names) > 0
+
+            # Get tool registry and build tool list
+            registry = get_tool_registry()
+
+            # For claudette provider, include builtins; for claudette_agent, only if we have func refs
+            effective_builtins = include_builtins if self._provider == "claudette" else (include_builtins and needs_tool_loop)
+
+            tools = await registry.get_tools_for_prompt(
+                func_names,
+                kernel,
+                notebook_id,
+                include_builtins=effective_builtins
+            )
+
+            # Notify about available tools
+            for tool in tools:
+                yield {
+                    "type": "tool_available",
+                    "name": tool['name'],
+                    "description": tool.get('description', '')[:100]
+                }
+
+            # If no tools or claudette_agent without function references, fall back to regular streaming
+            # This handles variable-only substitution for claudette_agent
+            if not tools or (self._provider == "claudette_agent" and not needs_tool_loop):
+                async for item in self.stream_response(
+                    processed_prompt, context_messages, mode, model, use_thinking
+                ):
+                    yield item
+                return
+
+            # Run tool loop based on provider
+            if self._provider == "claudette":
+                async for item in self._stream_claudette_with_tools(
+                    processed_prompt, context_messages, mode, model, use_thinking,
+                    tools, kernel, notebook_id, registry, max_steps
+                ):
+                    yield item
+            elif self._provider == "claudette_agent":
+                # claudette_agent uses text-based tool calling (tools embedded in prompt)
+                async for item in self._stream_sdk_with_text_tools(
+                    processed_prompt, context_messages, mode, model, use_thinking,
+                    tools, kernel, notebook_id, registry, max_steps
+                ):
+                    yield item
+            else:
+                yield {"type": "error", "content": "No LLM credentials available for tool calling."}
+
+        except Exception as e:
+            logger.exception(f"Tool-enabled LLM error: {e}")
+            yield {"type": "error", "content": f"Tool LLM Error: {str(e)}"}
+
+    async def _stream_claudette_with_tools(
+        self,
+        prompt: str,
+        context_messages: List[Dict],
+        mode: str,
+        model: str,
+        use_thinking: bool,
+        tools: List[Dict],
+        kernel,
+        notebook_id: str,
+        registry,
+        max_steps: int
+    ) -> AsyncIterator[Dict]:
+        """Stream with tool loop using claudette (direct API/Bedrock)."""
+        import asyncio
+
+        system_prompt = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS["standard"])
+
+        from .dialeng_config import get_config
+        config = get_config()
+        api_model = config.get_api_model_name(model, self._backend)
+
+        logger.info(f"claudette-tools: Using model {api_model} with {len(tools)} tools")
+
+        # Create client
+        client = self._create_claudette_client(api_model)
+        chat = self._Chat(cli=client, sp=system_prompt)
+
+        # Add context messages to history
+        for msg in context_messages:
+            chat.h.append(msg)
+
+        # Handle thinking
+        if use_thinking:
+            yield {"type": "thinking_start"}
+            yield {"type": "thinking_end"}
+
+        steps = 0
+        current_prompt = prompt
+
+        while steps < max_steps:
+            steps += 1
+            logger.info(f"claudette-tools: Step {steps}/{max_steps}")
+
+            try:
+                # Call with tools
+                # Note: claudette's Chat supports tools= parameter
+                response_text = ""
+                tool_calls = []
+
+                # Claudette streaming with tools
+                for chunk in chat(current_prompt, tools=tools, stream=True):
+                    if chunk:
+                        if hasattr(chunk, 'type') and chunk.type == 'tool_use':
+                            tool_calls.append({
+                                'id': getattr(chunk, 'id', f'tool_{len(tool_calls)}'),
+                                'name': chunk.name,
+                                'input': getattr(chunk, 'input', {})
+                            })
+                        elif hasattr(chunk, 'text'):
+                            response_text += chunk.text
+                            yield {"type": "chunk", "content": chunk.text}
+                        elif isinstance(chunk, str):
+                            response_text += chunk
+                            yield {"type": "chunk", "content": chunk}
+                    await asyncio.sleep(0)
+
+                # If no tool calls, we're done
+                if not tool_calls:
+                    logger.info("claudette-tools: No tool calls, done")
+                    break
+
+                # Execute tool calls
+                tool_results = []
+                for tc in tool_calls:
+                    yield {
+                        "type": "tool_call",
+                        "id": tc['id'],
+                        "name": tc['name'],
+                        "input": tc['input']
+                    }
+
+                    # Execute tool
+                    result = await self._execute_tool(
+                        tc['name'], tc['input'], kernel, notebook_id, registry
+                    )
+
+                    yield {
+                        "type": "tool_result",
+                        "id": tc['id'],
+                        "name": tc['name'],
+                        "result": result
+                    }
+
+                    tool_results.append({
+                        "tool_use_id": tc['id'],
+                        "content": self._format_tool_result_for_llm(result)
+                    })
+
+                # Build next prompt with tool results
+                current_prompt = self._build_tool_results_prompt(tool_results)
+
+            except Exception as e:
+                logger.exception(f"claudette-tools error: {e}")
+                yield {"type": "error", "content": f"Tool loop error: {str(e)}"}
+                break
+
+    async def _stream_sdk_with_text_tools(
+        self,
+        prompt: str,
+        context_messages: List[Dict],
+        mode: str,
+        model: str,
+        use_thinking: bool,
+        tools: List[Dict],
+        kernel,
+        notebook_id: str,
+        registry,
+        max_steps: int
+    ) -> AsyncIterator[Dict]:
+        """
+        Stream with text-based tool calling for claude-agent-sdk.
+
+        Since claude-agent-sdk doesn't support custom tool definitions like the
+        direct Anthropic API, we embed tool definitions in the system prompt and
+        parse structured JSON responses for tool calls.
+        """
+        from claude_agent_sdk import query as sdk_query, ClaudeAgentOptions
+        from claude_agent_sdk.types import AssistantMessage, ResultMessage
+        import re
+
+        # Get system prompt and model
+        base_system_prompt = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS["standard"])
+
+        from .dialeng_config import get_config
+        config = get_config()
+        api_model = config.get_api_model_name(model, self._backend)
+
+        logger.info(f"sdk-text-tools: Using model {api_model} with {len(tools)} tools (text-based)")
+
+        # Build tool definitions string
+        tool_defs = self._build_text_tool_definitions(tools)
+
+        # Augment system prompt with tool definitions and instructions
+        augmented_system = f"""{base_system_prompt}
+
+## Available Tools
+
+You have access to the following tools. To call a tool, respond with a JSON block in this exact format:
+
+```tool_call
+{{"tool": "tool_name", "arguments": {{"arg1": "value1", "arg2": "value2"}}}}
+```
+
+After the tool result is returned, you can call more tools or provide your final response.
+
+{tool_defs}
+"""
+
+        # Build full prompt with context
+        full_prompt = self._build_prompt_with_context(prompt, context_messages)
+
+        # Create temp directory for SDK isolation
+        temp_cwd = tempfile.mkdtemp(prefix=f"dialeng_tools_{uuid.uuid4().hex[:8]}_")
+        logger.info(f"sdk-text-tools: Created temp cwd: {temp_cwd}")
+
+        steps = 0
+        current_prompt = full_prompt
+
+        try:
+            while steps < max_steps:
+                steps += 1
+                logger.info(f"sdk-text-tools: Step {steps}/{max_steps}")
+
+                # Build options
+                options = ClaudeAgentOptions(
+                    continue_conversation=False,
+                    resume=None,
+                    setting_sources=[],
+                    cwd=temp_cwd,
+                    model=api_model,
+                    system_prompt=augmented_system,
+                )
+
+                # Collect response
+                response_text = ""
+
+                async for message in sdk_query(prompt=current_prompt, options=options):
+                    if isinstance(message, ResultMessage):
+                        # Usage info
+                        if hasattr(message, 'usage') and message.usage:
+                            self._last_usage = message.usage
+                        continue
+
+                    if isinstance(message, AssistantMessage):
+                        if hasattr(message, 'content') and message.content:
+                            for block in message.content:
+                                if hasattr(block, 'text'):
+                                    response_text += block.text
+
+                # Parse tool calls from response
+                tool_calls = self._parse_text_tool_calls(response_text)
+
+                if not tool_calls:
+                    # No tool calls - stream the response text
+                    logger.info("sdk-text-tools: No tool calls found, streaming response")
+                    # Remove any tool_call markers from response before sending
+                    clean_response = re.sub(r'```tool_call\n.*?\n```', '', response_text, flags=re.DOTALL)
+                    for chunk in self._chunk_text(clean_response.strip(), 50):
+                        yield {"type": "chunk", "content": chunk}
+                    break
+
+                # Execute tool calls
+                tool_results = []
+                response_before_tools = response_text.split('```tool_call')[0].strip()
+                if response_before_tools:
+                    for chunk in self._chunk_text(response_before_tools, 50):
+                        yield {"type": "chunk", "content": chunk}
+
+                for tc in tool_calls:
+                    tool_id = f"tool_{steps}_{len(tool_results)}"
+
+                    yield {
+                        "type": "tool_call",
+                        "id": tool_id,
+                        "name": tc['tool'],
+                        "input": tc.get('arguments', {})
+                    }
+
+                    # Execute tool
+                    result = await self._execute_tool(
+                        tc['tool'], tc.get('arguments', {}), kernel, notebook_id, registry
+                    )
+
+                    yield {
+                        "type": "tool_result",
+                        "id": tool_id,
+                        "name": tc['tool'],
+                        "result": result
+                    }
+
+                    tool_results.append({
+                        "tool": tc['tool'],
+                        "result": self._format_tool_result_for_llm(result)
+                    })
+
+                # Build prompt for next iteration with tool results
+                results_text = "\n".join([
+                    f"Tool '{tr['tool']}' result:\n{tr['result']}"
+                    for tr in tool_results
+                ])
+                current_prompt = f"The tool(s) returned the following results:\n\n{results_text}\n\nPlease continue based on these results."
+
+        except Exception as e:
+            logger.exception(f"sdk-text-tools error: {e}")
+            yield {"type": "error", "content": f"Tool loop error: {str(e)}"}
+        finally:
+            # Cleanup temp directory
+            try:
+                import shutil
+                shutil.rmtree(temp_cwd, ignore_errors=True)
+            except Exception:
+                pass
+
+    def _build_text_tool_definitions(self, tools: List[Dict]) -> str:
+        """Build a text description of available tools for the system prompt."""
+        lines = ["### Tool Definitions\n"]
+
+        for tool in tools:
+            name = tool.get('name', 'unknown')
+            desc = tool.get('description', 'No description')
+            schema = tool.get('input_schema', {})
+            props = schema.get('properties', {})
+            required = schema.get('required', [])
+
+            lines.append(f"**{name}**")
+            lines.append(f"  {desc}")
+
+            if props:
+                lines.append("  Parameters:")
+                for param_name, param_info in props.items():
+                    param_type = param_info.get('type', 'any')
+                    param_desc = param_info.get('description', '')
+                    req_marker = " (required)" if param_name in required else ""
+                    lines.append(f"    - {param_name}: {param_type}{req_marker} - {param_desc}")
+
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def _parse_text_tool_calls(self, text: str) -> List[Dict]:
+        """Parse tool calls from text using ```tool_call markers."""
+        import re
+
+        pattern = r'```tool_call\n(.*?)\n```'
+        matches = re.findall(pattern, text, re.DOTALL)
+
+        tool_calls = []
+        for match in matches:
+            try:
+                parsed = json.loads(match.strip())
+                if 'tool' in parsed:
+                    tool_calls.append(parsed)
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse tool call JSON: {match[:100]}")
+                continue
+
+        return tool_calls
+
+    def _chunk_text(self, text: str, chunk_size: int) -> List[str]:
+        """Split text into chunks for streaming."""
+        chunks = []
+        for i in range(0, len(text), chunk_size):
+            chunks.append(text[i:i+chunk_size])
+        return chunks
+
+    async def _execute_tool(
+        self,
+        tool_name: str,
+        tool_input: dict,
+        kernel,
+        notebook_id: str,
+        registry
+    ) -> dict:
+        """Execute a tool (builtin or kernel function)."""
+        logger.info(f"Executing tool: {tool_name} with input: {tool_input}")
+
+        # Check if it's a builtin tool
+        if registry.is_builtin(tool_name):
+            return await registry.execute_builtin(tool_name, tool_input)
+
+        # Execute in kernel
+        if kernel:
+            return await kernel.execute_tool(tool_name, tool_input)
+
+        return {
+            "status": "error",
+            "error": f"Tool '{tool_name}' not found and no kernel available"
+        }
+
+    def _format_tool_result_for_llm(self, result: dict) -> str:
+        """Format a tool result for sending back to the LLM."""
+        if result.get('status') == 'error':
+            return f"Error: {result.get('error', 'Unknown error')}"
+
+        result_data = result.get('result', {})
+        if isinstance(result_data, dict):
+            result_type = result_data.get('type', 'text')
+            content = result_data.get('content', '')
+
+            if result_type == 'text':
+                return content
+            elif result_type == 'html':
+                return f"[HTML output: {len(content)} chars]\n{content[:500]}..."
+            elif result_type == 'image':
+                return "[Image output]"
+            else:
+                return str(content)
+        else:
+            return str(result_data)
+
+    def _build_tool_results_prompt(self, tool_results: List[dict]) -> str:
+        """Build a prompt string containing tool results."""
+        parts = ["Here are the results from the tool calls:"]
+        for tr in tool_results:
+            content = tr.get('content', '')
+            parts.append(f"\n{content}")
+        parts.append("\nPlease continue based on these results.")
+        return "\n".join(parts)
 
     def get_provider(self) -> str:
         """Get the current provider (for debugging/logging)."""

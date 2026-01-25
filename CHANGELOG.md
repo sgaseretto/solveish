@@ -5,6 +5,38 @@ All notable changes to Dialeng will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+#### LLM Steps Display with Proper Reasoning Separation
+- **Pre-tool reasoning inside LLM Steps** - Text before tool calls ("I'll use the greet tool...") is captured and displayed inside the collapsible LLM Steps
+- **Inter-tool reasoning inside LLM Steps** - Text between tool calls is captured as reasoning steps
+- **Post-tool reasoning inside LLM Steps** - Acknowledgment text after the last tool result ("I see that the tool was called...") is now properly captured using paragraph-break heuristic and displayed inside LLM Steps
+- **Final response properly separated** - Only the actual final response (paragraphs after the acknowledgment) appears outside the LLM Steps details element
+- **Nested collapsible dropdowns for tool inputs/outputs** - Each tool call now has individually expandable `<details>` elements for viewing inputs and outputs
+- **Fixed nested HTML block parsing in markdown** - The `extractLeadingHtmlBlocks()` function now properly handles nested `<details>` tags using depth counting instead of non-greedy regex that would break at the first closing tag
+
+### Changed
+
+- **Renamed "ReAct Steps" to "LLM Steps"** - More user-friendly name for the collapsible section showing tool activity
+- **Refactored streaming text categorization** - The prompt cell streaming loop now properly categorizes text chunks:
+  - `pre_tool_text`: Text before first tool call → saved as reasoning in LLM Steps
+  - `post_tool_text` between tools: Text between tool_result and next tool_call → saved as reasoning in LLM Steps
+  - `post_tool_text` at end: Text after last tool_result with no more tool_calls → displayed as final response outside LLM Steps
+- **`_format_tool_steps_markdown()`** - Refactored to use nested `<details>/<summary>` elements for tool inputs and outputs instead of flat `<div>` elements
+- **`extractLeadingHtmlBlocks()`** - New JavaScript function that properly extracts leading HTML blocks with nested tag support using depth counting
+- **`renderMarkdown()`** - Now uses `extractLeadingHtmlBlocks()` instead of simple regex for more robust HTML preservation
+
+### Added
+
+#### CSS Styles for Nested Tool Details
+- **`.step-input-details`, `.step-output-details`** - Styling for the nested collapsible sections within each tool call
+- **`.step-toggle`** - Styling for the expandable summary (📥 Input, 📤 Output) with hover effects and arrow indicators
+- **`.step-pre`** - Styled pre-formatted code blocks for input JSON and output results with max-height scrolling
+
+---
+
 ## [0.10.0] - 2025-01-15
 
 ### Added
@@ -182,7 +214,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 #### Direct SDK Mode for Maximum Session Isolation
-- **New `use_sdk_direct` option** - Uses `claude-agent-sdk.query()` directly instead of claudette-agent wrapper for maximum isolation. Each query:
+- **New `use_sdk_directly` option** - Uses `claude-agent-sdk.query()` directly instead of claudette-agent wrapper for maximum isolation (disabled by default). Each query:
   - Creates a completely fresh subprocess
   - Uses a unique temporary directory as `cwd`
   - Sets all stateless options explicitly (`continue_conversation=False`, `resume=None`, `setting_sources=[]`)
@@ -192,7 +224,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ```json
   {
     "llm": {
-      "use_sdk_direct": true,
+      "use_sdk_directly": false,
       "debug_mode": false,
       "debug_log_dir": "./debug_logs"
     }
@@ -214,7 +246,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`llm_service.py`** - Added `_stream_claude_sdk_direct()` method that bypasses claudette-agent wrapper entirely
 - **`llm_service.py`** - Added detailed logging to `_stream_claudette()` showing all context messages being sent
-- **`dialeng_config.py`** - Added `use_sdk_direct`, `debug_mode`, and `debug_log_dir` fields to `DialengConfig`
+- **`dialeng_config.py`** - Added `use_sdk_directly`, `debug_mode`, and `debug_log_dir` fields to `DialengConfig`
 - **`dialoghelper_service.py`** - Added comprehensive logging to `build_context_messages()` showing each cell being included
 - **`app.py`** - `/cell/{cid}/source` endpoint now clears cell output when source changes
 - **`document/cell.py`** - Added version tracking fields and `update_source()` method

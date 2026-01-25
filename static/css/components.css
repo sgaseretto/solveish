@@ -373,3 +373,493 @@
 .collapse-controls .label {
     font-size: 0.6rem; text-transform: uppercase; opacity: 0.7;
 }
+
+/* ==========================================================================
+   Tool Calling UI
+   ========================================================================== */
+
+/* Tool results area - container for variable substitutions, tool calls, and results */
+.tool-results-area {
+    margin: 8px 0;
+    padding: 8px;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    font-size: 0.85rem;
+}
+
+.tool-results-area:empty {
+    display: none;
+}
+
+/* Variable substitution indicator */
+.tool-var-substitution {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    margin-bottom: 4px;
+    background: var(--bg-cell);
+    border-radius: 4px;
+    color: var(--accent-purple);
+}
+
+.tool-var-icon { font-size: 0.9rem; }
+.tool-var-name { font-family: monospace; color: var(--accent-blue); }
+.tool-var-arrow { color: var(--text-muted); }
+.tool-var-value {
+    font-family: monospace;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 300px;
+}
+
+/* Tool available indicator */
+.tool-available {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    margin: 2px 4px 2px 0;
+    background: var(--bg-cell);
+    border-radius: 4px;
+    font-size: 0.8rem;
+}
+
+.tool-icon { font-size: 0.85rem; }
+.tool-name { font-family: monospace; color: var(--accent-green); }
+.tool-badge {
+    font-size: 0.65rem;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: var(--border);
+    color: var(--text-muted);
+    text-transform: uppercase;
+}
+
+/* Tool call in progress */
+.tool-call {
+    margin: 8px 0;
+    padding: 8px;
+    background: var(--bg-cell);
+    border-radius: 6px;
+    border-left: 3px solid var(--accent-blue);
+}
+
+.tool-call-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 500;
+}
+
+.tool-call-icon { font-size: 1rem; }
+.tool-call-name { font-family: monospace; color: var(--accent-blue); }
+.tool-call-status {
+    font-size: 0.75rem;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: var(--accent-yellow);
+    color: #000;
+    margin-left: auto;
+}
+
+.tool-call-status.success {
+    background: var(--accent-green);
+}
+
+.tool-call-status.error {
+    background: var(--accent-red);
+    color: #fff;
+}
+
+/* Tool input/output toggle */
+.tool-call-input,
+.tool-call-result {
+    margin-top: 8px;
+}
+
+.tool-toggle-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 0.8rem;
+    padding: 2px 4px;
+}
+
+.tool-toggle-btn:hover {
+    color: var(--text-primary);
+}
+
+.tool-call-details {
+    margin: 4px 0 0 16px;
+    padding: 8px;
+    background: var(--bg-secondary);
+    border-radius: 4px;
+    font-size: 0.8rem;
+    font-family: monospace;
+    overflow-x: auto;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.tool-call-result.error .tool-call-details {
+    border-left: 3px solid var(--accent-red);
+    color: var(--accent-red);
+}
+
+/* Tool confirmation dialog */
+.tool-confirmation-dialog {
+    margin: 12px 0;
+    padding: 12px;
+    background: var(--bg-cell);
+    border-radius: 8px;
+    border: 2px solid var(--accent-yellow);
+}
+
+.tool-confirm-content {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.tool-confirm-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    color: var(--accent-yellow);
+}
+
+.tool-confirm-icon { font-size: 1.2rem; }
+
+.tool-confirm-preview {
+    padding: 12px;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+    font-size: 0.85rem;
+    font-family: monospace;
+    overflow-x: auto;
+    max-height: 200px;
+}
+
+.tool-confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.tool-confirm-actions .btn-secondary {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 6px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.tool-confirm-actions .btn-secondary:hover {
+    background: var(--bg-cell);
+}
+
+.tool-confirm-actions .btn-primary {
+    background: var(--accent-green);
+    border: 1px solid var(--accent-green);
+    color: #000;
+    padding: 6px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 500;
+}
+
+.tool-confirm-actions .btn-primary:hover {
+    background: #2ea043;
+}
+
+/* ==========================================================================
+   Tool Steps (Persisted in Markdown Output)
+   Collapsible HTML sections showing variable substitutions and tool calls
+   ========================================================================== */
+
+/* Container for all tool steps */
+.tool-steps-container {
+    margin: 0 0 10px 0 !important;
+    padding: 6px 8px !important;
+    background: var(--bg-cell);
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    font-size: 0.8rem;
+    line-height: 1.3;
+}
+
+.tool-steps-container[open] {
+    background: var(--bg-secondary);
+}
+
+/* Summary line (clickable to expand/collapse) */
+.tool-steps-summary {
+    cursor: pointer;
+    font-weight: 500;
+    color: var(--text-secondary);
+    padding: 2px 0 !important;
+    margin: 0 !important;
+    user-select: none;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.tool-steps-summary::-webkit-details-marker {
+    display: none;
+}
+
+.tool-steps-summary::before {
+    content: "▶";
+    font-size: 0.7em;
+    opacity: 0.7;
+}
+
+.tool-steps-container[open] > .tool-steps-summary::before {
+    content: "▼";
+}
+
+.tool-steps-summary:hover {
+    color: var(--text-primary);
+}
+
+/* Content area inside expanded details */
+.tool-steps-content {
+    margin: 4px 0 0 0 !important;
+    padding: 4px 0 0 0 !important;
+    border-top: 1px solid var(--border);
+}
+
+/* Individual step items - new chronological format */
+.step {
+    margin: 0 !important;
+    padding: 3px 0 !important;
+    border-bottom: 1px dashed rgba(128, 128, 128, 0.3);
+    display: block;
+}
+
+.step:last-child {
+    border-bottom: none;
+    padding-bottom: 0 !important;
+}
+
+.step-icon {
+    display: inline;
+    margin: 0 4px 0 0 !important;
+    padding: 0 !important;
+    font-size: 0.85em;
+}
+
+/* Variable substitution step */
+.step-var {
+    display: flex !important;
+    align-items: center;
+    gap: 4px;
+}
+
+.step-var code {
+    background: var(--bg-cell) !important;
+    padding: 0 3px !important;
+    margin: 0 !important;
+    border-radius: 3px;
+    font-size: 0.9em;
+    font-family: 'SF Mono', Consolas, monospace;
+}
+
+/* Tool call step */
+.step-tool {
+    padding: 4px 0 !important;
+}
+
+.step-header {
+    display: flex !important;
+    align-items: center;
+    gap: 4px;
+    margin: 0 0 3px 0 !important;
+    padding: 0 !important;
+}
+
+.step-header strong {
+    color: var(--accent-blue);
+    font-size: 0.85em;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+.step-detail {
+    margin: 0 0 3px 18px !important;
+    padding: 0 !important;
+}
+
+.step-detail:last-child {
+    margin-bottom: 0 !important;
+}
+
+.step-label {
+    display: block !important;
+    font-size: 0.7em;
+    color: var(--text-muted);
+    margin: 0 0 1px 0 !important;
+    padding: 0 !important;
+}
+
+.step-detail pre {
+    margin: 0 !important;
+    padding: 3px 5px !important;
+    background: var(--bg-cell) !important;
+    border-radius: 3px;
+    overflow-x: auto;
+    font-size: 0.78em;
+    max-height: 80px;
+    line-height: 1.2;
+    font-family: 'SF Mono', Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* AI reasoning step */
+.step-reasoning {
+    display: flex !important;
+    align-items: flex-start;
+    gap: 4px;
+    background: rgba(136, 136, 136, 0.08);
+    margin: 0 !important;
+    padding: 3px 5px !important;
+    border-radius: 3px;
+    font-style: italic;
+}
+
+.step-reasoning .step-text {
+    color: var(--text-secondary);
+    font-size: 0.82em;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+/* Nested details for tool inputs/outputs */
+.step-input-details,
+.step-output-details {
+    margin: 3px 0 3px 18px !important;
+    padding: 0 !important;
+    border: none !important;
+    background: transparent !important;
+}
+
+.step-toggle {
+    cursor: pointer;
+    font-size: 0.75em;
+    color: var(--text-muted);
+    padding: 2px 4px !important;
+    margin: 0 !important;
+    user-select: none;
+    list-style: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border-radius: 3px;
+    transition: background 0.15s, color 0.15s;
+}
+
+.step-toggle::-webkit-details-marker {
+    display: none;
+}
+
+.step-toggle::before {
+    content: "▶";
+    font-size: 0.8em;
+    opacity: 0.6;
+}
+
+.step-input-details[open] > .step-toggle::before,
+.step-output-details[open] > .step-toggle::before {
+    content: "▼";
+}
+
+.step-toggle:hover {
+    color: var(--text-primary);
+    background: var(--bg-cell);
+}
+
+.step-pre {
+    margin: 4px 0 0 0 !important;
+    padding: 4px 6px !important;
+    background: var(--bg-cell) !important;
+    border-radius: 3px;
+    overflow-x: auto;
+    font-size: 0.78em;
+    max-height: 120px;
+    overflow-y: auto;
+    line-height: 1.2;
+    font-family: 'SF Mono', Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+    border-left: 2px solid var(--border);
+}
+
+/* Override ai-preview/md-preview styles for tool-steps */
+.ai-preview .tool-steps-container,
+.md-preview .tool-steps-container {
+    margin: 0 0 12px 0 !important;
+}
+
+.ai-preview .tool-steps-content,
+.md-preview .tool-steps-content {
+    margin: 4px 0 0 0 !important;
+}
+
+.ai-preview .step,
+.md-preview .step {
+    padding: 4px 0 !important;
+    margin: 0 !important;
+}
+
+.ai-preview .step-detail,
+.md-preview .step-detail {
+    margin: 0 0 3px 18px !important;
+}
+
+.ai-preview .step-detail pre,
+.md-preview .step-detail pre {
+    margin: 0 !important;
+    padding: 3px 5px !important;
+}
+
+.ai-preview .step-header,
+.md-preview .step-header {
+    margin: 0 0 3px 0 !important;
+}
+
+.ai-preview .step-var code,
+.md-preview .step-var code {
+    padding: 0 3px !important;
+    margin: 0 !important;
+}
+
+/* Nested details overrides for ai-preview/md-preview */
+.ai-preview .step-input-details,
+.ai-preview .step-output-details,
+.md-preview .step-input-details,
+.md-preview .step-output-details {
+    margin: 3px 0 3px 18px !important;
+    padding: 0 !important;
+}
+
+.ai-preview .step-toggle,
+.md-preview .step-toggle {
+    padding: 2px 4px !important;
+    margin: 0 !important;
+}
+
+.ai-preview .step-pre,
+.md-preview .step-pre {
+    margin: 4px 0 0 0 !important;
+    padding: 4px 6px !important;
+}
