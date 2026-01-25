@@ -253,7 +253,11 @@ def cell_to_llm_messages(cell: 'Cell') -> List[Dict]:
     elif cell_type == "prompt":
         msgs = [{"role": "user", "content": cell.source}]
         if cell.output:
-            msgs.append({"role": "assistant", "content": cell.output})
+            # Strip LLM Steps HTML from output before including in context
+            # This prevents the LLM from seeing/reproducing our formatting HTML
+            clean_output = _strip_llm_steps_html(cell.output)
+            if clean_output.strip():
+                msgs.append({"role": "assistant", "content": clean_output})
         return msgs
 
     # Unknown type - treat as user message
@@ -264,6 +268,33 @@ def cell_to_llm_messages(cell: 'Cell') -> List[Dict]:
 # ============================================================================
 # Helpers
 # ============================================================================
+
+def _strip_llm_steps_html(output: str) -> str:
+    """
+    Strip LLM Steps HTML from cell output before including in LLM context.
+
+    The <details class="tool-steps-container"> blocks contain our formatting
+    for tool call visualization. If included in context, the LLM might try
+    to reproduce this HTML in its response, causing duplication issues.
+
+    Args:
+        output: Cell output that may contain LLM Steps HTML
+
+    Returns:
+        Output with LLM Steps HTML removed
+    """
+    import re
+
+    if not output or '<details class="tool-steps-container">' not in output:
+        return output
+
+    # Remove the entire <details class="tool-steps-container">...</details> block
+    # This regex matches the opening tag through the closing tag
+    pattern = r'<details class="tool-steps-container">.*?</details>\s*'
+    cleaned = re.sub(pattern, '', output, flags=re.DOTALL)
+
+    return cleaned.strip()
+
 
 def _get_cell_type_str(cell: 'Cell') -> str:
     """Get cell type as string (handles both enum and string)."""

@@ -5,6 +5,88 @@ All notable changes to Dialeng will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+#### Response Deduplication False Positive Fix
+- **Fixed truncation of legitimate responses** - The `_deduplicate_response_text()` function was incorrectly truncating responses at ~50 characters due to matching single characters like "," during partial overlap detection. Now requires minimum 20-character overlap for detection
+- **Added comprehensive documentation** - Function docstring now includes bug fix history and future improvement suggestions
+
+#### Bedrock Tool Calling Fixes
+- **Fixed tools not being passed to claudette** - Tools must be passed to the Chat constructor, not in individual calls
+- **Fixed tool call detection** - Tool calls are now extracted from `stream_result.value` after streaming completes (per claudette docs)
+- **Fixed tool result format** - Tool results are updated in-place to preserve claudette's AttrDict format instead of replacing with plain dicts
+
+### Changed
+
+#### Provider-Specific Default Models
+- **Default models are now per-provider** - Configuration now supports different default models for each provider:
+  - `bedrock`: Default to cheaper models (e.g., Haiku) for pay-per-use
+  - `anthropic_api`: Configurable per preference
+  - `claude_code_subscription`: Can use more capable models with flat-rate subscription
+  - `fallback`: Used when provider is unknown
+- **Removed `default` flag from model entries** - The new `models.defaults` section replaces per-model default flags
+- **Updated startup logging** - Now shows active default model based on detected provider
+
+### Added
+
+#### ContextKit Integration
+- **Added ContextKit dependency** - `contextkit` package for reading context from various sources (files, URLs, PDFs, GitHub repos, YouTube transcripts, etc.)
+- **Available readers** - `read_file`, `read_url`, `read_pdf`, `read_gh_repo`, `read_gh_file`, `read_gist`, `read_yt_transcript`, `read_gdoc`, `read_google_sheet`, `read_html`, `read_dir`, `read_git_path`
+
+#### Debug Logging for Tool Calling
+- **Added extensive debug logging to claudette path** - Logs model info, tools, history, stream results, and tool call detection
+- **Added debug logging to claudette-agent path** - Logs provider info, context messages, prompts, responses, and tool execution
+
+#### LLM Steps Display with Proper Reasoning Separation
+- **Pre-tool reasoning inside LLM Steps** - Text before tool calls ("I'll use the greet tool...") is captured and displayed inside the collapsible LLM Steps
+- **Inter-tool reasoning inside LLM Steps** - Text between tool calls is captured as reasoning steps
+- **Post-tool reasoning inside LLM Steps** - Acknowledgment text after the last tool result ("I see that the tool was called...") is now properly captured using paragraph-break heuristic and displayed inside LLM Steps
+- **Final response properly separated** - Only the actual final response (paragraphs after the acknowledgment) appears outside the LLM Steps details element
+- **Nested collapsible dropdowns for tool inputs/outputs** - Each tool call now has individually expandable `<details>` elements for viewing inputs and outputs
+- **Fixed nested HTML block parsing in markdown** - The `extractLeadingHtmlBlocks()` function now properly handles nested `<details>` tags using depth counting instead of non-greedy regex that would break at the first closing tag
+
+#### Tool Loop Output Duplication Fixes
+- **Fixed duplicated response content** - The follow-up prompt in tool loops now includes the original user question, preventing the LLM from producing confused/duplicated output
+- **Added response deduplication** - New `_deduplicate_response_text()` function detects and removes duplicated content in LLM responses that can occur during tool calling
+- **Stripped LLM Steps HTML from context** - Previous prompt cell outputs containing `<details class="tool-steps-container">` HTML are now cleaned before being included in LLM context, preventing the LLM from reproducing formatting HTML
+
+#### Post-Tool Response Placement Fix
+- **All post-tool text now outside LLM Steps** - Removed paragraph-break heuristic that incorrectly captured introductory text (like "Based on the analysis, here are the results:") as reasoning inside the LLM Steps. Now all text after the last tool_result is displayed as the final response outside the collapsible section
+
+#### Multi-Paragraph Reasoning Display Fixes
+- **Preserved line breaks in reasoning text** - Added `white-space: pre-wrap` to `.step-reasoning .step-text` CSS so multi-paragraph reasoning displays correctly instead of collapsing into a single line
+- **Configurable reasoning truncation limit** - Increased default truncation limit from 300 to 500 characters; now configurable via `display.reasoning_truncate_chars` in `dialeng_config.json` (0 = no limit)
+
+#### AWS Bedrock Integration Fixes
+- **Fixed AWS region not being passed to Bedrock client** - The `aws_region` from config is now explicitly passed to `AnthropicBedrock()` instead of relying on auto-detection
+- **Fixed invalid Bedrock model IDs** - Updated default model mappings to use correct Bedrock model ID format (`anthropic.{model}-{date}-v{n}:{profile}`) instead of cross-region format (`us.anthropic...`)
+- **Updated default models** - Changed default models to publicly available Claude 3.5 Sonnet, Claude 3.5 Haiku, and Claude 3 Opus with correct API model IDs
+
+### Changed
+
+- **Renamed "ReAct Steps" to "LLM Steps"** - More user-friendly name for the collapsible section showing tool activity
+- **Refactored streaming text categorization** - The prompt cell streaming loop now properly categorizes text chunks:
+  - `pre_tool_text`: Text before first tool call → saved as reasoning in LLM Steps
+  - `post_tool_text` between tools: Text between tool_result and next tool_call → saved as reasoning in LLM Steps
+  - `post_tool_text` at end: Text after last tool_result with no more tool_calls → displayed as final response outside LLM Steps
+- **`_format_tool_steps_markdown()`** - Refactored to use nested `<details>/<summary>` elements for tool inputs and outputs instead of flat `<div>` elements
+- **`extractLeadingHtmlBlocks()`** - New JavaScript function that properly extracts leading HTML blocks with nested tag support using depth counting
+- **`renderMarkdown()`** - Now uses `extractLeadingHtmlBlocks()` instead of simple regex for more robust HTML preservation
+
+### Added
+
+#### Display Configuration
+- **`display.reasoning_truncate_chars`** - New config option in `dialeng_config.json` to control reasoning text truncation (default: 500 characters, 0 = no limit)
+
+#### CSS Styles for Nested Tool Details
+- **`.step-input-details`, `.step-output-details`** - Styling for the nested collapsible sections within each tool call
+- **`.step-toggle`** - Styling for the expandable summary (📥 Input, 📤 Output) with hover effects and arrow indicators
+- **`.step-pre`** - Styled pre-formatted code blocks for input JSON and output results with max-height scrolling
+
+---
+
 ## [0.10.0] - 2025-01-15
 
 ### Added
@@ -182,7 +264,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 #### Direct SDK Mode for Maximum Session Isolation
-- **New `use_sdk_direct` option** - Uses `claude-agent-sdk.query()` directly instead of claudette-agent wrapper for maximum isolation. Each query:
+- **New `use_sdk_directly` option** - Uses `claude-agent-sdk.query()` directly instead of claudette-agent wrapper for maximum isolation (disabled by default). Each query:
   - Creates a completely fresh subprocess
   - Uses a unique temporary directory as `cwd`
   - Sets all stateless options explicitly (`continue_conversation=False`, `resume=None`, `setting_sources=[]`)
@@ -192,7 +274,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ```json
   {
     "llm": {
-      "use_sdk_direct": true,
+      "use_sdk_directly": false,
       "debug_mode": false,
       "debug_log_dir": "./debug_logs"
     }
@@ -214,7 +296,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`llm_service.py`** - Added `_stream_claude_sdk_direct()` method that bypasses claudette-agent wrapper entirely
 - **`llm_service.py`** - Added detailed logging to `_stream_claudette()` showing all context messages being sent
-- **`dialeng_config.py`** - Added `use_sdk_direct`, `debug_mode`, and `debug_log_dir` fields to `DialengConfig`
+- **`dialeng_config.py`** - Added `use_sdk_directly`, `debug_mode`, and `debug_log_dir` fields to `DialengConfig`
 - **`dialoghelper_service.py`** - Added comprehensive logging to `build_context_messages()` showing each cell being included
 - **`app.py`** - `/cell/{cid}/source` endpoint now clears cell output when source changes
 - **`document/cell.py`** - Added version tracking fields and `update_source()` method

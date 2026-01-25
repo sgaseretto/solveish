@@ -142,6 +142,129 @@ def _run_streaming(self: CaptureShell, raw_cell: str, output_queue: Queue,
             self.display_pub = old_display_pub
 
 
+def _get_type_name(annotation) -> str:
+    """Convert a type annotation to a string name."""
+    import typing
+    if hasattr(annotation, '__name__'):
+        return annotation.__name__
+    elif hasattr(annotation, '__origin__'):
+        # Handle generic types like List[int], Dict[str, int], Optional[str]
+        origin = annotation.__origin__
+        args = getattr(annotation, '__args__', ())
+        origin_name = getattr(origin, '__name__', str(origin))
+        if args:
+            arg_names = ', '.join(_get_type_name(a) for a in args)
+            return f"{origin_name}[{arg_names}]"
+        return origin_name
+    return str(annotation)
+
+
+def _extract_param_description(docstring: str, param_name: str) -> str:
+    """Extract parameter description from Google/numpy style docstring."""
+    if not docstring:
+        return param_name
+
+    import re
+    lines = docstring.split('\n')
+
+    # Look for Args/Parameters section
+    in_params_section = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        # Check for section headers
+        if stripped.lower() in ('args:', 'arguments:', 'parameters:', 'params:'):
+            in_params_section = True
+            continue
+        elif stripped.lower() in ('returns:', 'return:', 'raises:', 'examples:', 'example:', 'notes:', 'note:'):
+            in_params_section = False
+            continue
+
+        if in_params_section:
+            # Google style: "param_name: description" or "param_name (type): description"
+            google_match = re.match(rf'^\s*{re.escape(param_name)}\s*(?:\([^)]*\))?\s*:\s*(.+)', line)
+            if google_match:
+                desc = google_match.group(1).strip()
+                # Check for continuation on next lines
+                for j in range(i + 1, len(lines)):
+                    next_line = lines[j]
+                    if next_line.strip() and not re.match(r'^\s*\w+\s*(?:\([^)]*\))?\s*:', next_line):
+                        if next_line.startswith('        ') or next_line.startswith('\t\t'):
+                            desc += ' ' + next_line.strip()
+                        else:
+                            break
+                    else:
+                        break
+                return desc
+
+            # Numpy style: "param_name : type"
+            numpy_match = re.match(rf'^\s*{re.escape(param_name)}\s*:\s*\w+', line)
+            if numpy_match:
+                # Description is on next line
+                if i + 1 < len(lines):
+                    return lines[i + 1].strip()
+
+    return param_name
+
+
+def _format_tool_result(result) -> dict:
+    """Format a tool execution result for sending back to the LLM."""
+    import io
+    import base64
+
+    # Check for matplotlib figure
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.figure import Figure
+        if isinstance(result, Figure):
+            buf = io.BytesIO()
+            result.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+            buf.seek(0)
+            img_data = base64.b64encode(buf.read()).decode('utf-8')
+            buf.close()
+            plt.close(result)
+            return {'type': 'image', 'format': 'png', 'content': img_data}
+    except ImportError:
+        pass
+
+    # Check for _repr_png_
+    if hasattr(result, '_repr_png_'):
+        try:
+            png_data = result._repr_png_()
+            if png_data:
+                if isinstance(png_data, bytes):
+                    png_data = base64.b64encode(png_data).decode('utf-8')
+                return {'type': 'image', 'format': 'png', 'content': png_data}
+        except Exception:
+            pass
+
+    # Check for _repr_html_
+    if hasattr(result, '_repr_html_'):
+        try:
+            html = result._repr_html_()
+            if html:
+                # Truncate very long HTML
+                if len(html) > 10000:
+                    html = html[:10000] + '\n... (truncated)'
+                return {'type': 'html', 'content': html}
+        except Exception:
+            pass
+
+    # Check for pandas DataFrame/Series
+    try:
+        import pandas as pd
+        if isinstance(result, (pd.DataFrame, pd.Series)):
+            html = result.to_html(max_rows=50, max_cols=20)
+            return {'type': 'html', 'content': html}
+    except ImportError:
+        pass
+
+    # Default: text representation
+    result_str = repr(result)
+    if len(result_str) > 5000:
+        result_str = result_str[:5000] + '\n... (truncated)'
+    return {'type': 'text', 'content': result_str}
+
+
 def kernel_worker_main(input_queue: Queue, output_queue: Queue):
     """
     Main loop for the kernel subprocess.
@@ -252,6 +375,171 @@ def kernel_worker_main(input_queue: Queue, output_queue: Queue):
             # Restart by re-creating the shell
             shell = CaptureShell()
             output_queue.put({'type': 'status', 'status': 'restarted'})
+
+        elif msg['type'] == 'introspect_var':
+            # Introspect a variable in the kernel namespace
+            var_name = msg.get('name', '')
+            try:
+                if var_name in shell.user_ns:
+                    var = shell.user_ns[var_name]
+                    var_repr = repr(var)
+                    # Truncate repr to 500 chars to avoid huge outputs
+                    if len(var_repr) > 500:
+                        var_repr = var_repr[:497] + '...'
+                    output_queue.put({
+                        'type': 'introspect_var_reply',
+                        'name': var_name,
+                        'exists': True,
+                        'var_type': type(var).__name__,
+                        'repr': var_repr
+                    })
+                else:
+                    output_queue.put({
+                        'type': 'introspect_var_reply',
+                        'name': var_name,
+                        'exists': False,
+                        'error': f"Variable '{var_name}' not found in namespace"
+                    })
+            except Exception as e:
+                output_queue.put({
+                    'type': 'introspect_var_reply',
+                    'name': var_name,
+                    'exists': False,
+                    'error': str(e)
+                })
+
+        elif msg['type'] == 'introspect_function':
+            # Introspect a function in the kernel namespace
+            import inspect
+            func_name = msg.get('name', '')
+            try:
+                if func_name in shell.user_ns:
+                    func = shell.user_ns[func_name]
+                    if callable(func):
+                        # Get signature
+                        try:
+                            sig = str(inspect.signature(func))
+                        except (ValueError, TypeError):
+                            sig = '(...)'
+
+                        # Get docstring
+                        docstring = inspect.getdoc(func) or ''
+
+                        # Get parameter info with types
+                        params = {}
+                        try:
+                            sig_obj = inspect.signature(func)
+                            for param_name, param in sig_obj.parameters.items():
+                                param_info = {'name': param_name}
+                                # Get type annotation
+                                if param.annotation != inspect.Parameter.empty:
+                                    param_info['type'] = _get_type_name(param.annotation)
+                                else:
+                                    param_info['type'] = 'any'
+                                # Get default value
+                                if param.default != inspect.Parameter.empty:
+                                    param_info['default'] = repr(param.default)
+                                # Get description from docstring (Google/numpy style)
+                                param_info['description'] = _extract_param_description(docstring, param_name)
+                                params[param_name] = param_info
+                        except (ValueError, TypeError):
+                            pass
+
+                        # Get return type
+                        return_type = None
+                        try:
+                            sig_obj = inspect.signature(func)
+                            if sig_obj.return_annotation != inspect.Parameter.empty:
+                                return_type = _get_type_name(sig_obj.return_annotation)
+                        except (ValueError, TypeError):
+                            pass
+
+                        output_queue.put({
+                            'type': 'introspect_function_reply',
+                            'name': func_name,
+                            'exists': True,
+                            'is_callable': True,
+                            'signature': sig,
+                            'docstring': docstring,
+                            'parameters': params,
+                            'return_type': return_type
+                        })
+                    else:
+                        output_queue.put({
+                            'type': 'introspect_function_reply',
+                            'name': func_name,
+                            'exists': True,
+                            'is_callable': False,
+                            'error': f"'{func_name}' is not callable"
+                        })
+                else:
+                    output_queue.put({
+                        'type': 'introspect_function_reply',
+                        'name': func_name,
+                        'exists': False,
+                        'error': f"Function '{func_name}' not found in namespace"
+                    })
+            except Exception as e:
+                output_queue.put({
+                    'type': 'introspect_function_reply',
+                    'name': func_name,
+                    'exists': False,
+                    'error': str(e)
+                })
+
+        elif msg['type'] == 'execute_tool':
+            # Execute a function as a tool with given arguments
+            import json
+            import io
+            import base64
+
+            func_name = msg.get('name', '')
+            kwargs = msg.get('kwargs', {})
+
+            output_queue.put({'type': 'status', 'status': 'busy'})
+
+            try:
+                if func_name not in shell.user_ns:
+                    output_queue.put({
+                        'type': 'execute_tool_reply',
+                        'name': func_name,
+                        'status': 'error',
+                        'error': f"Function '{func_name}' not found"
+                    })
+                else:
+                    func = shell.user_ns[func_name]
+                    if not callable(func):
+                        output_queue.put({
+                            'type': 'execute_tool_reply',
+                            'name': func_name,
+                            'status': 'error',
+                            'error': f"'{func_name}' is not callable"
+                        })
+                    else:
+                        # Execute the function
+                        result = func(**kwargs)
+
+                        # Handle rich output types
+                        result_data = _format_tool_result(result)
+
+                        output_queue.put({
+                            'type': 'execute_tool_reply',
+                            'name': func_name,
+                            'status': 'success',
+                            'result': result_data
+                        })
+
+            except Exception as e:
+                tb_lines = traceback.format_exception(type(e), e, e.__traceback__)
+                output_queue.put({
+                    'type': 'execute_tool_reply',
+                    'name': func_name,
+                    'status': 'error',
+                    'error': str(e),
+                    'traceback': tb_lines
+                })
+
+            output_queue.put({'type': 'status', 'status': 'idle'})
 
 
 if __name__ == '__main__':

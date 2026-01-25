@@ -465,7 +465,7 @@ Key features:
 
 #### claude-agent-sdk Direct Mode (Maximum Isolation)
 
-For maximum session isolation, Dialeng can use `claude-agent-sdk.query()` directly instead of the claudette-agent wrapper. This is enabled by default via `use_sdk_direct: true` in `dialeng_config.json`.
+For maximum session isolation, Dialeng can use `claude-agent-sdk.query()` directly instead of the claudette-agent wrapper. This is disabled by default but can be enabled via `use_sdk_directly: true` in `dialeng_config.json`.
 
 ```python
 from claude_agent_sdk import query, ClaudeAgentOptions
@@ -510,7 +510,7 @@ Configuration in `dialeng_config.json`:
 ```json
 {
   "llm": {
-    "use_sdk_direct": true,
+    "use_sdk_directly": false,
     "debug_mode": false,
     "debug_log_dir": "./debug_logs"
   }
@@ -519,7 +519,7 @@ Configuration in `dialeng_config.json`:
 
 | Option | Description |
 |--------|-------------|
-| `use_sdk_direct` | `true` = use SDK directly (default), `false` = use claudette-agent wrapper |
+| `use_sdk_directly` | `true` = use SDK directly, `false` = use claudette-agent wrapper (default) |
 | `debug_mode` | When `true`, saves prompts and responses to JSON files |
 | `debug_log_dir` | Directory for debug logs (default: `./debug_logs`) |
 
@@ -693,27 +693,38 @@ The config file is created in the project root directory:
   },
   "models": {
     "available": [
-      {"id": "claude-sonnet-3-7", "name": "Claude Sonnet 3.7", "default": true},
-      {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "default": false},
-      {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "default": false}
+      {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5"},
+      {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5"},
+      {"id": "claude-3-5-sonnet", "name": "Claude 3.5 Sonnet"},
+      {"id": "claude-3-5-haiku", "name": "Claude 3.5 Haiku"}
     ],
+    "defaults": {
+      "bedrock": "claude-haiku-4-5",
+      "anthropic_api": "claude-sonnet-4-5",
+      "claude_code_subscription": "claude-sonnet-4-5",
+      "fallback": "claude-sonnet-4-5",
+      "comment": "Default model per provider"
+    },
     "anthropic_api_map": {
       "claude-sonnet-4-5": "claude-sonnet-4-5-20250514",
-      "claude-haiku-4-5": "claude-haiku-4-5-20250514",
-      "claude-sonnet-3-7": "claude-3-7-sonnet-20250219",
+      "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+      "claude-3-5-sonnet": "claude-3-5-sonnet-20241022",
+      "claude-3-5-haiku": "claude-3-5-haiku-20241022",
       "comment": "Model IDs for direct Anthropic API (with date suffix)"
     },
     "bedrock_map": {
       "claude-sonnet-4-5": "us.anthropic.claude-sonnet-4-5-20250514-v1:0",
-      "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20250514-v1:0",
-      "claude-sonnet-3-7": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+      "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "claude-3-5-sonnet": "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+      "claude-3-5-haiku": "us.anthropic.claude-3-5-haiku-20241022-v1:0",
       "comment": "Model IDs for AWS Bedrock (with region prefix and version suffix)"
     },
     "claudette_agent_map": {
-      "claude-sonnet-4-5": "claude-sonnet-4-5",
-      "claude-haiku-4-5": "claude-haiku-4-5",
-      "claude-sonnet-3-7": "claude-sonnet-3-7",
-      "comment": "Model IDs for claudette-agent (Claude Code subscription) - uses simple names"
+      "claude-sonnet-4-5": "sonnet",
+      "claude-haiku-4-5": "haiku",
+      "claude-3-5-sonnet": "sonnet",
+      "claude-3-5-haiku": "haiku",
+      "comment": "Model IDs for Claude Code subscription - uses simple names (sonnet, haiku, opus)"
     }
   },
   "modes": {
@@ -732,7 +743,8 @@ The config file is created in the project root directory:
 | Section | Key | Description |
 |---------|-----|-------------|
 | `aws.region` | AWS region | Region for Bedrock API calls (e.g., `us-east-1`, `eu-west-1`) |
-| `models.available` | Model list | Models shown in the UI picker. Each has `id`, `name`, and optional `default` |
+| `models.available` | Model list | Models shown in the UI picker. Each has `id` and `name` |
+| `models.defaults` | Provider defaults | Default model per provider: `bedrock`, `anthropic_api`, `claude_code_subscription`, `fallback` |
 | `models.anthropic_api_map` | API model IDs | Maps UI model IDs to Anthropic API model names (with date suffix) |
 | `models.bedrock_map` | Bedrock model IDs | Maps UI model IDs to AWS Bedrock model ARNs (with version suffix) |
 | `models.claudette_agent_map` | Claude Code model IDs | Maps UI model IDs to claudette-agent model names (simple names) |
@@ -749,48 +761,58 @@ To add a new model (e.g., Claude Opus):
 {
   "models": {
     "available": [
-      {"id": "claude-sonnet-3-7", "name": "Claude Sonnet 3.7", "default": true},
-      {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5"},
       {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5"},
+      {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5"},
       {"id": "claude-opus-4", "name": "Claude Opus 4"}
     ],
+    "defaults": {
+      "bedrock": "claude-haiku-4-5",
+      "anthropic_api": "claude-sonnet-4-5",
+      "claude_code_subscription": "claude-opus-4",
+      "fallback": "claude-sonnet-4-5"
+    },
     "anthropic_api_map": {
-      "claude-sonnet-3-7": "claude-3-7-sonnet-20250219",
       "claude-sonnet-4-5": "claude-sonnet-4-5-20250514",
-      "claude-haiku-4-5": "claude-haiku-4-5-20250514",
+      "claude-haiku-4-5": "claude-haiku-4-5-20251001",
       "claude-opus-4": "claude-opus-4-20250514"
     },
     "bedrock_map": {
-      "claude-sonnet-3-7": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
       "claude-sonnet-4-5": "us.anthropic.claude-sonnet-4-5-20250514-v1:0",
-      "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20250514-v1:0",
+      "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
       "claude-opus-4": "us.anthropic.claude-opus-4-20250514-v1:0"
     },
     "claudette_agent_map": {
-      "claude-sonnet-3-7": "claude-sonnet-3-7",
-      "claude-sonnet-4-5": "claude-sonnet-4-5",
-      "claude-haiku-4-5": "claude-haiku-4-5",
-      "claude-opus-4": "claude-opus-4"
+      "claude-sonnet-4-5": "sonnet",
+      "claude-haiku-4-5": "haiku",
+      "claude-opus-4": "opus"
     }
   }
 }
 ```
 
-#### Changing Default Model
+#### Changing Default Models per Provider
 
-To make Sonnet 4.5 the default:
+Default models are now configured per provider in the `models.defaults` section. This allows you to use a cheaper model for Bedrock (pay-per-use) while using a more capable model for Claude Code subscription:
 
 ```json
 {
   "models": {
-    "available": [
-      {"id": "claude-sonnet-3-7", "name": "Claude Sonnet 3.7", "default": false},
-      {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "default": true},
-      {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "default": false}
-    ]
+    "defaults": {
+      "bedrock": "claude-haiku-4-5",
+      "anthropic_api": "claude-sonnet-4-5",
+      "claude_code_subscription": "claude-sonnet-4-5",
+      "fallback": "claude-sonnet-4-5"
+    }
   }
 }
 ```
+
+| Provider | Key | Use Case |
+|----------|-----|----------|
+| `bedrock` | AWS Bedrock | Often use cheaper models (Haiku) since it's pay-per-use |
+| `anthropic_api` | Direct Anthropic API | Pay-per-use, configurable per preference |
+| `claude_code_subscription` | Claude Code CLI | Flat-rate subscription, can use more capable models |
+| `fallback` | Unknown provider | Used when provider can't be determined |
 
 #### Setting Default Mode to Standard
 
@@ -850,8 +872,104 @@ LLM credentials are automatically detected at startup via:
 3. **AWS profiles**: Standard AWS credential chain
 4. **Claude CLI**: For Claude Code subscription users
 
+## Response Post-Processing
+
+After the LLM finishes streaming, the response text undergoes post-processing before being displayed. This section documents the processing steps and known issues.
+
+### Response Deduplication
+
+The `_deduplicate_response_text()` function in `app.py` attempts to detect and remove duplicated content in LLM responses. This addresses a known issue where LLMs sometimes produce duplicated output, especially during multi-step tool calling.
+
+```python
+response_text = _deduplicate_response_text(response_text)
+```
+
+#### How It Works
+
+The function looks for patterns where the second half of a response is largely a repeat of the first half:
+
+1. **Exact duplication**: "ResponseABC...ResponseABC" - the same text repeated
+2. **Partial duplication**: "ResponseABC...fragmentABC" - a fragment of the beginning repeated later
+
+```mermaid
+flowchart TD
+    A[Response Text] --> B{Length < 100?}
+    B -->|Yes| C[Return unchanged]
+    B -->|No| D[Check split points from 1/3 to 2/3]
+    D --> E{First 100 chars of first_part<br/>found in first 200 chars of second_part?}
+    E -->|Yes| F[Return first_part only]
+    E -->|No| G{20+ char overlap between<br/>end of first_part and start of second_part?}
+    G -->|Yes| F
+    G -->|No| H{More split points?}
+    H -->|Yes| D
+    H -->|No| I[Return unchanged]
+```
+
+#### Bug Fix History (2026-01-25): False Positive Truncation
+
+**Issue:** Legitimate responses were being truncated. For example:
+
+```
+Input:  "Based on the calculations:\n\n**Statistics for [10, 20, 30, 40]:**\n- Mean: 25..."
+Output: "Based on the calculations:\n\n**Statistics for [10,"  (truncated!)
+```
+
+**Root Cause:** The partial overlap detection was checking if ANY suffix of `first_end` appeared in `second_sample`, including single characters:
+
+```python
+# OLD CODE (buggy):
+for i in range(min(50, len(first_end))):
+    if first_end[i:] in second_sample:  # At i=49, first_end[49:] = ","
+        return text[:split_point].strip()  # FALSE POSITIVE!
+```
+
+When `i` reached high values (e.g., 49), `first_end[49:]` would be just a single character like `","`. Common punctuation trivially appears in most text, triggering false "duplication" detection.
+
+**Fix:** Added a minimum overlap length requirement (20 characters):
+
+```python
+# NEW CODE (fixed):
+min_overlap_len = 20
+for i in range(min(50, len(first_end) - min_overlap_len)):
+    overlap = first_end[i:]
+    if len(overlap) >= min_overlap_len and overlap in second_sample:
+        return text[:split_point].strip()
+```
+
+#### Potential Future Improvements
+
+The current deduplication approach is heuristic-based and has limitations:
+
+1. **Smarter detection with sequence alignment**
+   ```python
+   from difflib import SequenceMatcher
+
+   def detect_duplication_v2(text):
+       ratio = SequenceMatcher(None, first_half, second_half).ratio()
+       return ratio > 0.8  # 80% similarity = likely duplication
+   ```
+
+2. **Configurable threshold** - Make `min_overlap_len` configurable via `dialeng_config.json`
+
+3. **Confidence scoring** - Return both cleaned text and a confidence score
+
+4. **LLM-specific patterns** - Track known duplication patterns from tool calling loops
+
+5. **Unit tests** - Add comprehensive tests for edge cases to prevent regressions
+
+### Tool Steps Formatting
+
+When tool calling is used, the response includes an "LLM Steps" collapsible section showing:
+
+- Variable substitutions (`$\`var\``)
+- Tool calls with inputs and outputs
+- Reasoning steps between tool calls
+
+This is handled by `_format_tool_steps_markdown()` in `app.py`. See [Tool Calling](./10_tool_calling.md) for details.
+
 ## See Also
 
 - [DialogHelper Integration](./05_dialoghelper_integration.md) - How context building reuses dialoghelper functions
 - [Cell Types](./02_cell_types.md) - Details on prompt cells
 - [Real-Time Collaboration](./03_real_time_collaboration.md) - WebSocket streaming details
+- [Tool Calling](./10_tool_calling.md) - Tool calling implementation details

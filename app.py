@@ -63,9 +63,9 @@ DIALENG_CONFIG = load_config()
 CREDENTIAL_STATUS = detect_credentials()
 AVAILABLE_DIALOG_MODES = get_available_modes(CREDENTIAL_STATUS)
 
-# Models from config
+# Models from config - default model depends on detected provider
 AVAILABLE_MODELS = DIALENG_CONFIG.get_model_choices()
-DEFAULT_MODEL = DIALENG_CONFIG.get_default_model()
+DEFAULT_MODEL = DIALENG_CONFIG.get_default_model(CREDENTIAL_STATUS.backend)
 
 # Load extensions (cell types, callbacks, services)
 # Extensions are Python files in the extensions/ directory
@@ -609,6 +609,230 @@ def ansi_to_html(text: str) -> str:
     return ''.join(result)
 
 
+def _deduplicate_response_text(text: str) -> str:
+    """
+    Detect and remove duplicated content in response text.
+
+    Sometimes the LLM produces duplicated output, especially when:
+    - Tool results are processed without proper context
+    - Multiple tool loop iterations cause confusion
+
+    This function detects patterns like:
+    - "ResponseABC...ResponseABC" (exact duplication)
+    - "ResponseABC...fragmentABC" (partial duplication with fragment)
+
+    Args:
+        text: The response text that may contain duplication
+
+    Returns:
+        Cleaned text with duplications removed
+
+    ## Bug Fix History (2026-01-25)
+
+    ### Issue: False Positive Truncation
+
+    **Symptom:** Legitimate responses were being truncated. For example, a 150-character
+    response "Based on the calculations:\n\n**Statistics for [10, 20, 30, 40]:**..."
+    was cut off after only 50 characters.
+
+    **Root Cause:** The partial overlap detection loop (lines ~659-663) was checking if
+    ANY suffix of `first_end` appeared in `second_sample`, including single characters:
+
+        # OLD CODE (buggy):
+        for i in range(min(50, len(first_end))):
+            if first_end[i:] in second_sample:  # At i=49, first_end[49:] = ","
+                return text[:split_point].strip()  # FALSE POSITIVE!
+
+    When i reached high values (e.g., 49), `first_end[49:]` would be just a single
+    character like `","`. Common punctuation trivially appears in most text, causing
+    false positive "duplication" detection.
+
+    **Fix:** Added minimum overlap length requirement (20 characters). Short matches
+    like single punctuation marks are now ignored:
+
+        # NEW CODE (fixed):
+        min_overlap_len = 20
+        for i in range(min(50, len(first_end) - min_overlap_len)):
+            overlap = first_end[i:]
+            if len(overlap) >= min_overlap_len and overlap in second_sample:
+                return text[:split_point].strip()
+
+    ### Future Improvement Suggestions
+
+    1. **Smarter duplication detection:** Instead of substring matching, consider
+       using sequence alignment algorithms (like difflib.SequenceMatcher) with a
+       similarity threshold (e.g., 80% match = duplication).
+
+    2. **LLM-specific patterns:** Track known LLM duplication patterns (e.g., when
+       tool results cause the model to repeat its analysis verbatim).
+
+    3. **Confidence scoring:** Return both the cleaned text and a confidence score
+       indicating how certain we are that duplication was detected.
+
+    4. **Configurable threshold:** Make min_overlap_len configurable via dialeng_config.json
+       so users can tune sensitivity based on their use case.
+
+    5. **Unit tests:** Add comprehensive tests with edge cases to prevent regressions.
+    """
+    if not text or len(text) < 100:
+        return text
+
+    # Try to find duplicated content by looking for repeated substrings
+    # Start from the middle and work backwards to find the longest match
+    text_len = len(text)
+
+    # Check if the second half is largely a repeat of the first half
+    for split_point in range(text_len // 3, 2 * text_len // 3):
+        first_part = text[:split_point].strip()
+        second_part = text[split_point:].strip()
+
+        if not first_part or not second_part:
+            continue
+
+        # Check if second_part starts similarly to first_part (within first 100 chars)
+        first_start = first_part[:100] if len(first_part) > 100 else first_part
+        if first_start in second_part[:200]:
+            # Found duplication - return just the first part
+            return first_part
+
+        # Check if second_part ends similarly to first_part's ending
+        # IMPORTANT: Require minimum 20 characters for overlap to avoid false positives
+        # from short common strings like ",", ":", "-", etc.
+        first_end = first_part[-100:] if len(first_part) > 100 else first_part
+        if len(second_part) > 50:
+            second_sample = second_part[:150]
+            # Look for a significant overlap (must be at least 20 chars to be meaningful)
+            min_overlap_len = 20
+            for i in range(min(50, len(first_end) - min_overlap_len)):
+                overlap = first_end[i:]
+                if len(overlap) >= min_overlap_len and overlap in second_sample:
+                    # Found partial duplication - return text up to where duplication starts
+                    return text[:split_point].strip()
+
+    return text
+
+
+def _format_tool_steps_markdown(tool_events: dict) -> str:
+    """
+    Format tool events into collapsible HTML/markdown for persisting in output.
+
+    Uses HTML <details>/<summary> tags for native collapsibility in markdown renderers.
+    Shows chronological trace of: variable substitutions, tool calls, AI reasoning.
+    Tool inputs and outputs use nested <details> for individual expandability.
+
+    Args:
+        tool_events: Dict with "var_substitutions", "tool_calls", and "steps" lists
+
+    Returns:
+        Markdown string with collapsible tool steps, or empty string if no events
+    """
+    import html as html_module
+
+    steps = tool_events.get("steps", [])
+    var_subs = tool_events.get("var_substitutions", [])
+    tool_calls = tool_events.get("tool_calls", [])
+
+    # No events to show
+    if not steps and not var_subs and not tool_calls:
+        return ""
+
+    # Count total steps for summary
+    total_steps = len(steps) if steps else (len(var_subs) + len(tool_calls))
+    summary_text = f"LLM Steps ({total_steps})"
+
+    parts = []
+    parts.append('<details class="tool-steps-container">')
+    parts.append(f'<summary class="tool-steps-summary">🔧 {summary_text}</summary>')
+    parts.append('<div class="tool-steps-content">')
+
+    def format_tool_step(name: str, status: str, tool_input: dict, result: dict) -> str:
+        """Format a single tool call step with collapsible input/output."""
+        status_icon = "✅" if status == "success" else "❌"
+        input_json = json.dumps(tool_input, indent=2)
+
+        # Format result content
+        if isinstance(result, dict):
+            result_content = result.get("result", {})
+            if isinstance(result_content, dict):
+                result_text = result_content.get("content", str(result_content))
+            else:
+                result_text = str(result_content)
+        else:
+            result_text = str(result)
+
+        # Truncate long results
+        if len(result_text) > 500:
+            result_text = result_text[:500] + "..."
+
+        escaped_name = html_module.escape(name)
+        escaped_input = html_module.escape(input_json)
+        escaped_result = html_module.escape(result_text)
+
+        return f'''<div class="step step-tool">
+<div class="step-header"><span class="step-icon">{status_icon}</span><strong>{escaped_name}</strong></div>
+<details class="step-input-details">
+<summary class="step-toggle">📥 Input</summary>
+<pre class="step-pre">{escaped_input}</pre>
+</details>
+<details class="step-output-details">
+<summary class="step-toggle">📤 Output</summary>
+<pre class="step-pre">{escaped_result}</pre>
+</details>
+</div>'''
+
+    # Use chronological steps if available, otherwise fall back to grouped view
+    if steps:
+        for i, step in enumerate(steps):
+            step_type = step.get("type", "")
+
+            if step_type == "var":
+                name = html_module.escape(step.get("name", ""))
+                value = html_module.escape(str(step.get("value", ""))[:100])
+                if len(str(step.get("value", ""))) > 100:
+                    value += "..."
+                parts.append(f'<div class="step step-var"><span class="step-icon">📝</span><code>${name}</code> → <code>{value}</code></div>')
+
+            elif step_type == "tool":
+                name = step.get("name", "")
+                status = step.get("status", "success")
+                tool_input = step.get("input", {})
+                result = step.get("result", {})
+                parts.append(format_tool_step(name, status, tool_input, result))
+
+            elif step_type == "reasoning":
+                content = html_module.escape(step.get("content", ""))
+                if content:
+                    # Truncate long reasoning (configurable, default 500 chars, 0 = no limit)
+                    truncate_limit = get_config().reasoning_truncate_chars
+                    if truncate_limit > 0 and len(content) > truncate_limit:
+                        content = content[:truncate_limit] + "..."
+                    parts.append(f'<div class="step step-reasoning"><span class="step-icon">💭</span><span class="step-text">{content}</span></div>')
+
+    else:
+        # Fallback: grouped view (variables first, then tool calls)
+        if var_subs:
+            for sub in var_subs:
+                name = html_module.escape(sub.get("name", ""))
+                value = html_module.escape(str(sub.get("value", ""))[:100])
+                if len(str(sub.get("value", ""))) > 100:
+                    value += "..."
+                parts.append(f'<div class="step step-var"><span class="step-icon">📝</span><code>${name}</code> → <code>{value}</code></div>')
+
+        if tool_calls:
+            for tc in tool_calls:
+                name = tc.get("name", "")
+                status = tc.get("status", "success")
+                tool_input = tc.get("input", {})
+                result = tc.get("result", {})
+                parts.append(format_tool_step(name, status, tool_input, result))
+
+    parts.append('</div>')
+    parts.append('</details>')
+    parts.append('')  # Single empty line before response
+
+    return '\n'.join(parts)
+
+
 # ============================================================================
 # Collaborative WebSocket Broadcasting
 # ============================================================================
@@ -1033,13 +1257,51 @@ async def post(nb_id: str, cid: str, source: str = None):
         else:
             # Use real LLM via claudette-agent with dialoghelper context building
             context_messages = build_context_messages(nb, cid)
-            stream_func = llm_service.stream_response(
-                c.source, context_messages, nb.dialog_mode, nb.model, c.use_thinking
-            )
+
+            # Check if prompt contains special syntax ($`var` or &`func`)
+            from services.prompt_parser import has_special_syntax
+            from services.dialeng_config import get_config
+
+            config = get_config()
+            max_steps = config.tool_max_steps
+            include_builtins = config.tool_builtin_enabled
+
+            if has_special_syntax(c.source) or include_builtins:
+                # Use tool-enabled streaming
+                kernel = kernel_service.get_kernel(nb_id)
+                stream_func = llm_service.stream_response_with_tools(
+                    c.source, context_messages, nb.dialog_mode, nb.model, c.use_thinking,
+                    kernel=kernel, notebook_id=nb_id, max_steps=max_steps,
+                    include_builtins=include_builtins
+                )
+            else:
+                # Use regular streaming (no tools)
+                stream_func = llm_service.stream_response(
+                    c.source, context_messages, nb.dialog_mode, nb.model, c.use_thinking
+                )
 
         # Stream via WebSocket to all connected clients
         # Collaborators will receive the final cell state via OOB broadcast after completion
-        response_parts = []
+        #
+        # Text chunk handling for tool loops:
+        # - Text BEFORE first tool_call → reasoning (inside LLM Steps)
+        # - Text BETWEEN tool_result and next tool_call → reasoning (inside LLM Steps)
+        # - Text AFTER last tool_result (no more tool_calls) → final response (outside LLM Steps)
+        #
+        # Track tool events for persisting in output
+        tool_events = {
+            "var_substitutions": [],  # List of {"name": ..., "value": ...}
+            "tool_calls": [],  # List of {"id": ..., "name": ..., "input": ..., "result": ..., "status": ...}
+            "steps": []  # Chronological list of all steps: {"type": "var"|"tool"|"reasoning", ...}
+        }
+        current_tool_call = {}  # Track in-progress tool call to pair with result
+        has_active_tool_call = False  # Track if we're waiting for a tool_result
+        had_any_tools = False  # Track if any tool calls occurred in this stream
+
+        # Separate text buffers for proper placement
+        pre_tool_text = []  # Text before first tool call
+        post_tool_text = []  # Text after last tool_result (potential final response or more reasoning)
+
         try:
             async for item in stream_func:
                 # Check if cancelled
@@ -1049,7 +1311,7 @@ async def post(nb_id: str, cid: str, source: str = None):
 
                 # Handle errors from LLM service
                 if item["type"] == "error":
-                    response_parts.append(f"\n\n**Error:** {item['content']}")
+                    post_tool_text.append(f"\n\n**Error:** {item['content']}")
                     # Send error to WebSocket
                     if nb_id in ws_connections and ws_connections[nb_id]:
                         msg = json.dumps({"type": "stream_chunk", "cell_id": cid, "chunk": f"\n\n**Error:** {item['content']}"})
@@ -1060,9 +1322,71 @@ async def post(nb_id: str, cid: str, source: str = None):
                                 pass
                     break
 
-                # Collect response chunks
+                # Collect response chunks with proper categorization
                 if item["type"] == "chunk":
-                    response_parts.append(item["content"])
+                    if had_any_tools:
+                        # We've had at least one tool call
+                        # Text after tool_result could be more reasoning or final response
+                        # We won't know until the stream ends or another tool_call comes
+                        post_tool_text.append(item["content"])
+                    else:
+                        # No tools yet - this could be reasoning before first tool
+                        pre_tool_text.append(item["content"])
+
+                # Track tool events for persistence
+                if item["type"] == "var_substituted":
+                    tool_events["var_substitutions"].append({
+                        "name": item.get("name", ""),
+                        "value": item.get("value", "")
+                    })
+                    tool_events["steps"].append({
+                        "type": "var",
+                        "name": item.get("name", ""),
+                        "value": item.get("value", "")
+                    })
+                elif item["type"] == "tool_call":
+                    # Save any accumulated text as reasoning before this tool call
+                    if pre_tool_text:
+                        reasoning_text = "".join(pre_tool_text).strip()
+                        if reasoning_text:
+                            tool_events["steps"].append({
+                                "type": "reasoning",
+                                "content": reasoning_text
+                            })
+                        pre_tool_text = []
+
+                    if post_tool_text:
+                        # Text between previous tool_result and this tool_call is reasoning
+                        reasoning_text = "".join(post_tool_text).strip()
+                        if reasoning_text:
+                            tool_events["steps"].append({
+                                "type": "reasoning",
+                                "content": reasoning_text
+                            })
+                        post_tool_text = []
+
+                    had_any_tools = True
+                    has_active_tool_call = True
+                    tool_id = item.get("id", "")
+                    current_tool_call[tool_id] = {
+                        "id": tool_id,
+                        "name": item.get("name", ""),
+                        "input": item.get("input", {}),
+                        "result": None,
+                        "status": "pending"
+                    }
+                elif item["type"] == "tool_result":
+                    tool_id = item.get("id", "")
+                    if tool_id in current_tool_call:
+                        current_tool_call[tool_id]["result"] = item.get("result", {})
+                        current_tool_call[tool_id]["status"] = item.get("result", {}).get("status", "success")
+                        tool_events["tool_calls"].append(current_tool_call[tool_id])
+                        tool_events["steps"].append({
+                            "type": "tool",
+                            **current_tool_call[tool_id]
+                        })
+                        del current_tool_call[tool_id]
+                    has_active_tool_call = False
 
                 # Send streaming updates via WebSocket
                 if nb_id in ws_connections and ws_connections[nb_id]:
@@ -1072,6 +1396,41 @@ async def post(nb_id: str, cid: str, source: str = None):
                         msg = json.dumps({"type": "thinking_end", "cell_id": cid})
                     elif item["type"] == "thinking":
                         msg = json.dumps({"type": "stream_chunk", "cell_id": cid, "chunk": item["content"], "thinking": True})
+                    elif item["type"] == "var_substituted":
+                        # Variable was substituted - notify client
+                        msg = json.dumps({
+                            "type": "var_substituted",
+                            "cell_id": cid,
+                            "var_name": item.get("name", ""),
+                            "var_value": item.get("value", "")
+                        })
+                    elif item["type"] == "tool_available":
+                        # Tool became available - notify client
+                        msg = json.dumps({
+                            "type": "tool_available",
+                            "cell_id": cid,
+                            "tool_name": item.get("name", ""),
+                            "tool_type": item.get("tool_type", "dynamic")
+                        })
+                    elif item["type"] == "tool_call":
+                        # AI is calling a tool - notify client
+                        msg = json.dumps({
+                            "type": "tool_call",
+                            "cell_id": cid,
+                            "tool_id": item.get("id", ""),
+                            "tool_name": item.get("name", ""),
+                            "tool_input": item.get("input", {})
+                        })
+                    elif item["type"] == "tool_result":
+                        # Tool returned a result - notify client
+                        msg = json.dumps({
+                            "type": "tool_result",
+                            "cell_id": cid,
+                            "tool_id": item.get("id", ""),
+                            "tool_name": item.get("name", ""),
+                            "result": item.get("result", {}),
+                            "status": item.get("status", "success")
+                        })
                     else:  # chunk
                         msg = json.dumps({"type": "stream_chunk", "cell_id": cid, "chunk": item["content"]})
 
@@ -1084,7 +1443,7 @@ async def post(nb_id: str, cid: str, source: str = None):
         except Exception as e:
             # Catch any unexpected errors during streaming
             error_msg = f"\n\n**Error:** Streaming error: {str(e)}"
-            response_parts.append(error_msg)
+            post_tool_text.append(error_msg)
             if nb_id in ws_connections and ws_connections[nb_id]:
                 msg = json.dumps({"type": "stream_chunk", "cell_id": cid, "chunk": error_msg})
                 for send in ws_connections[nb_id]:
@@ -1093,8 +1452,24 @@ async def post(nb_id: str, cid: str, source: str = None):
                     except:
                         pass
         finally:
-            # Always send stream_end to ensure UI is not left frozen
-            c.output = "".join(response_parts)
+            # Determine the final response text based on whether tools were used
+            if had_any_tools:
+                # Tools were used: post_tool_text is the final response to user
+                # All text after the last tool_result goes OUTSIDE the LLM Steps
+                # Pre-tool and inter-tool reasoning is already captured as steps
+                response_text = "".join(post_tool_text)
+            else:
+                # No tools: pre_tool_text is the entire response
+                response_text = "".join(pre_tool_text)
+
+            # Deduplicate response text to handle LLM output issues
+            response_text = _deduplicate_response_text(response_text)
+
+            # Build tool steps markdown if there were any tool events
+            tool_steps_md = _format_tool_steps_markdown(tool_events)
+
+            # Prepend LLM steps to response if any
+            c.output = tool_steps_md + response_text if tool_steps_md else response_text
             c.time_run = datetime.now().strftime("%H:%M:%S")
 
             # Send end signal to all clients
@@ -1504,8 +1879,8 @@ if __name__ == "__main__":
     # Print credential status
     print_credential_status(CREDENTIAL_STATUS)
     print("")
-    # Print config status
-    print_config_status(DIALENG_CONFIG)
+    # Print config status (pass detected backend to show active default)
+    print_config_status(DIALENG_CONFIG, CREDENTIAL_STATUS.backend)
     print("")
     print("   Keyboard shortcuts (Jupyter-style):")
     print("   • Shift+Enter       - Run cell")
