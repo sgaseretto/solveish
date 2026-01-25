@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+#### Response Deduplication False Positive Fix
+- **Fixed truncation of legitimate responses** - The `_deduplicate_response_text()` function was incorrectly truncating responses at ~50 characters due to matching single characters like "," during partial overlap detection. Now requires minimum 20-character overlap for detection
+- **Added comprehensive documentation** - Function docstring now includes bug fix history and future improvement suggestions
+
+#### Bedrock Tool Calling Fixes
+- **Fixed tools not being passed to claudette** - Tools must be passed to the Chat constructor, not in individual calls
+- **Fixed tool call detection** - Tool calls are now extracted from `stream_result.value` after streaming completes (per claudette docs)
+- **Fixed tool result format** - Tool results are updated in-place to preserve claudette's AttrDict format instead of replacing with plain dicts
+
+### Changed
+
+#### Provider-Specific Default Models
+- **Default models are now per-provider** - Configuration now supports different default models for each provider:
+  - `bedrock`: Default to cheaper models (e.g., Haiku) for pay-per-use
+  - `anthropic_api`: Configurable per preference
+  - `claude_code_subscription`: Can use more capable models with flat-rate subscription
+  - `fallback`: Used when provider is unknown
+- **Removed `default` flag from model entries** - The new `models.defaults` section replaces per-model default flags
+- **Updated startup logging** - Now shows active default model based on detected provider
+
+### Added
+
+#### ContextKit Integration
+- **Added ContextKit dependency** - `contextkit` package for reading context from various sources (files, URLs, PDFs, GitHub repos, YouTube transcripts, etc.)
+- **Available readers** - `read_file`, `read_url`, `read_pdf`, `read_gh_repo`, `read_gh_file`, `read_gist`, `read_yt_transcript`, `read_gdoc`, `read_google_sheet`, `read_html`, `read_dir`, `read_git_path`
+
+#### Debug Logging for Tool Calling
+- **Added extensive debug logging to claudette path** - Logs model info, tools, history, stream results, and tool call detection
+- **Added debug logging to claudette-agent path** - Logs provider info, context messages, prompts, responses, and tool execution
+
 #### LLM Steps Display with Proper Reasoning Separation
 - **Pre-tool reasoning inside LLM Steps** - Text before tool calls ("I'll use the greet tool...") is captured and displayed inside the collapsible LLM Steps
 - **Inter-tool reasoning inside LLM Steps** - Text between tool calls is captured as reasoning steps

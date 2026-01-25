@@ -693,27 +693,38 @@ The config file is created in the project root directory:
   },
   "models": {
     "available": [
-      {"id": "claude-sonnet-3-7", "name": "Claude Sonnet 3.7", "default": true},
-      {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "default": false},
-      {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "default": false}
+      {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5"},
+      {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5"},
+      {"id": "claude-3-5-sonnet", "name": "Claude 3.5 Sonnet"},
+      {"id": "claude-3-5-haiku", "name": "Claude 3.5 Haiku"}
     ],
+    "defaults": {
+      "bedrock": "claude-haiku-4-5",
+      "anthropic_api": "claude-sonnet-4-5",
+      "claude_code_subscription": "claude-sonnet-4-5",
+      "fallback": "claude-sonnet-4-5",
+      "comment": "Default model per provider"
+    },
     "anthropic_api_map": {
       "claude-sonnet-4-5": "claude-sonnet-4-5-20250514",
-      "claude-haiku-4-5": "claude-haiku-4-5-20250514",
-      "claude-sonnet-3-7": "claude-3-7-sonnet-20250219",
+      "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+      "claude-3-5-sonnet": "claude-3-5-sonnet-20241022",
+      "claude-3-5-haiku": "claude-3-5-haiku-20241022",
       "comment": "Model IDs for direct Anthropic API (with date suffix)"
     },
     "bedrock_map": {
       "claude-sonnet-4-5": "us.anthropic.claude-sonnet-4-5-20250514-v1:0",
-      "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20250514-v1:0",
-      "claude-sonnet-3-7": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+      "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "claude-3-5-sonnet": "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+      "claude-3-5-haiku": "us.anthropic.claude-3-5-haiku-20241022-v1:0",
       "comment": "Model IDs for AWS Bedrock (with region prefix and version suffix)"
     },
     "claudette_agent_map": {
-      "claude-sonnet-4-5": "claude-sonnet-4-5",
-      "claude-haiku-4-5": "claude-haiku-4-5",
-      "claude-sonnet-3-7": "claude-sonnet-3-7",
-      "comment": "Model IDs for claudette-agent (Claude Code subscription) - uses simple names"
+      "claude-sonnet-4-5": "sonnet",
+      "claude-haiku-4-5": "haiku",
+      "claude-3-5-sonnet": "sonnet",
+      "claude-3-5-haiku": "haiku",
+      "comment": "Model IDs for Claude Code subscription - uses simple names (sonnet, haiku, opus)"
     }
   },
   "modes": {
@@ -732,7 +743,8 @@ The config file is created in the project root directory:
 | Section | Key | Description |
 |---------|-----|-------------|
 | `aws.region` | AWS region | Region for Bedrock API calls (e.g., `us-east-1`, `eu-west-1`) |
-| `models.available` | Model list | Models shown in the UI picker. Each has `id`, `name`, and optional `default` |
+| `models.available` | Model list | Models shown in the UI picker. Each has `id` and `name` |
+| `models.defaults` | Provider defaults | Default model per provider: `bedrock`, `anthropic_api`, `claude_code_subscription`, `fallback` |
 | `models.anthropic_api_map` | API model IDs | Maps UI model IDs to Anthropic API model names (with date suffix) |
 | `models.bedrock_map` | Bedrock model IDs | Maps UI model IDs to AWS Bedrock model ARNs (with version suffix) |
 | `models.claudette_agent_map` | Claude Code model IDs | Maps UI model IDs to claudette-agent model names (simple names) |
@@ -749,48 +761,58 @@ To add a new model (e.g., Claude Opus):
 {
   "models": {
     "available": [
-      {"id": "claude-sonnet-3-7", "name": "Claude Sonnet 3.7", "default": true},
-      {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5"},
       {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5"},
+      {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5"},
       {"id": "claude-opus-4", "name": "Claude Opus 4"}
     ],
+    "defaults": {
+      "bedrock": "claude-haiku-4-5",
+      "anthropic_api": "claude-sonnet-4-5",
+      "claude_code_subscription": "claude-opus-4",
+      "fallback": "claude-sonnet-4-5"
+    },
     "anthropic_api_map": {
-      "claude-sonnet-3-7": "claude-3-7-sonnet-20250219",
       "claude-sonnet-4-5": "claude-sonnet-4-5-20250514",
-      "claude-haiku-4-5": "claude-haiku-4-5-20250514",
+      "claude-haiku-4-5": "claude-haiku-4-5-20251001",
       "claude-opus-4": "claude-opus-4-20250514"
     },
     "bedrock_map": {
-      "claude-sonnet-3-7": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
       "claude-sonnet-4-5": "us.anthropic.claude-sonnet-4-5-20250514-v1:0",
-      "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20250514-v1:0",
+      "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
       "claude-opus-4": "us.anthropic.claude-opus-4-20250514-v1:0"
     },
     "claudette_agent_map": {
-      "claude-sonnet-3-7": "claude-sonnet-3-7",
-      "claude-sonnet-4-5": "claude-sonnet-4-5",
-      "claude-haiku-4-5": "claude-haiku-4-5",
-      "claude-opus-4": "claude-opus-4"
+      "claude-sonnet-4-5": "sonnet",
+      "claude-haiku-4-5": "haiku",
+      "claude-opus-4": "opus"
     }
   }
 }
 ```
 
-#### Changing Default Model
+#### Changing Default Models per Provider
 
-To make Sonnet 4.5 the default:
+Default models are now configured per provider in the `models.defaults` section. This allows you to use a cheaper model for Bedrock (pay-per-use) while using a more capable model for Claude Code subscription:
 
 ```json
 {
   "models": {
-    "available": [
-      {"id": "claude-sonnet-3-7", "name": "Claude Sonnet 3.7", "default": false},
-      {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "default": true},
-      {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "default": false}
-    ]
+    "defaults": {
+      "bedrock": "claude-haiku-4-5",
+      "anthropic_api": "claude-sonnet-4-5",
+      "claude_code_subscription": "claude-sonnet-4-5",
+      "fallback": "claude-sonnet-4-5"
+    }
   }
 }
 ```
+
+| Provider | Key | Use Case |
+|----------|-----|----------|
+| `bedrock` | AWS Bedrock | Often use cheaper models (Haiku) since it's pay-per-use |
+| `anthropic_api` | Direct Anthropic API | Pay-per-use, configurable per preference |
+| `claude_code_subscription` | Claude Code CLI | Flat-rate subscription, can use more capable models |
+| `fallback` | Unknown provider | Used when provider can't be determined |
 
 #### Setting Default Mode to Standard
 

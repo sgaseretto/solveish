@@ -22,3 +22,5 @@
     - NBDev:
         - repo: https://github.com/AnswerDotAI/nbdev
         - docs: https://nbdev.fast.ai/getting_started.html
+    - ContextKit:
+        - repo: https://github.com/AnswerDotAI/ContextKit

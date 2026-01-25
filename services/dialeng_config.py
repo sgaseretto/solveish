@@ -25,11 +25,18 @@ DEFAULT_CONFIG = {
     },
     "models": {
         "available": [
-            {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "default": True},
-            {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "default": False},
-            {"id": "claude-3-5-sonnet", "name": "Claude 3.5 Sonnet", "default": False},
-            {"id": "claude-3-5-haiku", "name": "Claude 3.5 Haiku", "default": False}
+            {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5"},
+            {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5"},
+            {"id": "claude-3-5-sonnet", "name": "Claude 3.5 Sonnet"},
+            {"id": "claude-3-5-haiku", "name": "Claude 3.5 Haiku"}
         ],
+        "defaults": {
+            "bedrock": "claude-haiku-4-5",
+            "anthropic_api": "claude-sonnet-4-5",
+            "claude_code_subscription": "claude-sonnet-4-5",
+            "fallback": "claude-sonnet-4-5",
+            "comment": "Default model per provider. bedrock=AWS Bedrock, anthropic_api=direct API, claude_code_subscription=Claude Code CLI. fallback is used when provider is unknown."
+        },
         "anthropic_api_map": {
             "claude-haiku-4-5": "claude-haiku-4-5-20251001",
             "claude-sonnet-4-5": "claude-sonnet-4-5-20250514",
@@ -84,7 +91,6 @@ class ModelConfig:
     """Configuration for a single model."""
     id: str
     name: str
-    default: bool = False
 
 
 @dataclass
@@ -100,6 +106,9 @@ class DialengConfig:
     anthropic_api_map: Dict[str, str] = field(default_factory=dict)
     bedrock_map: Dict[str, str] = field(default_factory=dict)
     claudette_agent_map: Dict[str, str] = field(default_factory=dict)
+
+    # Provider-specific default models
+    default_models: Dict[str, str] = field(default_factory=dict)
 
     # Default mode
     default_mode: str = "mock"
@@ -123,12 +132,22 @@ class DialengConfig:
     # Raw config for reference
     raw_config: Dict[str, Any] = field(default_factory=dict)
 
-    def get_default_model(self) -> str:
-        """Get the default model ID."""
-        for model in self.available_models:
-            if model.default:
-                return model.id
-        return self.available_models[0].id if self.available_models else "claude-sonnet-4-5"
+    def get_default_model(self, backend: Optional[str] = None) -> str:
+        """Get the default model ID for a given backend.
+
+        Args:
+            backend: The provider backend - "bedrock", "anthropic_api", "claude_code_subscription",
+                    or None to use fallback.
+
+        Returns:
+            The default model ID for the specified backend.
+        """
+        if backend and backend in self.default_models:
+            return self.default_models[backend]
+
+        # Use fallback if backend not found or not specified
+        fallback = self.default_models.get("fallback", "claude-sonnet-4-5")
+        return fallback
 
     def get_model_choices(self) -> List[tuple]:
         """Get model choices for UI select (id, name) tuples."""
@@ -173,12 +192,18 @@ def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
     config.available_models = [
         ModelConfig(
             id=m.get("id", ""),
-            name=m.get("name", m.get("id", "")),
-            default=m.get("default", False)
+            name=m.get("name", m.get("id", ""))
         )
         for m in available
         if m.get("id")  # Skip entries without ID
     ]
+
+    # Provider-specific default models
+    defaults = models.get("defaults", {})
+    config.default_models = {
+        k: v for k, v in defaults.items()
+        if k != "comment"
+    }
 
     # Model mappings (skip "comment" keys)
     config.anthropic_api_map = {
@@ -291,15 +316,34 @@ def reset_config_cache() -> None:
     _config_path = None
 
 
-def print_config_status(config: DialengConfig) -> None:
-    """Print config status for startup logging."""
+def print_config_status(config: DialengConfig, detected_backend: Optional[str] = None) -> None:
+    """Print config status for startup logging.
+
+    Args:
+        config: The parsed DialengConfig
+        detected_backend: The detected backend from credential detection (for showing active default)
+    """
     models = ", ".join(m.name for m in config.available_models)
-    default_model = config.get_default_model()
     sdk_mode = "SDK direct" if config.use_sdk_directly else "claudette-agent"
     print(f"   Config: dialeng_config.json")
     print(f"      AWS Region:     {config.aws_region}")
     print(f"      Models:         {models}")
-    print(f"      Default Model:  {default_model}")
+
+    # Show default models per provider
+    bedrock_default = config.get_default_model("bedrock")
+    claude_code_default = config.get_default_model("claude_code_subscription")
+
+    # Highlight the active default based on detected backend
+    if detected_backend == "bedrock":
+        print(f"      Default Model:  {bedrock_default} (Bedrock) ← active")
+        print(f"                      {claude_code_default} (Claude Code)")
+    elif detected_backend == "claude_code_subscription":
+        print(f"      Default Model:  {bedrock_default} (Bedrock)")
+        print(f"                      {claude_code_default} (Claude Code) ← active")
+    else:
+        print(f"      Default Model:  {bedrock_default} (Bedrock)")
+        print(f"                      {claude_code_default} (Claude Code)")
+
     print(f"      Default Mode:   {config.default_mode}")
     print(f"      LLM Provider:   {sdk_mode}")
     if config.debug_mode:

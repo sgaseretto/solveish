@@ -63,9 +63,9 @@ DIALENG_CONFIG = load_config()
 CREDENTIAL_STATUS = detect_credentials()
 AVAILABLE_DIALOG_MODES = get_available_modes(CREDENTIAL_STATUS)
 
-# Models from config
+# Models from config - default model depends on detected provider
 AVAILABLE_MODELS = DIALENG_CONFIG.get_model_choices()
-DEFAULT_MODEL = DIALENG_CONFIG.get_default_model()
+DEFAULT_MODEL = DIALENG_CONFIG.get_default_model(CREDENTIAL_STATUS.backend)
 
 # Load extensions (cell types, callbacks, services)
 # Extensions are Python files in the extensions/ directory
@@ -1879,8 +1879,8 @@ if __name__ == "__main__":
     # Print credential status
     print_credential_status(CREDENTIAL_STATUS)
     print("")
-    # Print config status
-    print_config_status(DIALENG_CONFIG)
+    # Print config status (pass detected backend to show active default)
+    print_config_status(DIALENG_CONFIG, CREDENTIAL_STATUS.backend)
     print("")
     print("   Keyboard shortcuts (Jupyter-style):")
     print("   • Shift+Enter       - Run cell")
