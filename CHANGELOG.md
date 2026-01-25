@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Nested collapsible dropdowns for tool inputs/outputs** - Each tool call now has individually expandable `<details>` elements for viewing inputs and outputs
 - **Fixed nested HTML block parsing in markdown** - The `extractLeadingHtmlBlocks()` function now properly handles nested `<details>` tags using depth counting instead of non-greedy regex that would break at the first closing tag
 
+#### Tool Loop Output Duplication Fixes
+- **Fixed duplicated response content** - The follow-up prompt in tool loops now includes the original user question, preventing the LLM from producing confused/duplicated output
+- **Added response deduplication** - New `_deduplicate_response_text()` function detects and removes duplicated content in LLM responses that can occur during tool calling
+- **Stripped LLM Steps HTML from context** - Previous prompt cell outputs containing `<details class="tool-steps-container">` HTML are now cleaned before being included in LLM context, preventing the LLM from reproducing formatting HTML
+
+#### Post-Tool Response Placement Fix
+- **All post-tool text now outside LLM Steps** - Removed paragraph-break heuristic that incorrectly captured introductory text (like "Based on the analysis, here are the results:") as reasoning inside the LLM Steps. Now all text after the last tool_result is displayed as the final response outside the collapsible section
+
 ### Changed
 
 - **Renamed "ReAct Steps" to "LLM Steps"** - More user-friendly name for the collapsible section showing tool activity

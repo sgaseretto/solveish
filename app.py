@@ -609,6 +609,58 @@ def ansi_to_html(text: str) -> str:
     return ''.join(result)
 
 
+def _deduplicate_response_text(text: str) -> str:
+    """
+    Detect and remove duplicated content in response text.
+
+    Sometimes the LLM produces duplicated output, especially when:
+    - Tool results are processed without proper context
+    - Multiple tool loop iterations cause confusion
+
+    This function detects patterns like:
+    - "ResponseABC...ResponseABC" (exact duplication)
+    - "ResponseABC...fragmentABC" (partial duplication with fragment)
+
+    Args:
+        text: The response text that may contain duplication
+
+    Returns:
+        Cleaned text with duplications removed
+    """
+    if not text or len(text) < 100:
+        return text
+
+    # Try to find duplicated content by looking for repeated substrings
+    # Start from the middle and work backwards to find the longest match
+    text_len = len(text)
+
+    # Check if the second half is largely a repeat of the first half
+    for split_point in range(text_len // 3, 2 * text_len // 3):
+        first_part = text[:split_point].strip()
+        second_part = text[split_point:].strip()
+
+        if not first_part or not second_part:
+            continue
+
+        # Check if second_part starts similarly to first_part (within first 100 chars)
+        first_start = first_part[:100] if len(first_part) > 100 else first_part
+        if first_start in second_part[:200]:
+            # Found duplication - return just the first part
+            return first_part
+
+        # Check if second_part ends similarly to first_part's ending
+        first_end = first_part[-100:] if len(first_part) > 100 else first_part
+        if len(second_part) > 50:
+            second_sample = second_part[:150]
+            # Look for a significant overlap
+            for i in range(min(50, len(first_end))):
+                if first_end[i:] in second_sample:
+                    # Found partial duplication - return text up to where duplication starts
+                    return text[:split_point].strip()
+
+    return text
+
+
 def _format_tool_steps_markdown(tool_events: dict) -> str:
     """
     Format tool events into collapsible HTML/markdown for persisting in output.
@@ -1350,32 +1402,16 @@ async def post(nb_id: str, cid: str, source: str = None):
         finally:
             # Determine the final response text based on whether tools were used
             if had_any_tools:
-                # Tools were used: post_tool_text might contain both:
-                # 1. Post-tool reasoning (acknowledgment of result) - should be in LLM Steps
-                # 2. Final response to user - should be outside LLM Steps
-                #
-                # Heuristic: Split on first paragraph break (double newline)
-                # First paragraph = reasoning, rest = final response
-                full_post_text = "".join(post_tool_text)
-
-                # Try to find a paragraph break
-                para_break = full_post_text.find('\n\n')
-                if para_break != -1 and para_break < len(full_post_text) - 2:
-                    # There's a paragraph break - first part is reasoning, rest is response
-                    post_reasoning = full_post_text[:para_break].strip()
-                    response_text = full_post_text[para_break:].strip()
-
-                    if post_reasoning:
-                        tool_events["steps"].append({
-                            "type": "reasoning",
-                            "content": post_reasoning
-                        })
-                else:
-                    # No clear paragraph break - all is final response
-                    response_text = full_post_text
+                # Tools were used: post_tool_text is the final response to user
+                # All text after the last tool_result goes OUTSIDE the LLM Steps
+                # Pre-tool and inter-tool reasoning is already captured as steps
+                response_text = "".join(post_tool_text)
             else:
                 # No tools: pre_tool_text is the entire response
                 response_text = "".join(pre_tool_text)
+
+            # Deduplicate response text to handle LLM output issues
+            response_text = _deduplicate_response_text(response_text)
 
             # Build tool steps markdown if there were any tool events
             tool_steps_md = _format_tool_steps_markdown(tool_events)

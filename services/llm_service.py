@@ -936,6 +936,9 @@ After the tool result is returned, you can call more tools or provide your final
         # Build full prompt with context
         full_prompt = self._build_prompt_with_context(prompt, context_messages)
 
+        # Store original prompt for use in follow-up iterations
+        original_user_prompt = prompt
+
         # Create temp directory for SDK isolation
         temp_cwd = tempfile.mkdtemp(prefix=f"dialeng_tools_{uuid.uuid4().hex[:8]}_")
         logger.info(f"sdk-text-tools: Created temp cwd: {temp_cwd}")
@@ -1021,11 +1024,19 @@ After the tool result is returned, you can call more tools or provide your final
                     })
 
                 # Build prompt for next iteration with tool results
+                # Include original question so LLM knows what to answer
                 results_text = "\n".join([
                     f"Tool '{tr['tool']}' result:\n{tr['result']}"
                     for tr in tool_results
                 ])
-                current_prompt = f"The tool(s) returned the following results:\n\n{results_text}\n\nPlease continue based on these results."
+                current_prompt = f"""The user's original request was:
+{original_user_prompt}
+
+The tool(s) returned the following results:
+
+{results_text}
+
+Based on these results, please provide a clear and complete answer to the user's request. Do not repeat or echo the tool results - just use them to formulate your response."""
 
         except Exception as e:
             logger.exception(f"sdk-text-tools error: {e}")
