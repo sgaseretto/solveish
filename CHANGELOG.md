@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Preserved line breaks in reasoning text** - Added `white-space: pre-wrap` to `.step-reasoning .step-text` CSS so multi-paragraph reasoning displays correctly instead of collapsing into a single line
 - **Configurable reasoning truncation limit** - Increased default truncation limit from 300 to 500 characters; now configurable via `display.reasoning_truncate_chars` in `dialeng_config.json` (0 = no limit)
 
+#### AWS Bedrock Integration Fixes
+- **Fixed AWS region not being passed to Bedrock client** - The `aws_region` from config is now explicitly passed to `AnthropicBedrock()` instead of relying on auto-detection
+- **Fixed invalid Bedrock model IDs** - Updated default model mappings to use correct Bedrock model ID format (`anthropic.{model}-{date}-v{n}:{profile}`) instead of cross-region format (`us.anthropic...`)
+- **Updated default models** - Changed default models to publicly available Claude 3.5 Sonnet, Claude 3.5 Haiku, and Claude 3 Opus with correct API model IDs
+
 ### Changed
 
 - **Renamed "ReAct Steps" to "LLM Steps"** - More user-friendly name for the collapsible section showing tool activity

@@ -850,8 +850,104 @@ LLM credentials are automatically detected at startup via:
 3. **AWS profiles**: Standard AWS credential chain
 4. **Claude CLI**: For Claude Code subscription users
 
+## Response Post-Processing
+
+After the LLM finishes streaming, the response text undergoes post-processing before being displayed. This section documents the processing steps and known issues.
+
+### Response Deduplication
+
+The `_deduplicate_response_text()` function in `app.py` attempts to detect and remove duplicated content in LLM responses. This addresses a known issue where LLMs sometimes produce duplicated output, especially during multi-step tool calling.
+
+```python
+response_text = _deduplicate_response_text(response_text)
+```
+
+#### How It Works
+
+The function looks for patterns where the second half of a response is largely a repeat of the first half:
+
+1. **Exact duplication**: "ResponseABC...ResponseABC" - the same text repeated
+2. **Partial duplication**: "ResponseABC...fragmentABC" - a fragment of the beginning repeated later
+
+```mermaid
+flowchart TD
+    A[Response Text] --> B{Length < 100?}
+    B -->|Yes| C[Return unchanged]
+    B -->|No| D[Check split points from 1/3 to 2/3]
+    D --> E{First 100 chars of first_part<br/>found in first 200 chars of second_part?}
+    E -->|Yes| F[Return first_part only]
+    E -->|No| G{20+ char overlap between<br/>end of first_part and start of second_part?}
+    G -->|Yes| F
+    G -->|No| H{More split points?}
+    H -->|Yes| D
+    H -->|No| I[Return unchanged]
+```
+
+#### Bug Fix History (2026-01-25): False Positive Truncation
+
+**Issue:** Legitimate responses were being truncated. For example:
+
+```
+Input:  "Based on the calculations:\n\n**Statistics for [10, 20, 30, 40]:**\n- Mean: 25..."
+Output: "Based on the calculations:\n\n**Statistics for [10,"  (truncated!)
+```
+
+**Root Cause:** The partial overlap detection was checking if ANY suffix of `first_end` appeared in `second_sample`, including single characters:
+
+```python
+# OLD CODE (buggy):
+for i in range(min(50, len(first_end))):
+    if first_end[i:] in second_sample:  # At i=49, first_end[49:] = ","
+        return text[:split_point].strip()  # FALSE POSITIVE!
+```
+
+When `i` reached high values (e.g., 49), `first_end[49:]` would be just a single character like `","`. Common punctuation trivially appears in most text, triggering false "duplication" detection.
+
+**Fix:** Added a minimum overlap length requirement (20 characters):
+
+```python
+# NEW CODE (fixed):
+min_overlap_len = 20
+for i in range(min(50, len(first_end) - min_overlap_len)):
+    overlap = first_end[i:]
+    if len(overlap) >= min_overlap_len and overlap in second_sample:
+        return text[:split_point].strip()
+```
+
+#### Potential Future Improvements
+
+The current deduplication approach is heuristic-based and has limitations:
+
+1. **Smarter detection with sequence alignment**
+   ```python
+   from difflib import SequenceMatcher
+
+   def detect_duplication_v2(text):
+       ratio = SequenceMatcher(None, first_half, second_half).ratio()
+       return ratio > 0.8  # 80% similarity = likely duplication
+   ```
+
+2. **Configurable threshold** - Make `min_overlap_len` configurable via `dialeng_config.json`
+
+3. **Confidence scoring** - Return both cleaned text and a confidence score
+
+4. **LLM-specific patterns** - Track known duplication patterns from tool calling loops
+
+5. **Unit tests** - Add comprehensive tests for edge cases to prevent regressions
+
+### Tool Steps Formatting
+
+When tool calling is used, the response includes an "LLM Steps" collapsible section showing:
+
+- Variable substitutions (`$\`var\``)
+- Tool calls with inputs and outputs
+- Reasoning steps between tool calls
+
+This is handled by `_format_tool_steps_markdown()` in `app.py`. See [Tool Calling](./10_tool_calling.md) for details.
+
 ## See Also
 
 - [DialogHelper Integration](./05_dialoghelper_integration.md) - How context building reuses dialoghelper functions
 - [Cell Types](./02_cell_types.md) - Details on prompt cells
 - [Real-Time Collaboration](./03_real_time_collaboration.md) - WebSocket streaming details
+- [Tool Calling](./10_tool_calling.md) - Tool calling implementation details

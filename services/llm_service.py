@@ -208,10 +208,16 @@ class LLMService:
         if self._backend == "bedrock":
             # For Bedrock, create AnthropicBedrock client
             from anthropic import AnthropicBedrock
+            from .dialeng_config import get_config
 
-            # AnthropicBedrock auto-detects credentials from environment
-            # (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, AWS_REGION)
-            ab = AnthropicBedrock()
+            # Get region from config
+            config = get_config()
+            aws_region = config.aws_region
+
+            # AnthropicBedrock with explicit region
+            print(f"[BEDROCK DEBUG] Creating AnthropicBedrock with region={aws_region}")
+            ab = AnthropicBedrock(aws_region=aws_region)
+            print(f"[BEDROCK DEBUG] Creating claudette Client with model={api_model}")
             return self._Client(api_model, ab)
         else:
             # For direct Anthropic API, create simple Client
@@ -787,8 +793,14 @@ Now respond to my latest message:
         registry,
         max_steps: int
     ) -> AsyncIterator[Dict]:
-        """Stream with tool loop using claudette (direct API/Bedrock)."""
+        """Stream with tool loop using claudette (direct API/Bedrock).
+
+        IMPORTANT: Claudette streaming only yields text chunks. Tool calls are
+        stored in chat.h (conversation history) after streaming completes.
+        We need to check chat.h[-1] for ToolUseBlock content after streaming.
+        """
         import asyncio
+        from anthropic.types import ToolUseBlock
 
         system_prompt = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS["standard"])
 
@@ -796,11 +808,25 @@ Now respond to my latest message:
         config = get_config()
         api_model = config.get_api_model_name(model, self._backend)
 
-        logger.info(f"claudette-tools: Using model {api_model} with {len(tools)} tools")
+        # Debug: Print model info to console
+        print(f"[BEDROCK DEBUG] UI model: {model}, backend: {self._backend}, API model: {api_model}")
 
         # Create client
         client = self._create_claudette_client(api_model)
-        chat = self._Chat(cli=client, sp=system_prompt)
+
+        # Debug: Print tools info
+        print(f"[CLAUDETTE TOOLS] Tools passed: {len(tools) if tools else 0}")
+        if tools:
+            for t in tools:
+                t_name = t.get('name') if isinstance(t, dict) else getattr(t, 'name', 'unknown')
+                print(f"[CLAUDETTE TOOLS]   Tool: {t_name}")
+
+        # Pass tools to Chat constructor - claudette expects tools set on the instance
+        chat = self._Chat(cli=client, sp=system_prompt, tools=tools)
+
+        # Debug: Verify tools are set on chat instance
+        chat_tools = getattr(chat, 'tools', None)
+        print(f"[CLAUDETTE TOOLS] Chat.tools after init: {len(chat_tools) if chat_tools else 'None'}")
 
         # Add context messages to history
         for msg in context_messages:
@@ -816,24 +842,23 @@ Now respond to my latest message:
 
         while steps < max_steps:
             steps += 1
-            logger.info(f"claudette-tools: Step {steps}/{max_steps}")
+            print(f"[CLAUDETTE TOOLS] Step {steps}/{max_steps}, prompt: {current_prompt[:100]}...")
 
             try:
-                # Call with tools
-                # Note: claudette's Chat supports tools= parameter
                 response_text = ""
-                tool_calls = []
 
-                # Claudette streaming with tools
-                for chunk in chat(current_prompt, tools=tools, stream=True):
+                # Stream text chunks - tool calls will be in chat.h after streaming
+                print(f"[CLAUDETTE TOOLS] Starting stream...")
+                print(f"[CLAUDETTE TOOLS] History length BEFORE streaming: {len(chat.h)}")
+
+                chunk_count = 0
+                stream_result = chat(current_prompt, stream=True)
+                print(f"[CLAUDETTE TOOLS] Stream result type: {type(stream_result)}")
+
+                for chunk in stream_result:
+                    chunk_count += 1
                     if chunk:
-                        if hasattr(chunk, 'type') and chunk.type == 'tool_use':
-                            tool_calls.append({
-                                'id': getattr(chunk, 'id', f'tool_{len(tool_calls)}'),
-                                'name': chunk.name,
-                                'input': getattr(chunk, 'input', {})
-                            })
-                        elif hasattr(chunk, 'text'):
+                        if hasattr(chunk, 'text'):
                             response_text += chunk.text
                             yield {"type": "chunk", "content": chunk.text}
                         elif isinstance(chunk, str):
@@ -841,9 +866,105 @@ Now respond to my latest message:
                             yield {"type": "chunk", "content": chunk}
                     await asyncio.sleep(0)
 
+                print(f"[CLAUDETTE TOOLS] Stream done. Chunks: {chunk_count}, Response length: {len(response_text)}")
+                print(f"[CLAUDETTE TOOLS] History length AFTER streaming: {len(chat.h)}")
+
+                # IMPORTANT: Per claudette docs, streaming result has a .value attribute
+                # that contains the full response including tool calls
+                stream_value = None
+                if hasattr(stream_result, 'value'):
+                    stream_value = stream_result.value
+                    print(f"[CLAUDETTE TOOLS] stream_result.value type: {type(stream_value)}")
+                    if stream_value and hasattr(stream_value, 'content'):
+                        print(f"[CLAUDETTE TOOLS] stream_result.value.content type: {type(stream_value.content)}")
+                        if isinstance(stream_value.content, list):
+                            for idx, item in enumerate(stream_value.content):
+                                item_type = type(item).__name__
+                                if hasattr(item, 'type'):
+                                    print(f"[CLAUDETTE TOOLS] stream_result.value.content[{idx}]: type={item.type}, class={item_type}")
+                else:
+                    print(f"[CLAUDETTE TOOLS] stream_result has no .value attribute")
+
+                # Also check if chat.res holds the response (claudette may store it there)
+                if hasattr(chat, 'res') and chat.res:
+                    print(f"[CLAUDETTE TOOLS] chat.res type: {type(chat.res)}")
+                    if hasattr(chat.res, 'content'):
+                        res_content = chat.res.content
+                        print(f"[CLAUDETTE TOOLS] chat.res.content type: {type(res_content)}")
+                        if isinstance(res_content, list):
+                            for idx, item in enumerate(res_content):
+                                if hasattr(item, 'type'):
+                                    print(f"[CLAUDETTE TOOLS] chat.res.content[{idx}]: type={item.type}")
+                else:
+                    print(f"[CLAUDETTE TOOLS] chat.res is None or not present")
+
+                # After streaming, check chat.h[-1] for tool calls
+                # The last message in history is the assistant's response
+                tool_calls = []
+
+                # Debug: print all messages in history
+                for i, msg in enumerate(chat.h):
+                    role = msg.get('role', 'unknown') if isinstance(msg, dict) else getattr(msg, 'role', 'unknown')
+                    content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+                    content_type = type(content).__name__
+                    print(f"[CLAUDETTE TOOLS] History[{i}]: role={role}, content_type={content_type}")
+                    if isinstance(content, list):
+                        for j, item in enumerate(content):
+                            item_type = type(item).__name__
+                            if hasattr(item, 'type'):
+                                print(f"[CLAUDETTE TOOLS]   content[{j}]: type={item.type}, item_type={item_type}")
+                            elif isinstance(item, dict):
+                                print(f"[CLAUDETTE TOOLS]   content[{j}]: dict_type={item.get('type')}, keys={list(item.keys())}")
+
+                # Helper function to extract tool calls from content
+                def extract_tool_calls_from_content(content, source=""):
+                    extracted = []
+                    if isinstance(content, list):
+                        for item in content:
+                            # Check for ToolUseBlock type (object with type attribute)
+                            if hasattr(item, 'type') and item.type == 'tool_use':
+                                print(f"[CLAUDETTE TOOLS] Found tool call from {source}: {item.name}")
+                                extracted.append({
+                                    'id': item.id,
+                                    'name': item.name,
+                                    'input': item.input if hasattr(item, 'input') else {}
+                                })
+                            # Check for dict with type key
+                            elif isinstance(item, dict) and item.get('type') == 'tool_use':
+                                print(f"[CLAUDETTE TOOLS] Found tool call (dict) from {source}: {item.get('name')}")
+                                extracted.append({
+                                    'id': item.get('id', f'tool_{len(extracted)}'),
+                                    'name': item.get('name'),
+                                    'input': item.get('input', {})
+                                })
+                    return extracted
+
+                # First try to get tool calls from history
+                if chat.h and len(chat.h) > 0:
+                    last_msg = chat.h[-1]
+                    msg_role = last_msg.get('role', 'unknown') if isinstance(last_msg, dict) else getattr(last_msg, 'role', 'unknown')
+                    print(f"[CLAUDETTE TOOLS] Last message role: {msg_role}")
+
+                    # Check if the last message has content with tool_use blocks
+                    content = last_msg.get('content', []) if isinstance(last_msg, dict) else getattr(last_msg, 'content', [])
+                    tool_calls = extract_tool_calls_from_content(content, "history")
+
+                # If no tool calls from history, try stream_result.value (per claudette docs)
+                if not tool_calls and stream_value and hasattr(stream_value, 'content'):
+                    print(f"[CLAUDETTE TOOLS] Trying to extract from stream_result.value...")
+                    tool_calls = extract_tool_calls_from_content(stream_value.content, "stream_value")
+
+                # If still no tool calls, try chat.res as fallback
+                if not tool_calls and hasattr(chat, 'res') and chat.res:
+                    print(f"[CLAUDETTE TOOLS] Trying to extract from chat.res...")
+                    if hasattr(chat.res, 'content'):
+                        tool_calls = extract_tool_calls_from_content(chat.res.content, "chat.res")
+
+                print(f"[CLAUDETTE TOOLS] Total tool calls found: {len(tool_calls)}")
+
                 # If no tool calls, we're done
                 if not tool_calls:
-                    logger.info("claudette-tools: No tool calls, done")
+                    print(f"[CLAUDETTE TOOLS] No tool calls, done")
                     break
 
                 # Execute tool calls
@@ -873,11 +994,75 @@ Now respond to my latest message:
                         "content": self._format_tool_result_for_llm(result)
                     })
 
-                # Build next prompt with tool results
-                current_prompt = self._build_tool_results_prompt(tool_results)
+                # For claudette, we need to send tool results back to continue the conversation
+                # Build the tool result content
+                tool_result_content = []
+                for tr in tool_results:
+                    tool_result_content.append({
+                        "type": "tool_result",
+                        "tool_use_id": tr["tool_use_id"],
+                        "content": tr["content"]
+                    })
+
+                # Check if claudette already added a tool_result placeholder to history
+                # This happens because claudette's streaming may auto-add entries
+                last_msg = chat.h[-1] if chat.h else None
+                last_role = None
+                last_content = None
+                if last_msg:
+                    last_role = last_msg.get('role') if isinstance(last_msg, dict) else getattr(last_msg, 'role', None)
+                    last_content = last_msg.get('content', []) if isinstance(last_msg, dict) else getattr(last_msg, 'content', [])
+
+                print(f"[CLAUDETTE TOOLS] Last message in history: role={last_role}")
+
+                # Check if last message already has tool_result (claudette auto-added)
+                has_existing_tool_result = False
+                if last_role == 'user' and isinstance(last_content, list):
+                    for item in last_content:
+                        item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
+                        if item_type == 'tool_result':
+                            has_existing_tool_result = True
+                            break
+
+                if has_existing_tool_result:
+                    # Claudette already added tool_result entries with placeholders
+                    # Update the content IN-PLACE to preserve claudette's AttrDict format
+                    print(f"[CLAUDETTE TOOLS] Updating existing tool_result entries in-place...")
+
+                    # Get the actual content list from the last message
+                    existing_content = last_content
+
+                    # Build a map of our results by tool_use_id
+                    results_by_id = {tr["tool_use_id"]: tr["content"] for tr in tool_result_content}
+
+                    # Update each existing tool_result item's content
+                    for item in existing_content:
+                        item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
+                        if item_type == 'tool_result':
+                            tool_use_id = item.get('tool_use_id') if isinstance(item, dict) else getattr(item, 'tool_use_id', None)
+                            if tool_use_id in results_by_id:
+                                # Update content in-place (works for both dict and AttrDict)
+                                if isinstance(item, dict):
+                                    item['content'] = results_by_id[tool_use_id]
+                                else:
+                                    # AttrDict - update via attribute or dict-like access
+                                    try:
+                                        item['content'] = results_by_id[tool_use_id]
+                                    except:
+                                        item.content = results_by_id[tool_use_id]
+                                print(f"[CLAUDETTE TOOLS] Updated content for tool_use_id={tool_use_id}")
+                else:
+                    # No existing tool_result, add as new user message
+                    print(f"[CLAUDETTE TOOLS] Adding new tool_result message to history...")
+                    chat.h.append({"role": "user", "content": tool_result_content})
+
+                # Continue without prompt - claudette will use the tool results from history
+                current_prompt = ""
 
             except Exception as e:
-                logger.exception(f"claudette-tools error: {e}")
+                import traceback
+                print(f"[CLAUDETTE TOOLS] ERROR: {e}")
+                traceback.print_exc()
                 yield {"type": "error", "content": f"Tool loop error: {str(e)}"}
                 break
 
@@ -912,6 +1097,26 @@ Now respond to my latest message:
         config = get_config()
         api_model = config.get_api_model_name(model, self._backend)
 
+        # Debug: Print model and provider info
+        print(f"[SDK-TOOLS DEBUG] UI model: {model}, backend: {self._backend}, API model: {api_model}")
+        print(f"[SDK-TOOLS DEBUG] Provider: {self._provider}, mode: {mode}")
+
+        # Debug: Print tools info
+        print(f"[SDK-TOOLS DEBUG] Tools passed: {len(tools) if tools else 0}")
+        if tools:
+            for t in tools:
+                t_name = t.get('name') if isinstance(t, dict) else getattr(t, 'name', 'unknown')
+                print(f"[SDK-TOOLS DEBUG]   Tool: {t_name}")
+
+        # Debug: Print context messages summary
+        print(f"[SDK-TOOLS DEBUG] Context messages: {len(context_messages)}")
+        for i, msg in enumerate(context_messages):
+            role = msg.get('role', 'unknown')
+            content = msg.get('content', '')
+            content_preview = content[:80] + '...' if len(content) > 80 else content
+            content_preview = content_preview.replace('\n', '\\n')
+            print(f"[SDK-TOOLS DEBUG]   Context[{i}]: role={role}, len={len(content)}, preview='{content_preview}'")
+
         logger.info(f"sdk-text-tools: Using model {api_model} with {len(tools)} tools (text-based)")
 
         # Build tool definitions string
@@ -936,6 +1141,12 @@ After the tool result is returned, you can call more tools or provide your final
         # Build full prompt with context
         full_prompt = self._build_prompt_with_context(prompt, context_messages)
 
+        # Debug: Print full prompt info
+        print(f"[SDK-TOOLS DEBUG] Original prompt length: {len(prompt)}")
+        print(f"[SDK-TOOLS DEBUG] Full prompt (with context) length: {len(full_prompt)}")
+        prompt_preview = full_prompt[:200].replace('\n', '\\n') + '...' if len(full_prompt) > 200 else full_prompt.replace('\n', '\\n')
+        print(f"[SDK-TOOLS DEBUG] Full prompt preview: {prompt_preview}")
+
         # Store original prompt for use in follow-up iterations
         original_user_prompt = prompt
 
@@ -949,6 +1160,8 @@ After the tool result is returned, you can call more tools or provide your final
         try:
             while steps < max_steps:
                 steps += 1
+                print(f"[SDK-TOOLS DEBUG] Step {steps}/{max_steps}")
+                print(f"[SDK-TOOLS DEBUG] Current prompt length: {len(current_prompt)}")
                 logger.info(f"sdk-text-tools: Step {steps}/{max_steps}")
 
                 # Build options
@@ -977,11 +1190,20 @@ After the tool result is returned, you can call more tools or provide your final
                                 if hasattr(block, 'text'):
                                     response_text += block.text
 
+                # Debug: Print response info
+                print(f"[SDK-TOOLS DEBUG] Response text length: {len(response_text)}")
+                response_preview = response_text[:300].replace('\n', '\\n') + '...' if len(response_text) > 300 else response_text.replace('\n', '\\n')
+                print(f"[SDK-TOOLS DEBUG] Response preview: {response_preview}")
+
                 # Parse tool calls from response
                 tool_calls = self._parse_text_tool_calls(response_text)
+                print(f"[SDK-TOOLS DEBUG] Tool calls found: {len(tool_calls)}")
+                for i, tc in enumerate(tool_calls):
+                    print(f"[SDK-TOOLS DEBUG]   Tool call [{i}]: {tc.get('tool')}, args={tc.get('arguments', {})}")
 
                 if not tool_calls:
                     # No tool calls - stream the response text
+                    print(f"[SDK-TOOLS DEBUG] No tool calls, streaming final response")
                     logger.info("sdk-text-tools: No tool calls found, streaming response")
                     # Remove any tool_call markers from response before sending
                     clean_response = re.sub(r'```tool_call\n.*?\n```', '', response_text, flags=re.DOTALL)
@@ -998,28 +1220,36 @@ After the tool result is returned, you can call more tools or provide your final
 
                 for tc in tool_calls:
                     tool_id = f"tool_{steps}_{len(tool_results)}"
+                    tool_name = tc['tool']
+                    tool_args = tc.get('arguments', {})
+
+                    print(f"[SDK-TOOLS DEBUG] Executing tool: {tool_name}")
+                    print(f"[SDK-TOOLS DEBUG]   Arguments: {tool_args}")
 
                     yield {
                         "type": "tool_call",
                         "id": tool_id,
-                        "name": tc['tool'],
-                        "input": tc.get('arguments', {})
+                        "name": tool_name,
+                        "input": tool_args
                     }
 
                     # Execute tool
                     result = await self._execute_tool(
-                        tc['tool'], tc.get('arguments', {}), kernel, notebook_id, registry
+                        tool_name, tool_args, kernel, notebook_id, registry
                     )
+
+                    result_preview = str(result)[:200] + '...' if len(str(result)) > 200 else str(result)
+                    print(f"[SDK-TOOLS DEBUG]   Result: {result_preview}")
 
                     yield {
                         "type": "tool_result",
                         "id": tool_id,
-                        "name": tc['tool'],
+                        "name": tool_name,
                         "result": result
                     }
 
                     tool_results.append({
-                        "tool": tc['tool'],
+                        "tool": tool_name,
                         "result": self._format_tool_result_for_llm(result)
                     })
 

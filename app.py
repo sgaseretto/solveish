@@ -626,6 +626,53 @@ def _deduplicate_response_text(text: str) -> str:
 
     Returns:
         Cleaned text with duplications removed
+
+    ## Bug Fix History (2026-01-25)
+
+    ### Issue: False Positive Truncation
+
+    **Symptom:** Legitimate responses were being truncated. For example, a 150-character
+    response "Based on the calculations:\n\n**Statistics for [10, 20, 30, 40]:**..."
+    was cut off after only 50 characters.
+
+    **Root Cause:** The partial overlap detection loop (lines ~659-663) was checking if
+    ANY suffix of `first_end` appeared in `second_sample`, including single characters:
+
+        # OLD CODE (buggy):
+        for i in range(min(50, len(first_end))):
+            if first_end[i:] in second_sample:  # At i=49, first_end[49:] = ","
+                return text[:split_point].strip()  # FALSE POSITIVE!
+
+    When i reached high values (e.g., 49), `first_end[49:]` would be just a single
+    character like `","`. Common punctuation trivially appears in most text, causing
+    false positive "duplication" detection.
+
+    **Fix:** Added minimum overlap length requirement (20 characters). Short matches
+    like single punctuation marks are now ignored:
+
+        # NEW CODE (fixed):
+        min_overlap_len = 20
+        for i in range(min(50, len(first_end) - min_overlap_len)):
+            overlap = first_end[i:]
+            if len(overlap) >= min_overlap_len and overlap in second_sample:
+                return text[:split_point].strip()
+
+    ### Future Improvement Suggestions
+
+    1. **Smarter duplication detection:** Instead of substring matching, consider
+       using sequence alignment algorithms (like difflib.SequenceMatcher) with a
+       similarity threshold (e.g., 80% match = duplication).
+
+    2. **LLM-specific patterns:** Track known LLM duplication patterns (e.g., when
+       tool results cause the model to repeat its analysis verbatim).
+
+    3. **Confidence scoring:** Return both the cleaned text and a confidence score
+       indicating how certain we are that duplication was detected.
+
+    4. **Configurable threshold:** Make min_overlap_len configurable via dialeng_config.json
+       so users can tune sensitivity based on their use case.
+
+    5. **Unit tests:** Add comprehensive tests with edge cases to prevent regressions.
     """
     if not text or len(text) < 100:
         return text
@@ -649,12 +696,16 @@ def _deduplicate_response_text(text: str) -> str:
             return first_part
 
         # Check if second_part ends similarly to first_part's ending
+        # IMPORTANT: Require minimum 20 characters for overlap to avoid false positives
+        # from short common strings like ",", ":", "-", etc.
         first_end = first_part[-100:] if len(first_part) > 100 else first_part
         if len(second_part) > 50:
             second_sample = second_part[:150]
-            # Look for a significant overlap
-            for i in range(min(50, len(first_end))):
-                if first_end[i:] in second_sample:
+            # Look for a significant overlap (must be at least 20 chars to be meaningful)
+            min_overlap_len = 20
+            for i in range(min(50, len(first_end) - min_overlap_len)):
+                overlap = first_end[i:]
+                if len(overlap) >= min_overlap_len and overlap in second_sample:
                     # Found partial duplication - return text up to where duplication starts
                     return text[:split_point].strip()
 

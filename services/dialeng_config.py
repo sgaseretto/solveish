@@ -25,26 +25,30 @@ DEFAULT_CONFIG = {
     },
     "models": {
         "available": [
-            {"id": "claude-sonnet-3-7", "name": "Claude Sonnet 3.7", "default": True},
+            {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "default": True},
             {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "default": False},
-            {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "default": False}
+            {"id": "claude-3-5-sonnet", "name": "Claude 3.5 Sonnet", "default": False},
+            {"id": "claude-3-5-haiku", "name": "Claude 3.5 Haiku", "default": False}
         ],
         "anthropic_api_map": {
+            "claude-haiku-4-5": "claude-haiku-4-5-20251001",
             "claude-sonnet-4-5": "claude-sonnet-4-5-20250514",
-            "claude-haiku-4-5": "claude-haiku-4-5-20250514",
-            "claude-sonnet-3-7": "claude-3-7-sonnet-20250219",
+            "claude-3-5-sonnet": "claude-3-5-sonnet-20241022",
+            "claude-3-5-haiku": "claude-3-5-haiku-20241022",
             "comment": "Model IDs for direct Anthropic API (with date suffix)"
         },
         "bedrock_map": {
+            "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
             "claude-sonnet-4-5": "us.anthropic.claude-sonnet-4-5-20250514-v1:0",
-            "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20250514-v1:0",
-            "claude-sonnet-3-7": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
-            "comment": "Model IDs for AWS Bedrock (with region prefix and version suffix)"
+            "claude-3-5-sonnet": "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "claude-3-5-haiku": "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+            "comment": "Model IDs for AWS Bedrock with cross-region inference. Format: us.anthropic.{model}-{date}-v{n}:{profile}"
         },
         "claudette_agent_map": {
-            "claude-sonnet-4-5": "sonnet",
             "claude-haiku-4-5": "haiku",
-            "claude-sonnet-3-7": "sonnet",
+            "claude-sonnet-4-5": "sonnet",
+            "claude-3-5-sonnet": "sonnet",
+            "claude-3-5-haiku": "haiku",
             "comment": "Model IDs for Claude Code subscription - uses simple names (sonnet, haiku, opus)"
         }
     },
