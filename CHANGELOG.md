@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `update_config()` - Deep merge updates into existing config
   - `get_config_dict()` - Get raw config dict for settings UI
 
+#### Model Selection Validation
+- **Per-notebook model persistence** - Each notebook remembers its selected model in metadata
+- **Model validation on load** - Validates saved model exists in available models; falls back to provider default if invalid
+- **Provider-aware defaults** - New notebooks use the default model for the detected provider (Bedrock vs Claude Code)
+- **Graceful config changes** - If config changes and saved model becomes invalid, notebooks fall back to defaults instead of breaking
+
 ### Fixed
 
 #### Response Deduplication False Positive Fix

@@ -65,7 +65,31 @@ AVAILABLE_DIALOG_MODES = get_available_modes(CREDENTIAL_STATUS)
 
 # Models from config - default model depends on detected provider
 AVAILABLE_MODELS = DIALENG_CONFIG.get_model_choices()
+AVAILABLE_MODEL_IDS = [model_id for model_id, _ in AVAILABLE_MODELS]
 DEFAULT_MODEL = DIALENG_CONFIG.get_default_model(CREDENTIAL_STATUS.backend)
+
+
+def validate_model_id(model_id: str) -> str:
+    """Validate a model ID and return a valid one.
+
+    Model selection follows this priority:
+    1. If the given model_id exists in available models, use it
+    2. Otherwise, fall back to the provider-specific default
+
+    This ensures per-notebook model selection is remembered (when valid)
+    while gracefully handling cases where saved model IDs become invalid
+    (e.g., config changed, model removed, notebook from different setup).
+
+    Args:
+        model_id: The model ID to validate (e.g., from notebook metadata)
+
+    Returns:
+        A valid model ID - either the original if valid, or the default
+    """
+    if model_id in AVAILABLE_MODEL_IDS:
+        return model_id
+    # Model ID not found - use provider default
+    return DEFAULT_MODEL
 
 # Load extensions (cell types, callbacks, services)
 # Extensions are Python files in the extensions/ directory
@@ -279,17 +303,32 @@ class Notebook:
     
     @classmethod
     def from_ipynb(cls, data: Dict[str, Any], notebook_id: str = None) -> "Notebook":
+        """Load notebook from .ipynb data.
+
+        Model Selection Behavior:
+        - Per-notebook model is saved in metadata as 'solveit_model'
+        - On load, the saved model is validated against available models
+        - If saved model is valid, it's used (per-notebook preference remembered)
+        - If saved model is invalid/missing, falls back to provider default
+
+        This allows users to:
+        - Choose different models per notebook and have it remembered
+        - Not worry if config changes - invalid models gracefully fallback
+        """
         metadata = data.get("metadata", {})
         cells = [Cell.from_jupyter_cell(c) for c in data.get("cells", [])]
         # Get saved dialog mode, but override to "mock" if no credentials available
         saved_mode = metadata.get("solveit_dialog_mode", DEFAULT_DIALOG_MODE)
         # If no credentials available, force mock mode regardless of saved value
         effective_mode = "mock" if not CREDENTIAL_STATUS.available else saved_mode
+        # Validate saved model - use provider default if invalid/missing
+        saved_model = metadata.get("solveit_model", "")
+        effective_model = validate_model_id(saved_model)
         return cls(
             id=notebook_id or uuid.uuid4().hex[:8],
             title="Imported Notebook", cells=cells,
             dialog_mode=effective_mode,
-            model=metadata.get("solveit_model", DEFAULT_MODEL)
+            model=effective_model
         )
     
     def save(self, path: str):
