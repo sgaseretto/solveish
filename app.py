@@ -751,9 +751,10 @@ def _format_tool_steps_markdown(tool_events: dict) -> str:
             elif step_type == "reasoning":
                 content = html_module.escape(step.get("content", ""))
                 if content:
-                    # Truncate long reasoning
-                    if len(content) > 300:
-                        content = content[:300] + "..."
+                    # Truncate long reasoning (configurable, default 500 chars, 0 = no limit)
+                    truncate_limit = get_config().reasoning_truncate_chars
+                    if truncate_limit > 0 and len(content) > truncate_limit:
+                        content = content[:truncate_limit] + "..."
                     parts.append(f'<div class="step step-reasoning"><span class="step-icon">💭</span><span class="step-text">{content}</span></div>')
 
     else:

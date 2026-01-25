@@ -742,6 +742,7 @@
     font-size: 0.82em;
     margin: 0 !important;
     padding: 0 !important;
+    white-space: pre-wrap;
 }
 
 /* Nested details for tool inputs/outputs */

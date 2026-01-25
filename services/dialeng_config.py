@@ -67,6 +67,10 @@ DEFAULT_CONFIG = {
         "require_confirmation": False,
         "builtin_tools_enabled": True,
         "comment": "Tool calling settings. max_steps: max tool calls per prompt (1-10). require_confirmation: prompt before file-modifying tools. builtin_tools_enabled: always-available file tools (view, rg, create, str_replace, insert)."
+    },
+    "display": {
+        "reasoning_truncate_chars": 500,
+        "comment": "Display settings. reasoning_truncate_chars: max characters for LLM reasoning text before truncation (0 = no limit)."
     }
 }
 
@@ -108,6 +112,9 @@ class DialengConfig:
     tool_max_steps: int = 5  # Maximum tool calls per prompt
     tool_require_confirmation: bool = False  # Require confirmation for file-modifying tools
     tool_builtin_enabled: bool = True  # Enable built-in file tools (view, rg, etc.)
+
+    # Display settings
+    reasoning_truncate_chars: int = 500  # Max chars for reasoning text before truncation (0 = no limit)
 
     # Raw config for reference
     raw_config: Dict[str, Any] = field(default_factory=dict)
@@ -202,6 +209,10 @@ def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
     config.tool_max_steps = tool_settings.get("max_steps", 5)
     config.tool_require_confirmation = tool_settings.get("require_confirmation", False)
     config.tool_builtin_enabled = tool_settings.get("builtin_tools_enabled", True)
+
+    # Display settings
+    display = raw.get("display", {})
+    config.reasoning_truncate_chars = display.get("reasoning_truncate_chars", 500)
 
     return config
 

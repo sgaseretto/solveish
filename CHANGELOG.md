@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Post-Tool Response Placement Fix
 - **All post-tool text now outside LLM Steps** - Removed paragraph-break heuristic that incorrectly captured introductory text (like "Based on the analysis, here are the results:") as reasoning inside the LLM Steps. Now all text after the last tool_result is displayed as the final response outside the collapsible section
 
+#### Multi-Paragraph Reasoning Display Fixes
+- **Preserved line breaks in reasoning text** - Added `white-space: pre-wrap` to `.step-reasoning .step-text` CSS so multi-paragraph reasoning displays correctly instead of collapsing into a single line
+- **Configurable reasoning truncation limit** - Increased default truncation limit from 300 to 500 characters; now configurable via `display.reasoning_truncate_chars` in `dialeng_config.json` (0 = no limit)
+
 ### Changed
 
 - **Renamed "ReAct Steps" to "LLM Steps"** - More user-friendly name for the collapsible section showing tool activity
@@ -37,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`renderMarkdown()`** - Now uses `extractLeadingHtmlBlocks()` instead of simple regex for more robust HTML preservation
 
 ### Added
+
+#### Display Configuration
+- **`display.reasoning_truncate_chars`** - New config option in `dialeng_config.json` to control reasoning text truncation (default: 500 characters, 0 = no limit)
 
 #### CSS Styles for Nested Tool Details
 - **`.step-input-details`, `.step-output-details`** - Styling for the nested collapsible sections within each tool call
