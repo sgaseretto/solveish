@@ -862,6 +862,29 @@ function toggleModelSelect(mode) {
     }
 }
 
+// ==================== Settings Sidebar Toggle ====================
+function toggleSettings() {
+    const sidebar = document.getElementById('settings-sidebar');
+    const overlay = document.getElementById('settings-overlay');
+
+    if (sidebar) {
+        sidebar.classList.toggle('open');
+    }
+    if (overlay) {
+        overlay.classList.toggle('open');
+    }
+}
+
+// Close settings sidebar with Escape key
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        const sidebar = document.getElementById('settings-sidebar');
+        if (sidebar && sidebar.classList.contains('open')) {
+            toggleSettings();
+        }
+    }
+});
+
 // ==================== Cell Collapse ====================
 // Collapse levels: 0=expanded, 1=scrollable, 2=summary
 const COLLAPSE_LEVELS = ['', 'collapse-scrollable', 'collapse-summary'];

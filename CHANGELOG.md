@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+#### Settings GUI Sidebar
+- **Settings sidebar** - New collapsible sidebar accessible via ⚙️ button in toolbar for viewing and editing `dialeng_config.json` settings
+- **Collapsible settings groups** - Settings organized into collapsible sections using `<details>` elements:
+  - AWS Settings (region selection)
+  - Model Defaults (Bedrock model, Claude Code model, dialog mode)
+  - Tool Settings (max steps slider, confirmation toggle, builtin tools toggle)
+  - Display Settings (reasoning truncation limit)
+  - Advanced (thinking tokens, SDK direct mode, debug mode, debug log directory)
+- **Form controls** - Various input types for different setting types:
+  - Dropdown selects for enumerated options (regions, models, modes)
+  - Toggle switches for boolean settings with restart warning badges
+  - Number inputs for numeric values
+  - Range sliders for bounded values (max steps 1-10)
+  - Text inputs for string values
+- **Settings persistence** - Changes saved to `dialeng_config.json` via POST `/settings` endpoint
+- **New functions in `dialeng_config.py`**:
+  - `save_config()` - Save complete config dict to file
+  - `update_config()` - Deep merge updates into existing config
+  - `get_config_dict()` - Get raw config dict for settings UI
+
 ### Fixed
 
 #### Response Deduplication False Positive Fix

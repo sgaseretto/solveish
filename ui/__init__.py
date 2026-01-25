@@ -10,6 +10,7 @@ Usage:
     from ui.cells import CodeCellView, NoteCellView, PromptCellView
     from ui.controls import TypeSelect, CollapseBtn
     from ui.layout import NotebookPage, AllCells
+    from ui.settings import SettingsSidebar, SettingsOverlay
     from ui.oob import AllCellsOOB, CellViewOOB
 """
 
@@ -24,6 +25,9 @@ from .controls import TypeSelect, CollapseBtn, AddButtons
 
 # Layout
 from .layout import NotebookPage, AllCells, AllCellsContent
+
+# Settings components
+from .settings import SettingsSidebar, SettingsOverlay, SettingsGroup
 
 # OOB (Out-of-Band) components for WebSocket
 from .oob import AllCellsOOB, CellViewOOB
@@ -45,6 +49,10 @@ __all__ = [
     'NotebookPage',
     'AllCells',
     'AllCellsContent',
+    # Settings
+    'SettingsSidebar',
+    'SettingsOverlay',
+    'SettingsGroup',
     # OOB
     'AllCellsOOB',
     'CellViewOOB',

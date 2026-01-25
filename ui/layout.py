@@ -5,9 +5,11 @@ Page layout and container components.
 """
 
 from fasthtml.common import *
-from typing import List
+from typing import List, Optional
 from .cells import CellView
 from .controls import AddButtons
+from .settings import SettingsSidebar, SettingsOverlay
+from services.dialeng_config import DialengConfig
 
 
 def AllCellsContent(nb):
@@ -40,7 +42,8 @@ def AllCells(nb):
     return Div(*items, id="cells")
 
 
-def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, available_models: list):
+def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, available_models: list,
+                 config: Optional[DialengConfig] = None):
     """Render the complete notebook page.
 
     Args:
@@ -48,6 +51,7 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
         notebook_list: List of notebook IDs for the file list
         available_dialog_modes: List of (mode_id, label) tuples
         available_models: List of (model_id, label) tuples
+        config: Optional DialengConfig for settings sidebar
 
     Returns:
         Complete page with Titled wrapper
@@ -83,6 +87,8 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                            hx_post=f"/notebook/{nb.id}/save", hx_target="#status", title="Save (Ctrl+S)"),
                     Button("📥 Export", cls="btn btn-sm",
                            hx_get=f"/notebook/{nb.id}/export", title="Download .ipynb"),
+                    Button("⚙️", cls="btn btn-sm settings-btn", id="settings-btn",
+                           onclick="toggleSettings()", title="Settings"),
                     cls="toolbar"
                 ),
                 cls="header"
@@ -100,5 +106,8 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
             Script(f"document.addEventListener('DOMContentLoaded', () => connectWebSocket('{nb.id}'));"),
             Div(id="js-script"),  # Container for dialoghelper script injection
             cls="container"
-        )
+        ),
+        # Settings sidebar and overlay (outside main container)
+        SettingsOverlay() if config else None,
+        SettingsSidebar(config) if config else None
     )

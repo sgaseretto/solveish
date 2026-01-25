@@ -316,6 +316,107 @@ def reset_config_cache() -> None:
     _config_path = None
 
 
+def _deep_merge(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+    """Deep merge updates into base dict.
+
+    Args:
+        base: Base dictionary to merge into
+        updates: Updates to apply (nested dicts are merged, not replaced)
+
+    Returns:
+        New merged dictionary
+    """
+    result = base.copy()
+    for key, value in updates.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def save_config(config_dict: Dict[str, Any], config_path: Optional[Path] = None) -> None:
+    """Save a complete config dictionary to the config file.
+
+    Args:
+        config_dict: Complete configuration dictionary to save
+        config_path: Path to config file. Defaults to ./dialeng_config.json
+
+    Raises:
+        IOError: If the file cannot be written
+    """
+    global _config, _config_path
+
+    if config_path is None:
+        config_path = _config_path or Path.cwd() / "dialeng_config.json"
+
+    logger.info(f"Saving config to {config_path}")
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config_dict, f, indent=2)
+
+    # Reload the config to update cache
+    _config = _parse_config(config_dict)
+    _config_path = config_path
+
+
+def update_config(updates: Dict[str, Any], config_path: Optional[Path] = None) -> DialengConfig:
+    """Update specific keys in the config file.
+
+    Performs a deep merge, so nested dictionaries are merged rather than replaced.
+    For example, updating {"tool_settings": {"max_steps": 10}} will only change
+    max_steps while preserving other tool_settings values.
+
+    Args:
+        updates: Dictionary of updates to apply (can be nested)
+        config_path: Path to config file. Defaults to ./dialeng_config.json
+
+    Returns:
+        Updated DialengConfig after applying changes
+
+    Raises:
+        IOError: If the file cannot be read or written
+
+    Example:
+        >>> update_config({"tool_settings": {"max_steps": 10}})
+        >>> update_config({"modes": {"default": "learning"}})
+        >>> update_config({
+        ...     "models": {"defaults": {"bedrock": "claude-sonnet-4-5"}},
+        ...     "display": {"reasoning_truncate_chars": 1000}
+        ... })
+    """
+    global _config, _config_path
+
+    if config_path is None:
+        config_path = _config_path or Path.cwd() / "dialeng_config.json"
+
+    # Load current config from file (not cache, to get raw dict)
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
+            current = json.load(f)
+    else:
+        current = DEFAULT_CONFIG.copy()
+
+    # Deep merge updates
+    merged = _deep_merge(current, updates)
+
+    # Save and reload
+    save_config(merged, config_path)
+
+    logger.info(f"Updated config with: {list(updates.keys())}")
+    return _config
+
+
+def get_config_dict() -> Dict[str, Any]:
+    """Get the raw config dictionary for the settings UI.
+
+    Returns:
+        Raw config dictionary as loaded from file
+    """
+    config = get_config()
+    return config.raw_config
+
+
 def print_config_status(config: DialengConfig, detected_backend: Optional[str] = None) -> None:
     """Print config status for startup logging.
 

@@ -36,7 +36,7 @@ from services.credential_service import (
     detect_credentials, get_available_modes, print_credential_status, CredentialStatus
 )
 from services.dialeng_config import (
-    load_config, get_config, print_config_status
+    load_config, get_config, print_config_status, update_config, get_config_dict
 )
 
 # UI Components (extracted to ui/ package)
@@ -1039,7 +1039,9 @@ def get(nb_id: str):
         return RedirectResponse("/notebook/default", status_code=302)
     nb = get_notebook(nb_id)
     nb_list = list_notebooks() or [nb_id]
-    return NotebookPage(nb, nb_list, AVAILABLE_DIALOG_MODES, AVAILABLE_MODELS)
+    # Pass config for settings sidebar
+    config = get_config()
+    return NotebookPage(nb, nb_list, AVAILABLE_DIALOG_MODES, AVAILABLE_MODELS, config)
 
 @rt("/notebook/{nb_id}/save")
 def post(nb_id: str):
@@ -1064,6 +1066,102 @@ def get(nb_id: str):
     content = json.dumps(nb.to_ipynb(), indent=2)
     return Response(content=content, media_type="application/json",
                     headers={"Content-Disposition": f'attachment; filename="{nb_id}.ipynb"'})
+
+# ============================================================================
+# Settings Endpoints
+# ============================================================================
+
+@rt("/settings")
+def get():
+    """Get current settings as JSON for API use."""
+    config_dict = get_config_dict()
+    return Response(content=json.dumps(config_dict, indent=2),
+                    media_type="application/json")
+
+@rt("/settings")
+def post(request):
+    """Update settings from the settings form.
+
+    Parses form data and updates the config file.
+    Returns a status message for the settings sidebar.
+    """
+    from starlette.datastructures import FormData
+    import asyncio
+
+    # Get form data - need to handle this synchronously
+    async def get_form():
+        return await request.form()
+
+    form_data = asyncio.get_event_loop().run_until_complete(get_form())
+
+    # Build updates dict from form data
+    # Form field names use dot notation: "aws.region", "modes.default", etc.
+    updates = {}
+
+    for field_name, value in form_data.items():
+        # Parse the dotted path into nested dict
+        keys = field_name.split('.')
+
+        # Handle checkbox values - unchecked boxes aren't sent
+        # Convert string "on" to True, and parse numbers
+        if value == 'on':
+            value = True
+        elif value.isdigit():
+            value = int(value)
+        else:
+            # Try to parse as float
+            try:
+                value = float(value)
+                if value.is_integer():
+                    value = int(value)
+            except ValueError:
+                pass  # Keep as string
+
+        # Build nested dict for this path
+        current = updates
+        for key in keys[:-1]:
+            if key not in current:
+                current[key] = {}
+            current = current[key]
+        current[keys[-1]] = value
+
+    # Handle unchecked checkboxes (they're not sent in form data)
+    # We need to explicitly set them to False
+    checkbox_fields = [
+        'tool_settings.require_confirmation',
+        'tool_settings.builtin_tools_enabled',
+        'llm.use_sdk_directly',
+        'llm.debug_mode'
+    ]
+    for field in checkbox_fields:
+        keys = field.split('.')
+        # Check if this field was NOT in the form data (meaning checkbox unchecked)
+        found = field in form_data
+        if not found:
+            current = updates
+            for key in keys[:-1]:
+                if key not in current:
+                    current[key] = {}
+                current = current[key]
+            current[keys[-1]] = False
+
+    try:
+        # Apply updates to config
+        update_config(updates)
+
+        # Reload the global config
+        global DIALENG_CONFIG
+        DIALENG_CONFIG = load_config(force_reload=True)
+
+        return Div(
+            "Settings saved successfully!",
+            cls="settings-status success"
+        )
+    except Exception as e:
+        return Div(
+            f"Error saving settings: {str(e)}",
+            cls="settings-status error"
+        )
 
 # Cell operations - now include notebook ID in path
 @rt("/notebook/{nb_id}/cell/add")
