@@ -232,7 +232,31 @@ function moveToNextCell(currentCell) {
         sibling = sibling.nextElementSibling;
     }
     // No next cell found - we're at the last cell
-    // Could optionally create a new cell here, but for now just stay on current
+    // Create a new code cell at the end (Jupyter behavior)
+    createNewCellAtEnd();
+}
+
+function createNewCellAtEnd() {
+    // Count current cells to determine position
+    const cells = document.querySelectorAll('#cells .cell');
+    const position = cells.length;
+
+    // Create a new code cell at the end
+    htmx.ajax('POST', `${window.location.pathname}/cell/add?pos=${position}&type=code`, {
+        target: '#cells',
+        swap: 'outerHTML'
+    }).then(() => {
+        // After the cell is added, focus the last cell
+        // Use setTimeout to ensure DOM is updated
+        setTimeout(() => {
+            const newCells = document.querySelectorAll('#cells .cell');
+            if (newCells.length > 0) {
+                const lastCell = newCells[newCells.length - 1];
+                const lastCellId = lastCell.id.replace('cell-', '');
+                focusNextCell(lastCellId);
+            }
+        }, 100);
+    });
 }
 
 // ==================== Keyboard Shortcuts ====================
