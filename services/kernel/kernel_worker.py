@@ -312,6 +312,10 @@ def kernel_worker_main(input_queue: Queue, output_queue: Queue):
     # Signal ready
     output_queue.put({'type': 'status', 'status': 'ready'})
 
+    # Track which cell defined each variable/function
+    # Maps name -> cell_id
+    var_cell_map = {}
+
     while True:
         try:
             msg = input_queue.get()
@@ -332,9 +336,22 @@ def kernel_worker_main(input_queue: Queue, output_queue: Queue):
             if cell_id:
                 shell.user_ns['__msg_id'] = cell_id
 
+            # Capture namespace state before execution
+            pre_execution_names = set(shell.user_ns.keys())
+
             try:
                 # Execute with streaming output
                 shell._run_streaming(msg['code'], output_queue)
+
+                # Track new variables from this cell (only names that didn't exist before)
+                if cell_id:
+                    for name in shell.user_ns.keys():
+                        # Only track names that are NEW (created in this cell execution)
+                        if name not in pre_execution_names:
+                            # Only track user-defined names (not private/magic)
+                            if not name.startswith('_'):
+                                var_cell_map[name] = cell_id
+
             except KeyboardInterrupt:
                 # SIGINT during execution - send interrupt error
                 output_queue.put({
@@ -486,6 +503,80 @@ def kernel_worker_main(input_queue: Queue, output_queue: Queue):
                     'exists': False,
                     'error': str(e)
                 })
+
+        elif msg['type'] == 'list_namespace':
+            # List all user-defined variables and functions in the namespace
+            import inspect
+            import types
+            import builtins
+
+            # Builtin types and modules to exclude
+            builtin_names = set(dir(builtins))
+            exclude_names = {
+                '__builtins__', '__doc__', '__name__', '__package__', '__loader__',
+                '__spec__', '__dialog_name', '__msg_id', 'In', 'Out', 'get_ipython',
+                'exit', 'quit', '_', '__', '___', '_i', '_ii', '_iii', '_oh', '_dh',
+                '_ih', '_i1', '_i2', '_i3', 'open', 'display', 'set_matplotlib_formats',
+                'set_matplotlib_close', 'publish_display_data', 'clear_output'
+            }
+
+            variables = []
+            functions = []
+
+            for name, obj in shell.user_ns.items():
+                # Skip private/magic names and builtins
+                if name.startswith('_') or name in exclude_names or name in builtin_names:
+                    continue
+
+                # Skip modules
+                if isinstance(obj, types.ModuleType):
+                    continue
+
+                # Get cell_id from var_cell_map if available
+                cell_id_for_var = var_cell_map.get(name)
+
+                if callable(obj) and not isinstance(obj, type):
+                    # It's a function or callable
+                    try:
+                        sig = str(inspect.signature(obj))
+                    except (ValueError, TypeError):
+                        sig = '(...)'
+                    func_info = {
+                        'name': name,
+                        'signature': sig,
+                        'type': type(obj).__name__
+                    }
+                    if cell_id_for_var:
+                        func_info['cell_id'] = cell_id_for_var
+                    functions.append(func_info)
+                else:
+                    # It's a variable
+                    var_type = type(obj).__name__
+                    # Get a short preview of the value
+                    try:
+                        preview = repr(obj)
+                        if len(preview) > 50:
+                            preview = preview[:47] + '...'
+                    except Exception:
+                        preview = '<error getting repr>'
+                    var_info = {
+                        'name': name,
+                        'type': var_type,
+                        'preview': preview
+                    }
+                    if cell_id_for_var:
+                        var_info['cell_id'] = cell_id_for_var
+                    variables.append(var_info)
+
+            # Sort by name
+            variables.sort(key=lambda x: x['name'])
+            functions.sort(key=lambda x: x['name'])
+
+            output_queue.put({
+                'type': 'list_namespace_reply',
+                'variables': variables,
+                'functions': functions
+            })
 
         elif msg['type'] == 'execute_tool':
             # Execute a function as a tool with given arguments

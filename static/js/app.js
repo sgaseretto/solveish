@@ -232,7 +232,31 @@ function moveToNextCell(currentCell) {
         sibling = sibling.nextElementSibling;
     }
     // No next cell found - we're at the last cell
-    // Could optionally create a new cell here, but for now just stay on current
+    // Create a new code cell at the end (Jupyter behavior)
+    createNewCellAtEnd();
+}
+
+function createNewCellAtEnd() {
+    // Count current cells to determine position
+    const cells = document.querySelectorAll('#cells .cell');
+    const position = cells.length;
+
+    // Create a new code cell at the end
+    htmx.ajax('POST', `${window.location.pathname}/cell/add?pos=${position}&type=code`, {
+        target: '#cells',
+        swap: 'outerHTML'
+    }).then(() => {
+        // After the cell is added, focus the last cell
+        // Use setTimeout to ensure DOM is updated
+        setTimeout(() => {
+            const newCells = document.querySelectorAll('#cells .cell');
+            if (newCells.length > 0) {
+                const lastCell = newCells[newCells.length - 1];
+                const lastCellId = lastCell.id.replace('cell-', '');
+                focusNextCell(lastCellId);
+            }
+        }, 100);
+    });
 }
 
 // ==================== Keyboard Shortcuts ====================
@@ -862,6 +886,72 @@ function toggleModelSelect(mode) {
     }
 }
 
+// ==================== Settings Sidebar Toggle ====================
+function toggleSettings() {
+    const sidebar = document.getElementById('settings-sidebar');
+    const overlay = document.getElementById('settings-overlay');
+
+    if (sidebar) {
+        sidebar.classList.toggle('open');
+    }
+    if (overlay) {
+        overlay.classList.toggle('open');
+    }
+}
+
+// Close settings sidebar with Escape key
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        const sidebar = document.getElementById('settings-sidebar');
+        if (sidebar && sidebar.classList.contains('open')) {
+            toggleSettings();
+            return;
+        }
+        // Also close outline sidebar on Escape
+        const outlineSidebar = document.getElementById('outline-sidebar');
+        if (outlineSidebar && outlineSidebar.classList.contains('outline-open')) {
+            toggleOutline();
+        }
+    }
+});
+
+// ==================== Outline Sidebar Toggle ====================
+function toggleOutline() {
+    const sidebar = document.getElementById('outline-sidebar');
+    if (sidebar) {
+        const isOpening = !sidebar.classList.contains('outline-open');
+        sidebar.classList.toggle('outline-open');
+
+        // If opening, refresh the outline content
+        if (isOpening) {
+            refreshOutline();
+        }
+    }
+}
+
+function refreshOutline() {
+    // Trigger HTMX refresh of the outline sidebar
+    document.body.dispatchEvent(new CustomEvent('outline-refresh'));
+}
+
+function scrollToCell(cellId) {
+    const cell = document.getElementById(`cell-${cellId}`);
+    if (cell) {
+        cell.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        // Add a brief highlight effect
+        cell.classList.add('cell-highlight');
+        setTimeout(() => cell.classList.remove('cell-highlight'), 1500);
+    }
+}
+
+// Keyboard shortcut for outline toggle (Ctrl+Shift+O)
+document.addEventListener('keydown', function(e) {
+    if (e.ctrlKey && e.shiftKey && e.key === 'O') {
+        e.preventDefault();
+        toggleOutline();
+    }
+});
+
 // ==================== Cell Collapse ====================
 // Collapse levels: 0=expanded, 1=scrollable, 2=summary
 const COLLAPSE_LEVELS = ['', 'collapse-scrollable', 'collapse-summary'];
@@ -1379,6 +1469,12 @@ function finishCodeStreaming(cellId, hasError) {
 
     // Clear the streaming timeout
     clearCodeStreamingTimeout(cellId);
+
+    // Refresh outline sidebar if it's open (to update variables/functions)
+    const outlineSidebar = document.getElementById('outline-sidebar');
+    if (outlineSidebar && outlineSidebar.classList.contains('outline-open')) {
+        refreshOutline();
+    }
 
     console.log('[Code] Finished streaming for cell:', cellId, hasError ? '(with errors)' : '');
 }

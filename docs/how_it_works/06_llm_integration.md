@@ -751,6 +751,75 @@ The config file is created in the project root directory:
 | `modes.default` | Default mode | Initial dialog mode for new notebooks (`mock`, `learning`, `concise`, `standard`) |
 | `thinking.max_tokens` | Thinking token budget | Maximum tokens for extended thinking (0 to disable). Only applies to thinking-capable models. |
 
+### Model Selection Behavior
+
+Dialeng uses a **per-notebook model selection** system with intelligent defaults:
+
+```mermaid
+flowchart TD
+    A[Open Notebook] --> B{Notebook exists on disk?}
+    B -->|No| C[Create new notebook]
+    C --> D[Use provider default model]
+    B -->|Yes| E[Load from .ipynb]
+    E --> F{Saved model valid?}
+    F -->|Yes| G[Use saved model]
+    F -->|No/Missing| D
+
+    H[User changes model in toolbar] --> I[New model saved to notebook]
+    I --> J[Next open uses saved model]
+
+    D --> K[Model shown in dropdown]
+    G --> K
+```
+
+#### How It Works
+
+1. **New notebooks**: Use the default model based on detected provider
+   - **Bedrock detected** → Uses `models.defaults.bedrock` (e.g., Claude Haiku 4.5)
+   - **Claude Code detected** → Uses `models.defaults.claude_code_subscription` (e.g., Claude Sonnet 4.5)
+   - **No credentials** → Mock mode only (model dropdown hidden)
+
+2. **Existing notebooks**: Remember per-notebook model selection
+   - Model saved in notebook metadata as `solveit_model`
+   - On load, validates saved model exists in available models
+   - If valid, uses saved model (user preference remembered)
+   - If invalid/missing, falls back to provider default
+
+3. **User changes model**: Selection is remembered
+   - Change model in toolbar dropdown
+   - Save notebook (Ctrl+S)
+   - Model stored in `.ipynb` metadata
+   - Next time notebook is opened, saved model is used
+
+#### Benefits
+
+- **Different models per notebook**: Use Haiku for quick tests, Sonnet for complex tasks
+- **Config changes are safe**: If config changes (model removed), notebooks gracefully fall back to defaults
+- **Provider-aware defaults**: First-time opens use the best default for current provider
+
+#### Implementation Details
+
+The model is persisted in notebook metadata:
+
+```json
+{
+  "metadata": {
+    "solveit_model": "claude-sonnet-4-5",
+    "solveit_dialog_mode": "standard"
+  }
+}
+```
+
+Validation in `app.py`:
+
+```python
+def validate_model_id(model_id: str) -> str:
+    """Validate model ID - return default if invalid."""
+    if model_id in AVAILABLE_MODEL_IDS:
+        return model_id
+    return DEFAULT_MODEL  # Provider-specific default
+```
+
 ### Customization Examples
 
 #### Adding a New Model
