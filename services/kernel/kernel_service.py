@@ -187,6 +187,25 @@ class KernelService:
         for notebook_id in list(self._kernels.keys()):
             self.shutdown(notebook_id)
 
+    async def get_namespace_info(self, notebook_id: str) -> dict:
+        """
+        Get all user-defined variables and functions from the kernel namespace.
+
+        Args:
+            notebook_id: Notebook identifier
+
+        Returns:
+            Dict with 'variables' and 'functions' lists
+        """
+        if notebook_id not in self._kernels:
+            return {'variables': [], 'functions': []}
+
+        kernel = self._kernels[notebook_id]
+        if not kernel.is_alive:
+            return {'variables': [], 'functions': []}
+
+        return await kernel.get_namespace_info()
+
     def __del__(self):
         """Cleanup on garbage collection."""
         self.shutdown_all()

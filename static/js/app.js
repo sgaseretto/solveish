@@ -881,7 +881,50 @@ document.addEventListener('keydown', function(e) {
         const sidebar = document.getElementById('settings-sidebar');
         if (sidebar && sidebar.classList.contains('open')) {
             toggleSettings();
+            return;
         }
+        // Also close outline sidebar on Escape
+        const outlineSidebar = document.getElementById('outline-sidebar');
+        if (outlineSidebar && outlineSidebar.classList.contains('outline-open')) {
+            toggleOutline();
+        }
+    }
+});
+
+// ==================== Outline Sidebar Toggle ====================
+function toggleOutline() {
+    const sidebar = document.getElementById('outline-sidebar');
+    if (sidebar) {
+        const isOpening = !sidebar.classList.contains('outline-open');
+        sidebar.classList.toggle('outline-open');
+
+        // If opening, refresh the outline content
+        if (isOpening) {
+            refreshOutline();
+        }
+    }
+}
+
+function refreshOutline() {
+    // Trigger HTMX refresh of the outline sidebar
+    document.body.dispatchEvent(new CustomEvent('outline-refresh'));
+}
+
+function scrollToCell(cellId) {
+    const cell = document.getElementById(`cell-${cellId}`);
+    if (cell) {
+        cell.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        // Add a brief highlight effect
+        cell.classList.add('cell-highlight');
+        setTimeout(() => cell.classList.remove('cell-highlight'), 1500);
+    }
+}
+
+// Keyboard shortcut for outline toggle (Ctrl+Shift+O)
+document.addEventListener('keydown', function(e) {
+    if (e.ctrlKey && e.shiftKey && e.key === 'O') {
+        e.preventDefault();
+        toggleOutline();
     }
 });
 

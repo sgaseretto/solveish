@@ -11,6 +11,7 @@ Usage:
     from ui.controls import TypeSelect, CollapseBtn
     from ui.layout import NotebookPage, AllCells
     from ui.settings import SettingsSidebar, SettingsOverlay
+    from ui.outline import OutlineSidebar, OutlineToggleButton
     from ui.oob import AllCellsOOB, CellViewOOB
 """
 
@@ -28,6 +29,9 @@ from .layout import NotebookPage, AllCells, AllCellsContent
 
 # Settings components
 from .settings import SettingsSidebar, SettingsOverlay, SettingsGroup
+
+# Outline sidebar components
+from .outline import OutlineSidebar, OutlineToggleButton, OutlineSection
 
 # OOB (Out-of-Band) components for WebSocket
 from .oob import AllCellsOOB, CellViewOOB
@@ -53,6 +57,10 @@ __all__ = [
     'SettingsSidebar',
     'SettingsOverlay',
     'SettingsGroup',
+    # Outline
+    'OutlineSidebar',
+    'OutlineToggleButton',
+    'OutlineSection',
     # OOB
     'AllCellsOOB',
     'CellViewOOB',

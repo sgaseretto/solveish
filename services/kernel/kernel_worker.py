@@ -487,6 +487,71 @@ def kernel_worker_main(input_queue: Queue, output_queue: Queue):
                     'error': str(e)
                 })
 
+        elif msg['type'] == 'list_namespace':
+            # List all user-defined variables and functions in the namespace
+            import inspect
+            import types
+            import builtins
+
+            # Builtin types and modules to exclude
+            builtin_names = set(dir(builtins))
+            exclude_names = {
+                '__builtins__', '__doc__', '__name__', '__package__', '__loader__',
+                '__spec__', '__dialog_name', '__msg_id', 'In', 'Out', 'get_ipython',
+                'exit', 'quit', '_', '__', '___', '_i', '_ii', '_iii', '_oh', '_dh',
+                '_ih', '_i1', '_i2', '_i3', 'open', 'display', 'set_matplotlib_formats',
+                'set_matplotlib_close', 'publish_display_data', 'clear_output'
+            }
+
+            variables = []
+            functions = []
+
+            for name, obj in shell.user_ns.items():
+                # Skip private/magic names and builtins
+                if name.startswith('_') or name in exclude_names or name in builtin_names:
+                    continue
+
+                # Skip modules
+                if isinstance(obj, types.ModuleType):
+                    continue
+
+                if callable(obj) and not isinstance(obj, type):
+                    # It's a function or callable
+                    try:
+                        sig = str(inspect.signature(obj))
+                    except (ValueError, TypeError):
+                        sig = '(...)'
+                    functions.append({
+                        'name': name,
+                        'signature': sig,
+                        'type': type(obj).__name__
+                    })
+                else:
+                    # It's a variable
+                    var_type = type(obj).__name__
+                    # Get a short preview of the value
+                    try:
+                        preview = repr(obj)
+                        if len(preview) > 50:
+                            preview = preview[:47] + '...'
+                    except Exception:
+                        preview = '<error getting repr>'
+                    variables.append({
+                        'name': name,
+                        'type': var_type,
+                        'preview': preview
+                    })
+
+            # Sort by name
+            variables.sort(key=lambda x: x['name'])
+            functions.sort(key=lambda x: x['name'])
+
+            output_queue.put({
+                'type': 'list_namespace_reply',
+                'variables': variables,
+                'functions': functions
+            })
+
         elif msg['type'] == 'execute_tool':
             # Execute a function as a tool with given arguments
             import json

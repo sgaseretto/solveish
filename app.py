@@ -1107,6 +1107,51 @@ def get(nb_id: str):
                     headers={"Content-Disposition": f'attachment; filename="{nb_id}.ipynb"'})
 
 # ============================================================================
+# Outline Sidebar Endpoints
+# ============================================================================
+
+@rt("/notebook/{nb_id}/outline")
+async def get(nb_id: str):
+    """Get notebook outline for the sidebar.
+
+    Returns the OutlineSidebar component with:
+    - Headings extracted from note cells
+    - Variables from kernel namespace
+    - Functions from kernel namespace
+    """
+    from ui.outline import OutlineSidebar, extract_headings_from_markdown
+
+    nb = get_notebook(nb_id)
+
+    # Extract headings from note cells
+    headings = []
+    for cell in nb.cells:
+        if cell.cell_type == "note":
+            cell_headings = extract_headings_from_markdown(cell.source)
+            for h in cell_headings:
+                headings.append({
+                    'text': h['text'],
+                    'cell_id': cell.id,
+                    'level': h['level']
+                })
+
+    # Get variables and functions from kernel namespace
+    variables = []
+    functions = []
+
+    # Only get namespace info if the kernel is alive for this notebook
+    if kernel_service.has_kernel(nb_id) and kernel_service.kernel_is_alive(nb_id):
+        try:
+            ns_info = await kernel_service.get_namespace_info(nb_id)
+            if ns_info:
+                variables = ns_info.get('variables', [])
+                functions = ns_info.get('functions', [])
+        except Exception as e:
+            print(f"Error getting kernel namespace: {e}")
+
+    return OutlineSidebar(nb_id, headings, variables, functions, is_open=True)
+
+# ============================================================================
 # Settings Endpoints
 # ============================================================================
 

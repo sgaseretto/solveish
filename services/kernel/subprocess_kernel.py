@@ -408,6 +408,42 @@ class SubprocessKernel:
             self._is_busy = False
 
 
+    async def get_namespace_info(self, timeout: float = 5.0) -> dict:
+        """
+        Get all user-defined variables and functions from the kernel namespace.
+
+        Args:
+            timeout: Max time to wait for response
+
+        Returns:
+            Dict with 'variables' and 'functions' lists
+        """
+        if not self.is_alive:
+            return {'variables': [], 'functions': []}
+
+        self.input_queue.put({'type': 'list_namespace'})
+
+        loop = asyncio.get_event_loop()
+        start_time = asyncio.get_event_loop().time()
+
+        while True:
+            try:
+                msg = await loop.run_in_executor(
+                    None,
+                    lambda: self.output_queue.get(timeout=0.1)
+                )
+                if msg.get('type') == 'list_namespace_reply':
+                    return {
+                        'variables': msg.get('variables', []),
+                        'functions': msg.get('functions', [])
+                    }
+            except Empty:
+                if asyncio.get_event_loop().time() - start_time > timeout:
+                    return {'variables': [], 'functions': []}
+                if not self.is_alive:
+                    return {'variables': [], 'functions': []}
+
+
 # Convenience function for one-off execution
 async def execute_code(code: str) -> list[CellOutput]:
     """
