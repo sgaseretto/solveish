@@ -343,11 +343,11 @@ def kernel_worker_main(input_queue: Queue, output_queue: Queue):
                 # Execute with streaming output
                 shell._run_streaming(msg['code'], output_queue)
 
-                # Track new/modified variables from this cell
+                # Track new variables from this cell (only names that didn't exist before)
                 if cell_id:
                     for name in shell.user_ns.keys():
-                        # If it's a new name, or we want to track modifications
-                        if name not in pre_execution_names or name in var_cell_map:
+                        # Only track names that are NEW (created in this cell execution)
+                        if name not in pre_execution_names:
                             # Only track user-defined names (not private/magic)
                             if not name.startswith('_'):
                                 var_cell_map[name] = cell_id
