@@ -312,6 +312,10 @@ def kernel_worker_main(input_queue: Queue, output_queue: Queue):
     # Signal ready
     output_queue.put({'type': 'status', 'status': 'ready'})
 
+    # Track which cell defined each variable/function
+    # Maps name -> cell_id
+    var_cell_map = {}
+
     while True:
         try:
             msg = input_queue.get()
@@ -332,9 +336,22 @@ def kernel_worker_main(input_queue: Queue, output_queue: Queue):
             if cell_id:
                 shell.user_ns['__msg_id'] = cell_id
 
+            # Capture namespace state before execution
+            pre_execution_names = set(shell.user_ns.keys())
+
             try:
                 # Execute with streaming output
                 shell._run_streaming(msg['code'], output_queue)
+
+                # Track new/modified variables from this cell
+                if cell_id:
+                    for name in shell.user_ns.keys():
+                        # If it's a new name, or we want to track modifications
+                        if name not in pre_execution_names or name in var_cell_map:
+                            # Only track user-defined names (not private/magic)
+                            if not name.startswith('_'):
+                                var_cell_map[name] = cell_id
+
             except KeyboardInterrupt:
                 # SIGINT during execution - send interrupt error
                 output_queue.put({
@@ -515,17 +532,23 @@ def kernel_worker_main(input_queue: Queue, output_queue: Queue):
                 if isinstance(obj, types.ModuleType):
                     continue
 
+                # Get cell_id from var_cell_map if available
+                cell_id_for_var = var_cell_map.get(name)
+
                 if callable(obj) and not isinstance(obj, type):
                     # It's a function or callable
                     try:
                         sig = str(inspect.signature(obj))
                     except (ValueError, TypeError):
                         sig = '(...)'
-                    functions.append({
+                    func_info = {
                         'name': name,
                         'signature': sig,
                         'type': type(obj).__name__
-                    })
+                    }
+                    if cell_id_for_var:
+                        func_info['cell_id'] = cell_id_for_var
+                    functions.append(func_info)
                 else:
                     # It's a variable
                     var_type = type(obj).__name__
@@ -536,11 +559,14 @@ def kernel_worker_main(input_queue: Queue, output_queue: Queue):
                             preview = preview[:47] + '...'
                     except Exception:
                         preview = '<error getting repr>'
-                    variables.append({
+                    var_info = {
                         'name': name,
                         'type': var_type,
                         'preview': preview
-                    })
+                    }
+                    if cell_id_for_var:
+                        var_info['cell_id'] = cell_id_for_var
+                    variables.append(var_info)
 
             # Sort by name
             variables.sort(key=lambda x: x['name'])

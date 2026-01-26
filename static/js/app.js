@@ -1446,6 +1446,12 @@ function finishCodeStreaming(cellId, hasError) {
     // Clear the streaming timeout
     clearCodeStreamingTimeout(cellId);
 
+    // Refresh outline sidebar if it's open (to update variables/functions)
+    const outlineSidebar = document.getElementById('outline-sidebar');
+    if (outlineSidebar && outlineSidebar.classList.contains('outline-open')) {
+        refreshOutline();
+    }
+
     console.log('[Code] Finished streaming for cell:', cellId, hasError ? '(with errors)' : '');
 }
 

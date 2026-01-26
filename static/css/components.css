@@ -1280,8 +1280,8 @@
 }
 
 .outline-sidebar.outline-open {
-    width: 280px;
-    min-width: 280px;
+    width: 320px;
+    min-width: 320px;
 }
 
 /* Outline header */
@@ -1482,6 +1482,32 @@
     overflow: hidden;
     text-overflow: ellipsis;
     display: block;
+}
+
+/* Clickable variable/function items */
+.outline-clickable {
+    cursor: pointer;
+}
+
+.outline-var-link,
+.outline-func-link {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+    border-radius: 4px;
+    transition: background 0.15s;
+}
+
+.outline-var-link:hover,
+.outline-func-link:hover {
+    background: var(--bg-cell);
+}
+
+.outline-clickable .outline-var-name,
+.outline-clickable .outline-func-name {
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-underline-offset: 2px;
 }
 
 /* Outline toggle button in toolbar */

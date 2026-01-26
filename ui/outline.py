@@ -92,44 +92,74 @@ def HeadingItem(text: str, cell_id: str, level: int = 2):
     )
 
 
-def VariableItem(name: str, var_type: str, value_preview: str = None):
+def VariableItem(name: str, var_type: str, value_preview: str = None, cell_id: str = None):
     """Variable item showing name, type, and optional preview.
 
     Args:
         name: Variable name
         var_type: Type string (e.g., "int", "DataFrame")
         value_preview: Optional short preview of the value
+        cell_id: Optional cell ID where the variable was defined (makes it clickable)
 
     Returns:
         Li element with variable info
     """
-    return Li(
+    content = Div(
         Div(
             Span(name, cls="outline-var-name"),
             Span(var_type, cls="outline-var-type"),
             cls="outline-var-row"
         ),
         Span(value_preview, cls="outline-var-preview") if value_preview else None,
-        cls="outline-item outline-var-item"
     )
 
+    if cell_id:
+        # Wrap in an anchor to make it clickable
+        return Li(
+            A(
+                content,
+                href=f"#cell-{cell_id}",
+                onclick=f"scrollToCell('{cell_id}'); return false;",
+                cls="outline-var-link"
+            ),
+            cls="outline-item outline-var-item outline-clickable"
+        )
+    else:
+        return Li(
+            content,
+            cls="outline-item outline-var-item"
+        )
 
-def FunctionItem(name: str, signature: str = None):
+
+def FunctionItem(name: str, signature: str = None, cell_id: str = None):
     """Function item showing name and optional signature.
 
     Args:
         name: Function name
         signature: Optional function signature (already includes parentheses)
+        cell_id: Optional cell ID where the function was defined (makes it clickable)
 
     Returns:
         Li element with function info
     """
     # Signature from kernel introspection already includes parentheses e.g. "(x, y)"
     display = f"{name}{signature}" if signature else f"{name}()"
-    return Li(
-        Span(display, cls="outline-func-name"),
-        cls="outline-item outline-func-item"
-    )
+
+    if cell_id:
+        return Li(
+            A(
+                Span(display, cls="outline-func-name"),
+                href=f"#cell-{cell_id}",
+                onclick=f"scrollToCell('{cell_id}'); return false;",
+                cls="outline-func-link"
+            ),
+            cls="outline-item outline-func-item outline-clickable"
+        )
+    else:
+        return Li(
+            Span(display, cls="outline-func-name"),
+            cls="outline-item outline-func-item"
+        )
 
 
 def OutlineSidebar(notebook_id: str, headings: List[Dict] = None,
@@ -160,15 +190,15 @@ def OutlineSidebar(notebook_id: str, headings: List[Dict] = None,
         for h in headings
     ]
 
-    # Build variable items
+    # Build variable items (include cell_id if available for click-to-scroll)
     variable_items = [
-        VariableItem(v['name'], v['type'], v.get('preview'))
+        VariableItem(v['name'], v['type'], v.get('preview'), v.get('cell_id'))
         for v in variables
     ]
 
-    # Build function items
+    # Build function items (include cell_id if available for click-to-scroll)
     function_items = [
-        FunctionItem(f['name'], f.get('signature'))
+        FunctionItem(f['name'], f.get('signature'), f.get('cell_id'))
         for f in functions
     ]
 
