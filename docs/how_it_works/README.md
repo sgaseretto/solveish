@@ -16,6 +16,8 @@ Read the documents in numerical order for the best understanding of the system:
 | 6 | [06_llm_integration.md](06_llm_integration.md) | LLM service integration - Claude, context building, streaming responses |
 | 7 | [07_code_organization.md](07_code_organization.md) | **Architecture guide** - Directory structure, `core/` vs `services/` distinction, how to extend |
 | 8 | [08_extension_system.md](08_extension_system.md) | Extension system - type dispatch, 2-way callbacks, creating extensions |
+| 10 | [10_tool_calling.md](10_tool_calling.md) | Tool calling - LLM tool usage and integration |
+| 11 | [11_shell_integration.md](11_shell_integration.md) | Shell commands - pshnb magic, shell cells, Safe Mode with safecmd |
 
 ## Purpose
 
@@ -45,6 +47,9 @@ These documents are intended for developers who want to:
 | Remote notebook API | [05_dialoghelper_integration.md](05_dialoghelper_integration.md) |
 | LLM integration | [06_llm_integration.md](06_llm_integration.md) |
 | Headless interaction | [05_dialoghelper_integration.md](05_dialoghelper_integration.md) |
+| Run shell commands | [11_shell_integration.md](11_shell_integration.md) |
+| Add shell cell type | [11_shell_integration.md](11_shell_integration.md) |
+| Safe Mode validation | [11_shell_integration.md](11_shell_integration.md) |
 
 ## Related Documentation
 

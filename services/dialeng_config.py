@@ -82,6 +82,10 @@ DEFAULT_CONFIG = {
     "display": {
         "reasoning_truncate_chars": 500,
         "comment": "Display settings. reasoning_truncate_chars: max characters for LLM reasoning text before truncation (0 = no limit)."
+    },
+    "shell": {
+        "shell_cells_enabled": False,
+        "comment": "Shell settings. shell_cells_enabled: if true, show dedicated Shell cell type in UI. If false, use %bash/%% bash magic or !command in code cells instead."
     }
 }
 
@@ -128,6 +132,9 @@ class DialengConfig:
 
     # Display settings
     reasoning_truncate_chars: int = 500  # Max chars for reasoning text before truncation (0 = no limit)
+
+    # Shell settings
+    shell_cells_enabled: bool = False  # If true, show dedicated Shell cell type in UI
 
     # Raw config for reference
     raw_config: Dict[str, Any] = field(default_factory=dict)
@@ -242,6 +249,10 @@ def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
     # Display settings
     display = raw.get("display", {})
     config.reasoning_truncate_chars = display.get("reasoning_truncate_chars", 500)
+
+    # Shell settings
+    shell = raw.get("shell", {})
+    config.shell_cells_enabled = shell.get("shell_cells_enabled", False)
 
     return config
 

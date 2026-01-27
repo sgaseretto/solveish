@@ -38,6 +38,9 @@ from services.credential_service import (
 from services.dialeng_config import (
     load_config, get_config, print_config_status, update_config, get_config_dict
 )
+from services.shell_service import (
+    SHFMT_AVAILABLE, warn_missing_shfmt, print_shfmt_status
+)
 
 # UI Components (extracted to ui/ package)
 from ui import (
@@ -888,41 +891,31 @@ async def broadcast_to_notebook(nb_id: str, component, exclude_send: Any = None)
         exclude_send: Optional send function to exclude (e.g., the sender)
     """
     if nb_id not in ws_connections or not ws_connections[nb_id]:
-        print(f"[BROADCAST] No connections for notebook {nb_id}")
         return
 
     connections = ws_connections[nb_id]
-    print(f"[BROADCAST] Sending to {len(connections)} connections for {nb_id}")
 
     # Convert component to HTML string using to_xml
     # FastHTML's str() on components returns the ID, not HTML
     html_str = to_xml(component)
-    print(f"[BROADCAST] HTML length: {len(html_str)} chars, starts with: {html_str[:100]}")
 
     # Track which connections are still alive
     alive = []
-    sent_count = 0
 
-    for i, send in enumerate(connections):
+    for send in connections:
         if send is exclude_send:
             alive.append(send)  # Keep but don't send
             continue
         try:
-            # Send the HTML string directly
-            print(f"[BROADCAST] Sending to connection {i}, send function: {send}", flush=True)
             await send(html_str)
-            print(f"[BROADCAST] Successfully sent to connection {i}", flush=True)
             alive.append(send)
-            sent_count += 1
-        except Exception as e:
-            print(f"[BROADCAST] Failed to send to connection {i} (removing dead connection): {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            # Don't add to alive - this removes the dead connection
+        except Exception:
+            # Connection closed/dead - silently remove it
+            # This is expected when browser tabs close or refresh
+            pass
 
     # Replace with only alive connections
     ws_connections[nb_id] = alive
-    print(f"[BROADCAST] Sent to {sent_count} clients, {len(alive)} connections remain")
 
 
 async def broadcast_queue_state(nb_id: str):
@@ -1080,7 +1073,8 @@ def get(nb_id: str):
     nb_list = list_notebooks() or [nb_id]
     # Pass config for settings sidebar
     config = get_config()
-    return NotebookPage(nb, nb_list, AVAILABLE_DIALOG_MODES, AVAILABLE_MODELS, config)
+    return NotebookPage(nb, nb_list, AVAILABLE_DIALOG_MODES, AVAILABLE_MODELS, config,
+                        shfmt_available=SHFMT_AVAILABLE)
 
 @rt("/notebook/{nb_id}/save")
 def post(nb_id: str):
@@ -1097,6 +1091,14 @@ def post(nb_id: str, mode: str):
 def post(nb_id: str, model: str):
     nb = get_notebook(nb_id)
     nb.model = model
+    return ""
+
+@rt("/notebook/{nb_id}/safe_mode")
+def post(nb_id: str, safe_mode: str = "false"):
+    """Toggle safe mode for shell commands in this notebook."""
+    nb = get_notebook(nb_id)
+    # Convert string to boolean (checkbox sends "true" or "false")
+    nb.safe_mode = safe_mode.lower() in ("true", "on", "1", "yes")
     return ""
 
 @rt("/notebook/{nb_id}/export")
@@ -1452,14 +1454,14 @@ async def post(nb_id: str, cid: str, source: str = None):
                 # Use tool-enabled streaming
                 kernel = kernel_service.get_kernel(nb_id)
                 stream_func = llm_service.stream_response_with_tools(
-                    c.source, context_messages, nb.dialog_mode, nb.model, c.use_thinking,
+                    c.source, context_messages, nb.dialog_mode, getattr(nb, 'model', None), c.use_thinking,
                     kernel=kernel, notebook_id=nb_id, max_steps=max_steps,
                     include_builtins=include_builtins
                 )
             else:
                 # Use regular streaming (no tools)
                 stream_func = llm_service.stream_response(
-                    c.source, context_messages, nb.dialog_mode, nb.model, c.use_thinking
+                    c.source, context_messages, nb.dialog_mode, getattr(nb, 'model', None), c.use_thinking
                 )
 
         # Stream via WebSocket to all connected clients
@@ -2063,6 +2065,12 @@ if __name__ == "__main__":
     print("")
     # Print config status (pass detected backend to show active default)
     print_config_status(DIALENG_CONFIG, CREDENTIAL_STATUS.backend)
+    print("")
+    # Print shell/safecmd status
+    print("   Shell Execution:")
+    print_shfmt_status()
+    if not SHFMT_AVAILABLE:
+        warn_missing_shfmt()
     print("")
     print("   Keyboard shortcuts (Jupyter-style):")
     print("   • Shift+Enter       - Run cell")

@@ -254,6 +254,15 @@ def SettingsSidebar(config: DialengConfig):
                     open=False
                 ),
 
+                # Shell Settings
+                SettingsGroup(
+                    "Shell Settings",
+                    SettingToggle("Enable Shell Cells", "shell.shell_cells_enabled",
+                                  config.shell_cells_enabled, requires_restart=True,
+                                  help_text="Show dedicated Shell cell type. If disabled, use %bash magic or !cmd in code cells."),
+                    open=False
+                ),
+
                 # Advanced Settings
                 SettingsGroup(
                     "Advanced",

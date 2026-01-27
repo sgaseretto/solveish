@@ -30,7 +30,7 @@ document.addEventListener('mousedown', (e) => {
 // ==================== Ace Editor Management ====================
 const aceEditors = {};
 
-function initAceEditor(cellId) {
+function initAceEditor(cellId, mode = 'python') {
     const container = document.getElementById(`ace-${cellId}`);
     if (!container) return null;
 
@@ -74,11 +74,13 @@ function initAceEditor(cellId) {
 
     // Apply mode after setValue - this ensures syntax highlighting works
     // Use a small delay to let Ace settle
-    editor.session.setMode("ace/mode/python");
+    // Supported modes: python (default), sh (shell/bash), markdown, etc.
+    const aceMode = `ace/mode/${mode}`;
+    editor.session.setMode(aceMode);
 
     // Force a complete re-render after a brief delay
     setTimeout(() => {
-        editor.session.setMode("ace/mode/python");
+        editor.session.setMode(aceMode);
         editor.renderer.updateFull();
     }, 50);
     

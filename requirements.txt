@@ -27,3 +27,8 @@ dialoghelper
 
 # fastlucide for Lucide icons in FastHTML
 fastlucide
+
+# Shell execution support
+pshnb  # Persistent shell for notebooks (like Jupyter %bash magic)
+pexpect>=4.9.0  # Required by pshnb for shell interaction
+safecmd  # Safe command execution with allowlist validation

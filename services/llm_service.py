@@ -1122,12 +1122,12 @@ Now respond to my latest message:
         # Build tool definitions string
         tool_defs = self._build_text_tool_definitions(tools)
 
-        # Augment system prompt with tool definitions and instructions
-        augmented_system = f"""{base_system_prompt}
+        # Build tool instructions to append to Claude Code's default system prompt
+        # Using append instead of replace preserves Claude Code's default behavior
+        tool_instructions = f"""
+## Additional Custom Tools
 
-## Available Tools
-
-You have access to the following tools. To call a tool, respond with a JSON block in this exact format:
+You have access to the following custom tools defined in this notebook. To call one of these tools, respond with a JSON block in this exact format:
 
 ```tool_call
 {{"tool": "tool_name", "arguments": {{"arg1": "value1", "arg2": "value2"}}}}
@@ -1144,6 +1144,7 @@ After the tool result is returned, you can call more tools or provide your final
         # Debug: Print full prompt info
         print(f"[SDK-TOOLS DEBUG] Original prompt length: {len(prompt)}")
         print(f"[SDK-TOOLS DEBUG] Full prompt (with context) length: {len(full_prompt)}")
+        print(f"[SDK-TOOLS DEBUG] Tool instructions length: {len(tool_instructions)}")
         prompt_preview = full_prompt[:200].replace('\n', '\\n') + '...' if len(full_prompt) > 200 else full_prompt.replace('\n', '\\n')
         print(f"[SDK-TOOLS DEBUG] Full prompt preview: {prompt_preview}")
 
@@ -1164,14 +1165,15 @@ After the tool result is returned, you can call more tools or provide your final
                 print(f"[SDK-TOOLS DEBUG] Current prompt length: {len(current_prompt)}")
                 logger.info(f"sdk-text-tools: Step {steps}/{max_steps}")
 
-                # Build options
+                # Build options - use append to add to Claude Code's default system prompt
+                # instead of replacing it entirely
                 options = ClaudeAgentOptions(
                     continue_conversation=False,
                     resume=None,
                     setting_sources=[],
                     cwd=temp_cwd,
                     model=api_model,
-                    system_prompt=augmented_system,
+                    system_prompt={"type": "preset", "preset": "claude_code", "append": tool_instructions},
                 )
 
                 # Collect response

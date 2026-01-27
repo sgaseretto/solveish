@@ -19,6 +19,7 @@ class Notebook:
     title: str = "Untitled"
     cells: List[Cell] = field(default_factory=list)
     dialog_mode: str = "learning"
+    model: Optional[str] = None  # LLM model to use (None = use config default)
 
     # File info
     path: Optional[Path] = None
@@ -26,6 +27,9 @@ class Notebook:
 
     # Solveit metadata
     solveit_ver: int = 2
+
+    # Shell execution settings
+    safe_mode: bool = False  # Enable safecmd validation for shell commands
 
     def get_cell(self, cell_id: str) -> Optional[Cell]:
         """Get cell by ID."""

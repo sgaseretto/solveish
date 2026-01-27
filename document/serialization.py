@@ -252,7 +252,9 @@ def load_notebook(path: Path) -> Notebook:
         cells=cells,
         path=path,
         dialog_mode=metadata.get('solveit_dialog_mode', 'learning'),
-        solveit_ver=metadata.get('solveit_ver', 2)
+        model=metadata.get('dialeng_model', None),
+        solveit_ver=metadata.get('solveit_ver', 2),
+        safe_mode=metadata.get('dialeng_safe_mode', False)
     )
 
 
@@ -274,7 +276,9 @@ def save_notebook(notebook: Notebook, path: Optional[Path] = None):
         'metadata': {
             'title': notebook.title,
             'solveit_dialog_mode': notebook.dialog_mode,
+            'dialeng_model': notebook.model,
             'solveit_ver': notebook.solveit_ver,
+            'dialeng_safe_mode': notebook.safe_mode,
             'kernelspec': {
                 'display_name': 'Python 3',
                 'language': 'python',
