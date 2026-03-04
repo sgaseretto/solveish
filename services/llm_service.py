@@ -1080,15 +1080,20 @@ Now respond to my latest message:
         max_steps: int
     ) -> AsyncIterator[Dict]:
         """
-        Stream with text-based tool calling for claude-agent-sdk.
+        Stream with MCP-based tool calling for claude-agent-sdk.
 
-        Since claude-agent-sdk doesn't support custom tool definitions like the
-        direct Anthropic API, we embed tool definitions in the system prompt and
-        parse structured JSON responses for tool calls.
+        The Claude Agent SDK supports custom tools via MCP servers. We create an
+        in-process MCP server that wraps our kernel functions, allowing Claude to
+        call them natively.
+
+        Key requirements from SDK docs:
+        1. Use @tool decorator and create_sdk_mcp_server to define tools
+        2. Pass MCP server to ClaudeAgentOptions.mcp_servers
+        3. Use streaming input mode (async generator) for prompt
+        4. Allow tools with mcp__{server_name}__{tool_name} pattern
         """
-        from claude_agent_sdk import query as sdk_query, ClaudeAgentOptions
-        from claude_agent_sdk.types import AssistantMessage, ResultMessage
-        import re
+        from claude_agent_sdk import query as sdk_query, ClaudeAgentOptions, tool as sdk_tool, create_sdk_mcp_server
+        from claude_agent_sdk.types import AssistantMessage, ResultMessage, ToolUseBlock
 
         # Get system prompt and model
         base_system_prompt = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS["standard"])
@@ -1098,183 +1103,247 @@ Now respond to my latest message:
         api_model = config.get_api_model_name(model, self._backend)
 
         # Debug: Print model and provider info
-        print(f"[SDK-TOOLS DEBUG] UI model: {model}, backend: {self._backend}, API model: {api_model}")
-        print(f"[SDK-TOOLS DEBUG] Provider: {self._provider}, mode: {mode}")
+        print(f"[SDK-MCP DEBUG] UI model: {model}, backend: {self._backend}, API model: {api_model}")
+        print(f"[SDK-MCP DEBUG] Provider: {self._provider}, mode: {mode}")
 
         # Debug: Print tools info
-        print(f"[SDK-TOOLS DEBUG] Tools passed: {len(tools) if tools else 0}")
+        print(f"[SDK-MCP DEBUG] Tools passed: {len(tools) if tools else 0}")
         if tools:
             for t in tools:
                 t_name = t.get('name') if isinstance(t, dict) else getattr(t, 'name', 'unknown')
-                print(f"[SDK-TOOLS DEBUG]   Tool: {t_name}")
+                print(f"[SDK-MCP DEBUG]   Tool: {t_name}")
 
-        # Debug: Print context messages summary
-        print(f"[SDK-TOOLS DEBUG] Context messages: {len(context_messages)}")
-        for i, msg in enumerate(context_messages):
-            role = msg.get('role', 'unknown')
-            content = msg.get('content', '')
-            content_preview = content[:80] + '...' if len(content) > 80 else content
-            content_preview = content_preview.replace('\n', '\\n')
-            print(f"[SDK-TOOLS DEBUG]   Context[{i}]: role={role}, len={len(content)}, preview='{content_preview}'")
+        logger.info(f"sdk-mcp-tools: Using model {api_model} with {len(tools)} tools")
 
-        logger.info(f"sdk-text-tools: Using model {api_model} with {len(tools)} tools (text-based)")
+        # Create temp directory for SDK isolation
+        temp_cwd = tempfile.mkdtemp(prefix=f"dialeng_tools_{uuid.uuid4().hex[:8]}_")
+        logger.info(f"sdk-mcp-tools: Created temp cwd: {temp_cwd}")
 
-        # Build tool definitions string
-        tool_defs = self._build_text_tool_definitions(tools)
+        # Store tool execution results for yielding to the UI
+        tool_execution_events = []
 
-        # Augment system prompt with tool definitions and instructions
-        augmented_system = f"""{base_system_prompt}
+        # Create MCP tools that wrap our kernel functions
+        # Each tool will execute in the kernel when called by Claude
+        sdk_tools = []
+        allowed_tool_names = []
 
-## Available Tools
+        for tool_def in tools:
+            tool_name = tool_def.get('name', 'unknown')
+            tool_desc = tool_def.get('description', f'Tool: {tool_name}')
+            tool_schema = tool_def.get('input_schema', {})
 
-You have access to the following tools. To call a tool, respond with a JSON block in this exact format:
+            # Build parameter type mapping for @tool decorator
+            # SDK expects: {"param_name": type} where type is Python type or JSON schema
+            params = {}
+            if 'properties' in tool_schema:
+                for param_name, param_info in tool_schema['properties'].items():
+                    param_type = param_info.get('type', 'string')
+                    # Map JSON schema types to Python types
+                    type_mapping = {
+                        'string': str,
+                        'integer': int,
+                        'number': float,
+                        'boolean': bool,
+                        'array': list,
+                        'object': dict,
+                    }
+                    params[param_name] = type_mapping.get(param_type, str)
 
-```tool_call
-{{"tool": "tool_name", "arguments": {{"arg1": "value1", "arg2": "value2"}}}}
-```
+            print(f"[SDK-MCP DEBUG] Creating MCP tool: {tool_name}, params: {params}")
 
-After the tool result is returned, you can call more tools or provide your final response.
+            # Create a closure that captures the tool name for execution
+            # We need to use a factory function to properly capture the tool_name
+            def make_tool_handler(captured_tool_name, captured_kernel, captured_notebook_id, captured_registry, captured_events, captured_tool_schema):
+                async def tool_handler(args: dict) -> dict:
+                    """Execute the tool in the kernel and return results."""
+                    print(f"[SDK-MCP DEBUG] MCP tool called: {captured_tool_name}, args: {args}")
 
-{tool_defs}
-"""
+                    # MCP passes args as JSON-serialized values, need to convert back to proper types
+                    # For example, lists may come as strings like '[1, 2, 3]'
+                    converted_args = {}
+                    for key, value in args.items():
+                        if isinstance(value, str):
+                            # Try to parse JSON strings back to proper types
+                            import json
+                            try:
+                                parsed = json.loads(value)
+                                # Check if the schema expects this type
+                                if captured_tool_schema.get('properties', {}).get(key, {}).get('type') == 'array':
+                                    converted_args[key] = parsed if isinstance(parsed, list) else value
+                                elif captured_tool_schema.get('properties', {}).get(key, {}).get('type') == 'object':
+                                    converted_args[key] = parsed if isinstance(parsed, dict) else value
+                                else:
+                                    converted_args[key] = value
+                            except (json.JSONDecodeError, TypeError):
+                                converted_args[key] = value
+                        else:
+                            converted_args[key] = value
+
+                    print(f"[SDK-MCP DEBUG] Converted args: {converted_args}")
+
+                    # Record the tool call event
+                    tool_id = f"mcp_tool_{captured_tool_name}_{len(captured_events)}"
+                    captured_events.append({
+                        "type": "tool_call",
+                        "id": tool_id,
+                        "name": captured_tool_name,
+                        "input": converted_args
+                    })
+
+                    try:
+                        # Execute via our existing tool execution mechanism
+                        result = await self._execute_tool(
+                            captured_tool_name, converted_args, captured_kernel, captured_notebook_id, captured_registry
+                        )
+
+                        result_text = self._format_tool_result_for_llm(result)
+                        print(f"[SDK-MCP DEBUG] Tool result: {result_text[:200]}...")
+
+                        # Record the result event
+                        captured_events.append({
+                            "type": "tool_result",
+                            "id": tool_id,
+                            "name": captured_tool_name,
+                            "result": result
+                        })
+
+                        return {
+                            "content": [{"type": "text", "text": result_text}]
+                        }
+                    except Exception as e:
+                        error_msg = f"Error executing {captured_tool_name}: {str(e)}"
+                        print(f"[SDK-MCP DEBUG] Tool error: {error_msg}")
+
+                        captured_events.append({
+                            "type": "tool_result",
+                            "id": tool_id,
+                            "name": captured_tool_name,
+                            "result": {"status": "error", "error": error_msg}
+                        })
+
+                        return {
+                            "content": [{"type": "text", "text": error_msg}],
+                            "is_error": True
+                        }
+
+                return tool_handler
+
+            # Create the decorated tool function
+            handler = make_tool_handler(tool_name, kernel, notebook_id, registry, tool_execution_events, tool_schema)
+
+            # Apply the @sdk_tool decorator
+            decorated_tool = sdk_tool(tool_name, tool_desc, params)(handler)
+            sdk_tools.append(decorated_tool)
+
+            # Track allowed tool name (mcp__{server}__{tool} format)
+            allowed_tool_names.append(f"mcp__notebook_tools__{tool_name}")
+
+        print(f"[SDK-MCP DEBUG] Created {len(sdk_tools)} SDK tools")
+        print(f"[SDK-MCP DEBUG] Allowed tools: {allowed_tool_names}")
+
+        # Create the MCP server with all tools
+        mcp_server = None
+        if sdk_tools:
+            mcp_server = create_sdk_mcp_server(
+                name="notebook_tools",
+                version="1.0.0",
+                tools=sdk_tools
+            )
+            print(f"[SDK-MCP DEBUG] Created MCP server: notebook_tools")
 
         # Build full prompt with context
         full_prompt = self._build_prompt_with_context(prompt, context_messages)
 
-        # Debug: Print full prompt info
-        print(f"[SDK-TOOLS DEBUG] Original prompt length: {len(prompt)}")
-        print(f"[SDK-TOOLS DEBUG] Full prompt (with context) length: {len(full_prompt)}")
-        prompt_preview = full_prompt[:200].replace('\n', '\\n') + '...' if len(full_prompt) > 200 else full_prompt.replace('\n', '\\n')
-        print(f"[SDK-TOOLS DEBUG] Full prompt preview: {prompt_preview}")
-
-        # Store original prompt for use in follow-up iterations
-        original_user_prompt = prompt
-
-        # Create temp directory for SDK isolation
-        temp_cwd = tempfile.mkdtemp(prefix=f"dialeng_tools_{uuid.uuid4().hex[:8]}_")
-        logger.info(f"sdk-text-tools: Created temp cwd: {temp_cwd}")
-
-        steps = 0
-        current_prompt = full_prompt
+        print(f"[SDK-MCP DEBUG] Full prompt length: {len(full_prompt)}")
 
         try:
-            while steps < max_steps:
-                steps += 1
-                print(f"[SDK-TOOLS DEBUG] Step {steps}/{max_steps}")
-                print(f"[SDK-TOOLS DEBUG] Current prompt length: {len(current_prompt)}")
-                logger.info(f"sdk-text-tools: Step {steps}/{max_steps}")
-
-                # Build options
-                options = ClaudeAgentOptions(
-                    continue_conversation=False,
-                    resume=None,
-                    setting_sources=[],
-                    cwd=temp_cwd,
-                    model=api_model,
-                    system_prompt=augmented_system,
-                )
-
-                # Collect response
-                response_text = ""
-
-                async for message in sdk_query(prompt=current_prompt, options=options):
-                    if isinstance(message, ResultMessage):
-                        # Usage info
-                        if hasattr(message, 'usage') and message.usage:
-                            self._last_usage = message.usage
-                        continue
-
-                    if isinstance(message, AssistantMessage):
-                        if hasattr(message, 'content') and message.content:
-                            for block in message.content:
-                                if hasattr(block, 'text'):
-                                    response_text += block.text
-
-                # Debug: Print response info
-                print(f"[SDK-TOOLS DEBUG] Response text length: {len(response_text)}")
-                response_preview = response_text[:300].replace('\n', '\\n') + '...' if len(response_text) > 300 else response_text.replace('\n', '\\n')
-                print(f"[SDK-TOOLS DEBUG] Response preview: {response_preview}")
-
-                # Parse tool calls from response
-                tool_calls = self._parse_text_tool_calls(response_text)
-                print(f"[SDK-TOOLS DEBUG] Tool calls found: {len(tool_calls)}")
-                for i, tc in enumerate(tool_calls):
-                    print(f"[SDK-TOOLS DEBUG]   Tool call [{i}]: {tc.get('tool')}, args={tc.get('arguments', {})}")
-
-                if not tool_calls:
-                    # No tool calls - stream the response text
-                    print(f"[SDK-TOOLS DEBUG] No tool calls, streaming final response")
-                    logger.info("sdk-text-tools: No tool calls found, streaming response")
-                    # Remove any tool_call markers from response before sending
-                    clean_response = re.sub(r'```tool_call\n.*?\n```', '', response_text, flags=re.DOTALL)
-                    for chunk in self._chunk_text(clean_response.strip(), 50):
-                        yield {"type": "chunk", "content": chunk}
-                    break
-
-                # Execute tool calls
-                tool_results = []
-                response_before_tools = response_text.split('```tool_call')[0].strip()
-                if response_before_tools:
-                    for chunk in self._chunk_text(response_before_tools, 50):
-                        yield {"type": "chunk", "content": chunk}
-
-                for tc in tool_calls:
-                    tool_id = f"tool_{steps}_{len(tool_results)}"
-                    tool_name = tc['tool']
-                    tool_args = tc.get('arguments', {})
-
-                    print(f"[SDK-TOOLS DEBUG] Executing tool: {tool_name}")
-                    print(f"[SDK-TOOLS DEBUG]   Arguments: {tool_args}")
-
-                    yield {
-                        "type": "tool_call",
-                        "id": tool_id,
-                        "name": tool_name,
-                        "input": tool_args
+            # Create async generator for streaming input mode (required for MCP)
+            async def message_generator():
+                yield {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": full_prompt
                     }
+                }
 
-                    # Execute tool
-                    result = await self._execute_tool(
-                        tool_name, tool_args, kernel, notebook_id, registry
-                    )
+            # Build options with MCP server
+            options = ClaudeAgentOptions(
+                continue_conversation=False,
+                resume=None,
+                setting_sources=[],
+                cwd=temp_cwd,
+                model=api_model,
+                system_prompt=base_system_prompt,
+                mcp_servers={"notebook_tools": mcp_server} if mcp_server else {},
+                allowed_tools=allowed_tool_names if allowed_tool_names else [],
+                max_turns=max_steps,
+            )
 
-                    result_preview = str(result)[:200] + '...' if len(str(result)) > 200 else str(result)
-                    print(f"[SDK-TOOLS DEBUG]   Result: {result_preview}")
+            print(f"[SDK-MCP DEBUG] Starting SDK query with MCP tools...")
 
-                    yield {
-                        "type": "tool_result",
-                        "id": tool_id,
-                        "name": tool_name,
-                        "result": result
-                    }
+            # Track which tool events we've yielded to maintain proper ordering
+            # The goal is to interleave text and tool events in the order they occur
+            yielded_event_count = 0
 
-                    tool_results.append({
-                        "tool": tool_name,
-                        "result": self._format_tool_result_for_llm(result)
-                    })
+            async for message in sdk_query(prompt=message_generator(), options=options):
+                print(f"[SDK-MCP DEBUG] Message type: {type(message).__name__}")
 
-                # Build prompt for next iteration with tool results
-                # Include original question so LLM knows what to answer
-                results_text = "\n".join([
-                    f"Tool '{tr['tool']}' result:\n{tr['result']}"
-                    for tr in tool_results
-                ])
-                current_prompt = f"""The user's original request was:
-{original_user_prompt}
+                if isinstance(message, ResultMessage):
+                    # Usage info
+                    if hasattr(message, 'usage') and message.usage:
+                        self._last_usage = message.usage
+                    print(f"[SDK-MCP DEBUG] ResultMessage: subtype={getattr(message, 'subtype', 'unknown')}")
+                    continue
 
-The tool(s) returned the following results:
+                if isinstance(message, AssistantMessage):
+                    if hasattr(message, 'content') and message.content:
+                        # CRITICAL: Before processing this message, yield any pending tool events
+                        # that were recorded during the PREVIOUS message's tool execution.
+                        # This ensures that text in THIS message (which comes AFTER tools ran)
+                        # is yielded AFTER the tool events, so it appears outside LLM Steps.
+                        while yielded_event_count < len(tool_execution_events):
+                            event = tool_execution_events[yielded_event_count]
+                            print(f"[SDK-MCP DEBUG] Yielding pending tool event BEFORE text: {event.get('type')} - {event.get('name')}")
+                            yield event
+                            yielded_event_count += 1
 
-{results_text}
+                        # Now collect text from this message
+                        message_text = ""
+                        has_tool_use = False
 
-Based on these results, please provide a clear and complete answer to the user's request. Do not repeat or echo the tool results - just use them to formulate your response."""
+                        for block in message.content:
+                            if hasattr(block, 'text') and block.text:
+                                message_text += block.text
+                            elif hasattr(block, 'type') and block.type == 'tool_use':
+                                has_tool_use = True
+                                print(f"[SDK-MCP DEBUG] Tool use block: {block.name}")
+
+                        # Yield text AFTER any pending tool events have been yielded
+                        # Text in a message AFTER tool execution is the response to the tool result
+                        if message_text.strip():
+                            print(f"[SDK-MCP DEBUG] Yielding text chunk: {len(message_text)} chars")
+                            for chunk in self._chunk_text(message_text.strip(), 50):
+                                yield {"type": "chunk", "content": chunk}
+
+            # Yield any remaining tool events that weren't yielded during the loop
+            while yielded_event_count < len(tool_execution_events):
+                event = tool_execution_events[yielded_event_count]
+                print(f"[SDK-MCP DEBUG] Yielding remaining tool event: {event.get('type')}")
+                yield event
+                yielded_event_count += 1
+
+            print(f"[SDK-MCP DEBUG] Completed - yielded {yielded_event_count} tool events")
 
         except Exception as e:
-            logger.exception(f"sdk-text-tools error: {e}")
+            import traceback
+            print(f"[SDK-MCP DEBUG] Error: {e}")
+            traceback.print_exc()
+            logger.exception(f"sdk-mcp-tools error: {e}")
             yield {"type": "error", "content": f"Tool loop error: {str(e)}"}
         finally:
             # Cleanup temp directory
             try:
-                import shutil
                 shutil.rmtree(temp_cwd, ignore_errors=True)
             except Exception:
                 pass

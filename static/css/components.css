@@ -57,6 +57,28 @@
     border-radius: 4px; color: var(--text-primary); font-size: 0.8rem;
 }
 .model-select { margin-left: 4px; }
+
+/* Safe mode toggle */
+.safe-mode-toggle {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 4px 8px; background: var(--bg-cell); border: 1px solid var(--border);
+    border-radius: 4px; cursor: pointer; font-size: 0.8rem;
+    transition: all 0.15s;
+}
+.safe-mode-toggle:hover { border-color: var(--accent-blue); }
+.safe-mode-checkbox { margin: 0; cursor: pointer; }
+.safe-mode-checkbox:disabled { cursor: not-allowed; opacity: 0.5; }
+.safe-mode-label { color: var(--text-secondary); user-select: none; }
+.safe-mode-checkbox:checked + .safe-mode-label { color: var(--accent-green, #2ea043); font-weight: 500; }
+.safe-mode-toggle:has(.safe-mode-checkbox:disabled) { opacity: 0.5; cursor: not-allowed; }
+
+/* Safe mode badge in shell cells */
+.safe-mode-badge {
+    background: var(--accent-green, #2ea043); color: white;
+    font-size: 0.65rem; padding: 2px 6px; border-radius: 4px;
+    margin-left: 8px;
+}
+
 .type-select {
     padding: 3px 6px; background: var(--bg-primary); border: 1px solid var(--border);
     border-radius: 4px; color: var(--text-primary); font-size: 0.7rem;
@@ -103,6 +125,7 @@
 .cell-badge.code { background: var(--accent-green); color: #000; }
 .cell-badge.note { background: var(--accent-purple); color: #000; }
 .cell-badge.prompt { background: var(--accent-orange); color: #000; }
+.cell-badge.shell { background: var(--accent-blue); color: #fff; }
 
 .cell-meta { font-size: 0.7rem; color: var(--text-muted); display: flex; align-items: center; gap: 8px; }
 .cell-actions { display: flex; gap: 4px; }

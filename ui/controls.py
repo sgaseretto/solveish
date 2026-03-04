@@ -5,6 +5,16 @@ Button, select, and interactive control components.
 """
 
 from fasthtml.common import *
+from services.dialeng_config import get_config
+
+
+def _shell_cells_enabled() -> bool:
+    """Check if shell cells are enabled in config."""
+    try:
+        config = get_config()
+        return config.shell_cells_enabled
+    except Exception:
+        return False
 
 
 def TypeSelect(cell_id: str, current: str, nb_id: str):
@@ -12,16 +22,23 @@ def TypeSelect(cell_id: str, current: str, nb_id: str):
 
     Args:
         cell_id: The cell's unique ID
-        current: Current cell type ("code", "note", or "prompt")
+        current: Current cell type ("code", "note", "prompt", or "shell")
         nb_id: Parent notebook ID
 
     Returns:
         Select element that changes cell type on selection
     """
-    return Select(
+    shell_enabled = _shell_cells_enabled()
+    options = [
         Option("code", value="code", selected=current == "code"),
         Option("note", value="note", selected=current == "note"),
         Option("prompt", value="prompt", selected=current == "prompt"),
+    ]
+    if shell_enabled:
+        options.append(Option("shell", value="shell", selected=current == "shell"))
+
+    return Select(
+        *options,
         cls="type-select",
         name="cell_type",
         hx_post=f"/notebook/{nb_id}/cell/{cell_id}/type",
@@ -63,7 +80,8 @@ def AddButtons(pos: int, nb_id: str):
     Returns:
         Div containing add cell buttons
     """
-    return Div(
+    shell_enabled = _shell_cells_enabled()
+    buttons = [
         Button("+ Code", cls="btn btn-sm",
                hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=code",
                hx_target="#cells", hx_swap="outerHTML"),
@@ -73,5 +91,12 @@ def AddButtons(pos: int, nb_id: str):
         Button("+ Prompt", cls="btn btn-sm",
                hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=prompt",
                hx_target="#cells", hx_swap="outerHTML"),
-        cls="add-row"
-    )
+    ]
+    if shell_enabled:
+        buttons.append(
+            Button("+ Shell", cls="btn btn-sm",
+                   hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=shell",
+                   hx_target="#cells", hx_swap="outerHTML")
+        )
+
+    return Div(*buttons, cls="add-row")

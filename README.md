@@ -6,7 +6,9 @@ An open-source Solveit-like notebook built entirely with **FastHTML**. Features 
 
 ## ✨ Key Features
 
-- **Three cell types**: Code, Note, and Prompt
+- **Three+ cell types**: Code, Note, Prompt (+ optional Shell cell type via settings)
+- **Shell command execution**: Run bash commands with `%bash` magic, `!cmd`, or dedicated shell cells
+- **Safe Mode**: Optional safecmd validation to block dangerous commands in shared/LLM notebooks
 - **Real-time collaboration**: Share URL to collaborate - see cell changes, outputs, and AI responses in real-time
 - **Editable AI responses**: Both user prompts AND AI responses are fully editable
 - **Solveit-compatible**: Standard `.ipynb` format with Solveit metadata conventions
@@ -56,6 +58,7 @@ Unlike traditional notebooks (Jupyter) or chat interfaces (ChatGPT), Dialeng int
 | **Code** | Execute Python | Stdout/stderr | Source only |
 | **Note** | Documentation | Rendered markdown | Yes |
 | **Prompt** | Chat with AI | LLM response | **Both parts!** |
+| **Shell** | Execute bash | Command output | Source only |
 
 ```mermaid
 flowchart TB
@@ -151,6 +154,47 @@ Works on both Windows/Linux (Ctrl) and macOS (Cmd):
 | `Z` | Cycle input collapse level |
 | `Shift+Z` | Cycle output collapse level |
 | `Alt+Z` | Cycle both input and output collapse |
+
+## 🐚 Shell Commands
+
+Dialeng supports running bash commands in code cells:
+
+### %bash Magic and ! Prefix
+
+```python
+# Single command with %bash
+%bash ls -la
+
+# Or use ! prefix (like Jupyter)
+!git status
+
+# Use Python variables with @{var} syntax
+pattern = "TODO"
+%bash grep -r "@{pattern}" *.py
+
+# Multi-line script
+%%bash
+echo "System info:"
+uname -a
+pwd
+```
+
+### Dedicated Shell Cells (Optional)
+
+Enable via Settings > Shell Settings > "Enable Shell Cells" to show a **+ Shell** button for dedicated bash cells with syntax highlighting.
+
+### Safe Mode
+
+Enable **Safe Mode** (checkbox in toolbar) to validate commands against an allowlist:
+
+- **Allowed**: `ls`, `cat`, `grep`, `git status`, `curl`, `find` (without `-exec`)
+- **Blocked**: `rm`, `sudo`, `chmod`, `>` (output redirection)
+
+Safe Mode requires `shfmt` binary (`brew install shfmt` on macOS).
+
+See `notebooks/shell_integration.ipynb` for examples.
+
+---
 
 ## 🎨 Ace Editor
 
@@ -391,11 +435,17 @@ dialeng/
 ├── app.py                  # Main application (FastHTML)
 ├── services/               # Service layer
 │   ├── kernel/            # Python kernel (subprocess, streaming)
+│   ├── shell_service.py   # Shell execution (pshnb + safecmd)
 │   ├── llm_service.py     # LLM integration (multi-provider)
 │   └── dialoghelper_service.py  # DialogHelper shared logic
+├── extensions/             # Extension modules
+│   └── shell_cell.py      # Shell cell type and callbacks
+├── ui/                     # UI components
+│   └── cells/             # Cell renderers (code, note, prompt, shell)
 ├── notebooks/              # Saved notebooks
-│   ├── test_dialoghelper.ipynb          # Basic DialogHelper tests
-│   └── test_dialoghelper_advanced.ipynb # Advanced tests
+│   ├── pshnb_guide.ipynb  # Shell command guide
+│   ├── safecmd_guide.ipynb # Safe Mode guide
+│   └── shell_integration.ipynb # Complete shell integration guide
 ├── docs/                   # Documentation
 │   └── how_it_works/      # Technical deep dives
 ├── requirements.txt        # Dependencies

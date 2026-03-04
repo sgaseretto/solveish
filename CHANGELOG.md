@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Shell Command Execution (pshnb + safecmd)
+- **Shell cells (optional)** - New cell type for dedicated bash command execution:
+  - Disabled by default - enable via Settings > Shell Settings > "Enable Shell Cells"
+  - Bash syntax highlighting (Ace editor `sh` mode)
+  - Fresh shell session per cell (no persistent state across cells)
+  - "Shell" badge in cell header
+  - Safe mode indicator when enabled
+- **%bash magic in code cells** - pshnb extension enables `%bash`, `%%bash`, and `!command` in regular code cells (always available, even when shell cells are disabled)
+- **Variable expansion** - Use Python variables in shell commands with `@{variable}` syntax:
+  ```python
+  name = "World"
+  %bash echo "Hello, @{name}!"  # Outputs: Hello, World!
+  ```
+- **Safe Mode** - Notebook-level toggle to validate shell commands against safecmd allowlist:
+  - Enable via "Safe" checkbox in toolbar
+  - Blocks dangerous commands like `rm`, `sudo`, `chmod`
+  - Allows read-only operations: `ls`, `cat`, `grep`, `git status`, etc.
+  - Blocks output redirection (`>`, `>>`) to prevent file overwrites
+- **shfmt dependency check** - Server startup checks for `shfmt` binary:
+  - Warning message with installation instructions if missing
+  - Safe Mode toggle disabled in UI when shfmt unavailable
+  - Shell execution still works (pshnb doesn't require shfmt)
+- **SSH remote execution** - Support for running commands on remote hosts via pshnb's SSH integration
+
+#### New Files
+- `services/shell_service.py` - Shell execution service wrapping pshnb and safecmd
+- `ui/cells/shell_cell.py` - Shell cell UI component
+- `extensions/shell_cell.py` - Shell cell type registration and execution callback
+- `notebooks/pshnb_guide.ipynb` - pshnb usage guide
+- `notebooks/safecmd_guide.ipynb` - Safe Mode and security guide
+- `notebooks/shell_integration.ipynb` - Complete integration overview
+- `docs/how_it_works/11_shell_integration.md` - Technical documentation
+
+#### Dependencies
+- Added `pshnb>=0.0.4` - Persistent shell for notebooks (like Jupyter %bash magic)
+- Added `safecmd>=0.1.2` - Safe command execution with allowlist validation
+
 #### Settings GUI Sidebar
 - **Settings sidebar** - New collapsible sidebar accessible via ⚙️ button in toolbar for viewing and editing `dialeng_config.json` settings
 - **Collapsible settings groups** - Settings organized into collapsible sections using `<details>` elements:
@@ -16,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Model Defaults (Bedrock model, Claude Code model, dialog mode)
   - Tool Settings (max steps slider, confirmation toggle, builtin tools toggle)
   - Display Settings (reasoning truncation limit)
+  - Shell Settings (enable/disable dedicated shell cell type)
   - Advanced (thinking tokens, SDK direct mode, debug mode, debug log directory)
 - **Form controls** - Various input types for different setting types:
   - Dropdown selects for enumerated options (regions, models, modes)

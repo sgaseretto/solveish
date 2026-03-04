@@ -44,7 +44,7 @@ def AllCells(nb):
 
 
 def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, available_models: list,
-                 config: Optional[DialengConfig] = None):
+                 config: Optional[DialengConfig] = None, shfmt_available: bool = True):
     """Render the complete notebook page.
 
     Args:
@@ -53,6 +53,7 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
         available_dialog_modes: List of (mode_id, label) tuples
         available_models: List of (model_id, label) tuples
         config: Optional DialengConfig for settings sidebar
+        shfmt_available: Whether shfmt binary is installed (for safe mode)
 
     Returns:
         Complete page with Titled wrapper
@@ -79,13 +80,26 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                             onchange="toggleModelSelect(this.value)"
                         ),
                         Select(
-                            *[Option(label, value=model_id, selected=nb.model == model_id)
+                            *[Option(label, value=model_id, selected=getattr(nb, 'model', None) == model_id)
                               for model_id, label in available_models],
                             cls="model-select", name="model", id="model-select",
                             hx_post=f"/notebook/{nb.id}/model", hx_swap="none", title="Model",
                             style="display: none;" if nb.dialog_mode == "mock" else ""
                         ),
-                        Button("🔄 Restart", cls="btn btn-sm",
+                        # Safe mode toggle for shell commands
+                        Label(
+                            Input(type="checkbox", name="safe_mode", id="safe-mode-toggle",
+                                  checked=getattr(nb, 'safe_mode', False),
+                                  disabled=not shfmt_available,
+                                  hx_post=f"/notebook/{nb.id}/safe_mode",
+                                  hx_swap="none",
+                                  hx_vals="js:{safe_mode: event.target.checked}",
+                                  cls="safe-mode-checkbox"),
+                            Span("Safe", cls="safe-mode-label"),
+                            cls="safe-mode-toggle",
+                            title="Safe Mode: Validate shell commands against allowlist" if shfmt_available else "Safe Mode unavailable - install shfmt"
+                        ),
+                        Button("Restart", cls="btn btn-sm",
                                hx_post=f"/notebook/{nb.id}/kernel/restart", hx_target="#status", title="Restart kernel"),
                         Button("⏹ Cancel All", cls="btn btn-sm btn-cancel-all", id="cancel-all-btn",
                                onclick="cancelAllExecution()", title="Cancel running cell and clear queue (Esc Esc)",
@@ -111,7 +125,7 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                 AllCells(nb),
                 Script(f"window.NOTEBOOK_ID = '{nb.id}';"),
                 Script(f"document.addEventListener('DOMContentLoaded', () => connectWebSocket('{nb.id}'));"),
-                Div(id="js-script"),  # Container for dialoghelper script injection
+                Div(id="ephemeral"),  # Container for dialoghelper script injection (matches add_scr default)
                 cls="container"
             ),
             cls="main-layout"

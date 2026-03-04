@@ -309,6 +309,13 @@ def kernel_worker_main(input_queue: Queue, output_queue: Queue):
     except ImportError:
         pass
 
+    # Setup pshnb for %bash magic if available
+    try:
+        from pshnb import load_ipython_extension
+        load_ipython_extension(shell)
+    except Exception:
+        pass  # pshnb is optional, any failure is non-fatal
+
     # Signal ready
     output_queue.put({'type': 'status', 'status': 'ready'})
 
