@@ -7,6 +7,13 @@ tqdm>=4.66.0
 matplotlib>=3.8.0
 numpy>=1.26.0
 
+# Course study assistant notebook
+yt-dlp>=2024.1.0
+tiktoken>=0.7.0
+httpx>=0.27.0
+contextpack
+nbs2ctx
+
 # LLM integration
 # claudette for direct Anthropic API and AWS Bedrock
 claudette>=0.2.0
