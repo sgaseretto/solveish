@@ -263,6 +263,15 @@ def SettingsSidebar(config: DialengConfig):
                     open=False
                 ),
 
+                # Google Colab Settings
+                SettingsGroup(
+                    "Google Colab",
+                    SettingToggle("Enable Colab", "colab.enabled",
+                                  config.colab_enabled,
+                                  help_text="Enable Google Colab as a remote kernel. Save to reload — a 'Connect Google' button will appear in the toolbar."),
+                    open=False
+                ),
+
                 # Advanced Settings
                 SettingsGroup(
                     "Advanced",

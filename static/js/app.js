@@ -888,6 +888,48 @@ function toggleModelSelect(mode) {
     }
 }
 
+// ==================== Kernel Type Management ====================
+function handleKernelTypeChanged(kernelType) {
+    // Update kernel selector dropdown
+    const kernelSelect = document.getElementById('kernel-select');
+    if (kernelSelect) {
+        kernelSelect.value = kernelType;
+    }
+
+    // Show/hide runtime type selector
+    const runtimeSelect = document.getElementById('runtime-select');
+    if (runtimeSelect) {
+        runtimeSelect.style.display = kernelType === 'colab' ? '' : 'none';
+    }
+
+    // Update colab status dot
+    const statusDot = document.getElementById('colab-status-dot');
+    if (statusDot) {
+        statusDot.className = 'colab-status-dot ' + (kernelType === 'colab' ? 'connecting' : 'disconnected');
+    }
+
+    // Hide shell cell add buttons when using remote kernel
+    const shellAddBtns = document.querySelectorAll('.btn-add-shell');
+    shellAddBtns.forEach(btn => {
+        btn.style.display = kernelType === 'local' ? '' : 'none';
+    });
+
+    // Hide shell option in cell type dropdowns
+    const cellTypeSelects = document.querySelectorAll('.cell-type-select');
+    cellTypeSelects.forEach(select => {
+        const shellOption = select.querySelector('option[value="shell"]');
+        if (shellOption) {
+            shellOption.disabled = kernelType !== 'local';
+        }
+    });
+
+    // Update safe mode toggle visibility (only relevant for local kernel)
+    const safeModeToggle = document.querySelector('.safe-mode-toggle');
+    if (safeModeToggle) {
+        safeModeToggle.style.display = kernelType === 'local' ? '' : 'none';
+    }
+}
+
 // ==================== Settings Sidebar Toggle ====================
 function toggleSettings() {
     const sidebar = document.getElementById('settings-sidebar');
@@ -1143,7 +1185,17 @@ function connectWebSocket(notebookId) {
         } else if (data.type === 'code_display_data') {
             // Rich output (image, HTML, plot, etc.)
             console.log('[WS] code_display_data received for cell:', data.cell_id);
-            appendDisplayData(data.cell_id, data.html);
+            appendDisplayData(data.cell_id, data.html, data.display_id);
+            resetCodeStreamingTimeout(data.cell_id);
+        } else if (data.type === 'code_update_display') {
+            // Update existing display data (tqdm progress bars, widgets)
+            console.log('[WS] code_update_display received for cell:', data.cell_id, 'display_id:', data.display_id);
+            updateDisplayData(data.cell_id, data.html, data.display_id);
+            resetCodeStreamingTimeout(data.cell_id);
+        } else if (data.type === 'code_clear_output') {
+            // Clear cell output (used by widgets before updating)
+            console.log('[WS] code_clear_output received for cell:', data.cell_id);
+            clearCellOutput(data.cell_id);
             resetCodeStreamingTimeout(data.cell_id);
         } else if (data.type === 'queue_update') {
             // Queue state update from server
@@ -1173,6 +1225,10 @@ function connectWebSocket(notebookId) {
             // Server requesting confirmation for file-modifying tool
             console.log('[WS] tool_confirmation_request:', data.tool_name);
             ToolConfirmation.show(data.cell_id, data.tool_name, data.tool_input, data.confirmation_id);
+        } else if (data.type === 'kernel_type_changed') {
+            // Kernel type changed (local <-> colab)
+            console.log('[WS] kernel_type_changed:', data.kernel_type);
+            handleKernelTypeChanged(data.kernel_type);
         }
     };
 
@@ -1431,13 +1487,16 @@ function appendCodeOutput(cellId, chunk, streamName) {
     streamEl.scrollTop = streamEl.scrollHeight;
 }
 
-function appendDisplayData(cellId, html) {
+function appendDisplayData(cellId, html, displayId) {
     const outputEl = document.getElementById(`output-${cellId}`);
     if (!outputEl) return;
 
     // Create display data container
     const displayEl = document.createElement('div');
     displayEl.className = 'display-data';
+    if (displayId) {
+        displayEl.setAttribute('data-display-id', displayId);
+    }
     displayEl.innerHTML = html;
     outputEl.appendChild(displayEl);
 
@@ -1447,6 +1506,35 @@ function appendDisplayData(cellId, html) {
         newScript.textContent = script.textContent;
         script.parentNode.replaceChild(newScript, script);
     });
+}
+
+function updateDisplayData(cellId, html, displayId) {
+    const outputEl = document.getElementById(`output-${cellId}`);
+    if (!outputEl || !displayId) return;
+
+    // Find existing display element with matching display_id
+    const existing = outputEl.querySelector(`[data-display-id="${displayId}"]`);
+    if (existing) {
+        existing.innerHTML = html;
+        // Re-execute scripts
+        existing.querySelectorAll('script').forEach(script => {
+            const newScript = document.createElement('script');
+            newScript.textContent = script.textContent;
+            script.parentNode.replaceChild(newScript, script);
+        });
+    } else {
+        // Fallback: append as new display data
+        appendDisplayData(cellId, html, displayId);
+    }
+}
+
+function clearCellOutput(cellId) {
+    const outputEl = document.getElementById(`output-${cellId}`);
+    if (!outputEl) return;
+
+    outputEl.innerHTML = '';
+    outputEl.classList.remove('error');
+    streamTextContent.set(cellId, '');
 }
 
 function finishCodeStreaming(cellId, hasError) {

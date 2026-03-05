@@ -52,11 +52,28 @@
 .theme-toggle:hover { border-color: var(--accent-blue); }
 
 /* Dropdowns/Selects */
-.mode-select, .model-select {
+.mode-select, .model-select, .kernel-select {
     padding: 4px 8px; background: var(--bg-cell); border: 1px solid var(--border);
     border-radius: 4px; color: var(--text-primary); font-size: 0.8rem;
 }
 .model-select { margin-left: 4px; }
+.kernel-select { margin-left: 4px; }
+
+/* Colab status indicator */
+.colab-status-dot {
+    display: inline-block; width: 8px; height: 8px;
+    border-radius: 50%; margin-left: 4px; vertical-align: middle;
+}
+.colab-status-dot.connected { background: var(--accent-green, #2ea043); }
+.colab-status-dot.connecting { background: #f0ad4e; }
+.colab-status-dot.disconnected { background: #888; }
+
+/* Google Colab auth button */
+.btn-colab {
+    background: #4285f4; color: white; border: none;
+    margin-left: 4px; font-size: 0.75rem;
+}
+.btn-colab:hover { background: #3367d6; }
 
 /* Safe mode toggle */
 .safe-mode-toggle {
@@ -186,6 +203,10 @@
     white-space: pre-wrap;
 }
 .cell-output .mime-html { /* Allow full HTML rendering - trusted user code */ }
+/* tqdm progress bars from Jupyter/Colab */
+.cell-output .mime-html .tqdm-bar,
+.cell-output .mime-html progress { width: 100%; }
+.cell-output .display-data + .display-data { padding-top: 0; }
 .cell-output pre {
     margin: 0;
     padding: 12px;

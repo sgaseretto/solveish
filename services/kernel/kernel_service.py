@@ -3,11 +3,13 @@ Kernel service - manages kernels per notebook.
 
 Provides a high-level interface for cell execution with
 streaming output, managing one kernel per notebook.
+Supports multiple kernel backends through the BaseKernel abstraction.
 """
 from typing import Dict, AsyncIterator, Optional
 from datetime import datetime
 
 from document.cell import Cell, CellState, CellOutput
+from .base_kernel import BaseKernel
 from .subprocess_kernel import SubprocessKernel
 
 
@@ -15,9 +17,9 @@ class KernelService:
     """
     Service managing kernels per notebook.
 
-    Each notebook gets its own kernel subprocess, providing
-    isolated namespaces between notebooks while maintaining
-    state within a notebook's cells.
+    Each notebook gets its own kernel, providing isolated namespaces
+    between notebooks. Supports multiple kernel backends (local subprocess,
+    Google Colab, etc.) through the BaseKernel abstraction.
     """
 
     def __init__(self, lazy_start: bool = True):
@@ -28,24 +30,65 @@ class KernelService:
             lazy_start: If True, kernels are started on first use.
                        If False, kernels must be explicitly started.
         """
-        self._kernels: Dict[str, SubprocessKernel] = {}
+        self._kernels: Dict[str, BaseKernel] = {}
         self._lazy_start = lazy_start
+        self._colab_session_manager = None
 
-    def get_kernel(self, notebook_id: str) -> SubprocessKernel:
+    def set_colab_session_manager(self, manager):
+        """Inject the Colab session manager for remote kernel support."""
+        self._colab_session_manager = manager
+
+    def get_kernel(self, notebook_id: str, kernel_type: str = "local",
+                    runtime_type: str = "cpu") -> BaseKernel:
         """
         Get or create kernel for a notebook.
 
         Args:
             notebook_id: Unique identifier for the notebook
+            kernel_type: Type of kernel ("local" or "colab")
+            runtime_type: Colab runtime type ("cpu", "gpu", "tpu")
 
         Returns:
-            SubprocessKernel instance for the notebook
+            BaseKernel instance for the notebook
         """
         if notebook_id not in self._kernels:
-            self._kernels[notebook_id] = SubprocessKernel(
-                start_immediately=self._lazy_start
-            )
+            if kernel_type == "colab" and self._colab_session_manager:
+                self._kernels[notebook_id] = self._colab_session_manager.get_kernel(
+                    notebook_id, runtime_type=runtime_type
+                )
+            else:
+                self._kernels[notebook_id] = SubprocessKernel(
+                    start_immediately=self._lazy_start
+                )
         return self._kernels[notebook_id]
+
+    async def set_kernel_type(self, notebook_id: str, kernel_type: str,
+                              runtime_type: str = "cpu") -> BaseKernel:
+        """
+        Switch a notebook's kernel type. Shuts down existing kernel first.
+
+        Args:
+            notebook_id: Notebook identifier
+            kernel_type: New kernel type ("local" or "colab")
+            runtime_type: Colab runtime type ("cpu", "gpu", "tpu")
+
+        Returns:
+            New BaseKernel instance
+        """
+        if notebook_id in self._kernels:
+            old = self._kernels[notebook_id]
+            if hasattr(old, 'shutdown_async'):
+                await old.shutdown_async()
+            else:
+                old.shutdown()
+            del self._kernels[notebook_id]
+        return self.get_kernel(notebook_id, kernel_type, runtime_type)
+
+    def get_kernel_type(self, notebook_id: str) -> str:
+        """Get the kernel type for a notebook."""
+        if notebook_id in self._kernels:
+            return self._kernels[notebook_id].get_info().kernel_type
+        return "local"
 
     def has_kernel(self, notebook_id: str) -> bool:
         """Check if a kernel exists for the notebook."""
@@ -61,7 +104,7 @@ class KernelService:
         """Check if the notebook's kernel is busy executing."""
         if notebook_id not in self._kernels:
             return False
-        return self._kernels[notebook_id]._is_busy
+        return self._kernels[notebook_id].is_busy
 
     async def execute_cell(
         self,
@@ -139,9 +182,6 @@ class KernelService:
         """
         Interrupt the kernel for a notebook.
 
-        Sends SIGINT to the kernel subprocess, which will
-        raise KeyboardInterrupt in the running code.
-
         Args:
             notebook_id: Notebook identifier
 
@@ -152,12 +192,18 @@ class KernelService:
             return False
         return self._kernels[notebook_id].interrupt()
 
+    async def interrupt_async(self, notebook_id: str) -> bool:
+        """Async-safe interrupt for use from async route handlers."""
+        if notebook_id not in self._kernels:
+            return False
+        kernel = self._kernels[notebook_id]
+        # For Colab kernels, interrupt is sync but uses create_task internally
+        # which needs an event loop - we're already in one here
+        return kernel.interrupt()
+
     def restart(self, notebook_id: str) -> bool:
         """
-        Restart the kernel for a notebook.
-
-        This kills the subprocess and starts a new one,
-        clearing all namespace state.
+        Restart the kernel for a notebook (sync - for local kernels only).
 
         Args:
             notebook_id: Notebook identifier
@@ -166,10 +212,25 @@ class KernelService:
             True if restart succeeded
         """
         if notebook_id not in self._kernels:
-            # Create a new kernel
+            # Create a new kernel (default to local)
             self._kernels[notebook_id] = SubprocessKernel()
             return True
         return self._kernels[notebook_id].restart()
+
+    async def restart_async(self, notebook_id: str) -> bool:
+        """Async-safe restart for use from async route handlers.
+
+        Handles both local and Colab kernels correctly.
+        """
+        if notebook_id not in self._kernels:
+            self._kernels[notebook_id] = SubprocessKernel()
+            return True
+        kernel = self._kernels[notebook_id]
+        info = kernel.get_info()
+        if info.kernel_type == "colab" and hasattr(kernel, '_restart_async'):
+            await kernel._restart_async()
+            return True
+        return kernel.restart()
 
     def shutdown(self, notebook_id: str):
         """

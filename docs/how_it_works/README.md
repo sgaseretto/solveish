@@ -18,6 +18,7 @@ Read the documents in numerical order for the best understanding of the system:
 | 8 | [08_extension_system.md](08_extension_system.md) | Extension system - type dispatch, 2-way callbacks, creating extensions |
 | 10 | [10_tool_calling.md](10_tool_calling.md) | Tool calling - LLM tool usage and integration |
 | 11 | [11_shell_integration.md](11_shell_integration.md) | Shell commands - pshnb magic, shell cells, Safe Mode with safecmd |
+| 12 | [12_colab_kernel.md](12_colab_kernel.md) | Google Colab kernel - remote execution via Jupyter wire protocol over WebSocket |
 
 ## Purpose
 
@@ -44,6 +45,9 @@ These documents are intended for developers who want to:
 | Debug code execution | [04_kernel_execution.md](04_kernel_execution.md) |
 | Add streaming outputs | [04_kernel_execution.md](04_kernel_execution.md) |
 | Implement cell queue | [04_kernel_execution.md](04_kernel_execution.md) |
+| Colab kernel internals | [12_colab_kernel.md](12_colab_kernel.md) |
+| Add remote kernel backend | [12_colab_kernel.md](12_colab_kernel.md) |
+| Colab OAuth & auth | [12_colab_kernel.md](12_colab_kernel.md) |
 | Remote notebook API | [05_dialoghelper_integration.md](05_dialoghelper_integration.md) |
 | LLM integration | [06_llm_integration.md](06_llm_integration.md) |
 | Headless interaction | [05_dialoghelper_integration.md](05_dialoghelper_integration.md) |

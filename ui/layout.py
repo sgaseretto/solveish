@@ -44,7 +44,8 @@ def AllCells(nb):
 
 
 def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, available_models: list,
-                 config: Optional[DialengConfig] = None, shfmt_available: bool = True):
+                 config: Optional[DialengConfig] = None, shfmt_available: bool = True,
+                 colab_enabled: bool = False, colab_authenticated: bool = False):
     """Render the complete notebook page.
 
     Args:
@@ -54,10 +55,52 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
         available_models: List of (model_id, label) tuples
         config: Optional DialengConfig for settings sidebar
         shfmt_available: Whether shfmt binary is installed (for safe mode)
-
-    Returns:
-        Complete page with Titled wrapper
+        colab_enabled: Whether Colab integration is configured
+        colab_authenticated: Whether user is authenticated with Google
     """
+    kernel_type = getattr(nb, 'kernel_type', 'local')
+    colab_runtime_type = getattr(nb, 'colab_runtime_type', 'cpu')
+
+    # Build kernel selector (only shown if Colab is enabled)
+    kernel_selector = []
+    if colab_enabled:
+        kernel_selector = [
+            Select(
+                Option("Local Python", value="local", selected=kernel_type == "local"),
+                Option("Google Colab", value="colab", selected=kernel_type == "colab"),
+                cls="kernel-select", name="kernel_type", id="kernel-select",
+                hx_post=f"/notebook/{nb.id}/kernel/type",
+                hx_target="#status",
+                title="Kernel Runtime",
+            ),
+            # Runtime type selector (only shown when Colab is selected)
+            Select(
+                Option("CPU", value="cpu", selected=colab_runtime_type == "cpu"),
+                Option("GPU (T4)", value="gpu", selected=colab_runtime_type == "gpu"),
+                Option("TPU", value="tpu", selected=colab_runtime_type == "tpu"),
+                cls="kernel-select", name="runtime_type", id="runtime-select",
+                hx_post=f"/notebook/{nb.id}/kernel/runtime",
+                hx_target="#status",
+                title="Colab Runtime Type",
+                style="" if kernel_type == "colab" else "display: none;",
+            ),
+            Span(cls=f"colab-status-dot {'connected' if kernel_type == 'colab' and colab_authenticated else 'disconnected'}",
+                 id="colab-status-dot",
+                 title="Colab connection status"),
+        ]
+        if not colab_authenticated:
+            kernel_selector.append(
+                Button("Connect Google", cls="btn btn-sm btn-colab", id="colab-auth-btn",
+                       onclick="window.open('/auth/google', '_blank', 'width=500,height=700')",
+                       title="Sign in with Google for Colab access")
+            )
+        else:
+            kernel_selector.append(
+                Button("Disconnect", cls="btn btn-sm", id="colab-disconnect-btn",
+                       hx_post="/auth/google/logout", hx_target="#status",
+                       title="Disconnect Google account")
+            )
+
     return Titled(
         f"{nb.title} - Dialeng",
         # Main layout wrapper - flex container for outline sidebar + content
@@ -86,6 +129,7 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                             hx_post=f"/notebook/{nb.id}/model", hx_swap="none", title="Model",
                             style="display: none;" if nb.dialog_mode == "mock" else ""
                         ),
+                        *kernel_selector,
                         # Safe mode toggle for shell commands
                         Label(
                             Input(type="checkbox", name="safe_mode", id="safe-mode-toggle",

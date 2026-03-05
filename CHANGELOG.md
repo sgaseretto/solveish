@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Google Colab Kernel Integration
+- **Remote execution on Colab runtimes** — Execute notebook cells on Google's cloud infrastructure (CPU, GPU T4, TPU) via the same APIs as the Colab VS Code extension
+- **OAuth2 authentication** — Zero-config Google sign-in using the Colab VS Code extension's public OAuth client; tokens persist in `~/.dialeng/colab_tokens.json`
+- **Jupyter wire protocol over WebSocket** — Full implementation of Jupyter v5.3 protocol over Colab's multiplexed WebSocket
+- **Rich output support** — Matplotlib plots, HTML, images, tqdm progress bars, and interactive widgets render correctly from Colab kernels
+- **Kernel initialization** — Automatic `%matplotlib inline` setup on connect so plot rendering works out of the box
+- **Background keep-alive & token refresh** — Prevents runtime idle timeout (5-min pings) and refreshes proxy tokens before expiry
+- **Stale runtime cleanup** — Automatically unassigns existing runtimes on connect to avoid `TooManyAssignmentsError`
+- **Namespace introspection** — Variables/functions panel works with Colab kernels via remote code introspection
+- **Multi-kernel switching** — Users can switch between local Python and Colab per notebook through the `BaseKernel` interface
+
+### Fixed
+- **Matplotlib plots not rendering from Colab kernel** — Fixed race condition where `execute_reply` (Shell channel) could arrive before `display_data` (IOPub channel) on Colab's multiplexed WebSocket. The execution loop now waits for `status: idle` instead of `execute_reply`, ensuring all IOPub outputs (including plots) are delivered before the loop exits.
+
+### Documentation
+- Added `docs/how_it_works/12_colab_kernel.md` — Comprehensive technical documentation covering the Colab kernel architecture, authentication flow, connection lifecycle, Jupyter wire protocol details, the multiplexed WebSocket subtlety, and rich output pipeline
+
 #### Shell Command Execution (pshnb + safecmd)
 - **Shell cells (optional)** - New cell type for dedicated bash command execution:
   - Disabled by default - enable via Settings > Shell Settings > "Enable Shell Cells"

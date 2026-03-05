@@ -254,7 +254,9 @@ def load_notebook(path: Path) -> Notebook:
         dialog_mode=metadata.get('solveit_dialog_mode', 'learning'),
         model=metadata.get('dialeng_model', None),
         solveit_ver=metadata.get('solveit_ver', 2),
-        safe_mode=metadata.get('dialeng_safe_mode', False)
+        safe_mode=metadata.get('dialeng_safe_mode', False),
+        kernel_type=metadata.get('dialeng_kernel_type', 'local'),
+        colab_runtime_type=metadata.get('dialeng_colab_runtime_type', 'cpu')
     )
 
 
@@ -279,6 +281,8 @@ def save_notebook(notebook: Notebook, path: Optional[Path] = None):
             'dialeng_model': notebook.model,
             'solveit_ver': notebook.solveit_ver,
             'dialeng_safe_mode': notebook.safe_mode,
+            'dialeng_kernel_type': notebook.kernel_type,
+            'dialeng_colab_runtime_type': notebook.colab_runtime_type,
             'kernelspec': {
                 'display_name': 'Python 3',
                 'language': 'python',
