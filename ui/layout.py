@@ -44,7 +44,8 @@ def AllCells(nb):
 
 
 def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, available_models: list,
-                 config: Optional[DialengConfig] = None, shfmt_available: bool = True):
+                 config: Optional[DialengConfig] = None, shfmt_available: bool = True,
+                 colab_enabled: bool = False, colab_authenticated: bool = False):
     """Render the complete notebook page.
 
     Args:
@@ -54,10 +55,61 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
         available_models: List of (model_id, label) tuples
         config: Optional DialengConfig for settings sidebar
         shfmt_available: Whether shfmt binary is installed (for safe mode)
-
-    Returns:
-        Complete page with Titled wrapper
+        colab_enabled: Whether Colab integration is configured
+        colab_authenticated: Whether user is authenticated with Google
     """
+    kernel_type = getattr(nb, 'kernel_type', 'local')
+    colab_runtime_type = getattr(nb, 'colab_runtime_type', 'cpu')
+
+    # Build kernel selector (only shown if Colab is enabled)
+    kernel_selector = []
+    if colab_enabled:
+        # Determine visibility: runtime dropdown only when colab + authenticated
+        is_colab = kernel_type == "colab"
+        show_runtime = is_colab and colab_authenticated
+
+        # Auth button
+        if not colab_authenticated:
+            auth_btn = Button("Connect Colab", cls="btn btn-sm btn-colab", id="colab-auth-btn",
+                              onclick="window.open('/auth/google', '_blank', 'width=500,height=700')",
+                              title="Sign in with Google for Colab access")
+        else:
+            auth_btn = Button("Disconnect", cls="btn btn-sm", id="colab-disconnect-btn",
+                              hx_post="/auth/google/logout", hx_target="#colab-auth-container",
+                              **{"hx-on::after-swap": "onColabDisconnected()"},
+                              title="Disconnect Colab account")
+
+        kernel_selector = [
+            # Kernel type dropdown (always visible when colab feature is enabled)
+            Select(
+                Option("Local Python", value="local", selected=not is_colab),
+                Option("Google Colab", value="colab", selected=is_colab),
+                cls="kernel-select", name="kernel_type", id="kernel-select",
+                hx_post=f"/notebook/{nb.id}/kernel/type",
+                hx_target="#status",
+                title="Kernel Runtime",
+            ),
+            # Colab-specific controls — hidden when kernel=local
+            Div(
+                Span(cls=f"colab-status-dot {'connected' if is_colab and colab_authenticated else 'disconnected'}",
+                     id="colab-status-dot",
+                     title="Colab connection status"),
+                Select(
+                    Option("CPU", value="cpu", selected=colab_runtime_type == "cpu"),
+                    Option("GPU (T4)", value="gpu", selected=colab_runtime_type == "gpu"),
+                    Option("TPU", value="tpu", selected=colab_runtime_type == "tpu"),
+                    cls="kernel-select", name="runtime_type", id="runtime-select",
+                    hx_post=f"/notebook/{nb.id}/kernel/runtime",
+                    hx_target="#status",
+                    title="Colab Runtime Type",
+                    style="" if show_runtime else "display: none;",
+                ),
+                Div(auth_btn, id="colab-auth-container"),
+                id="colab-controls",
+                style="" if is_colab else "display: none;",
+            ),
+        ]
+
     return Titled(
         f"{nb.title} - Dialeng",
         # Main layout wrapper - flex container for outline sidebar + content
@@ -86,6 +138,7 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                             hx_post=f"/notebook/{nb.id}/model", hx_swap="none", title="Model",
                             style="display: none;" if nb.dialog_mode == "mock" else ""
                         ),
+                        *kernel_selector,
                         # Safe mode toggle for shell commands
                         Label(
                             Input(type="checkbox", name="safe_mode", id="safe-mode-toggle",

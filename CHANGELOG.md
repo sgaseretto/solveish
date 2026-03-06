@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Google Colab Kernel Integration
+- **Remote execution on Colab runtimes** — Execute notebook cells on Google's cloud infrastructure (CPU, GPU T4, TPU) via the same APIs as the Colab VS Code extension
+- **OAuth2 authentication** — Google sign-in via OAuth2 with built-in credentials (zero configuration); optionally override with `COLAB_CLIENT_ID` and `COLAB_CLIENT_SECRET` environment variables; user tokens persist in `~/.dialeng/colab_tokens.json`
+- **Credential auto-validation & auto-update** — At startup, validates OAuth credentials against Google's token endpoint. If Google rotates the built-in credentials, Dialeng automatically extracts updated ones from the published Colab VS Code extension VSIX on Open VSX. Resolution cascade: env vars → validated defaults → cached extraction → live VSIX extraction → fallback with warning
+- **Jupyter wire protocol over WebSocket** — Full implementation of Jupyter v5.3 protocol over Colab's multiplexed WebSocket
+- **Rich output support** — Matplotlib plots, HTML, images, tqdm progress bars, and interactive widgets render correctly from Colab kernels
+- **Kernel initialization** — Automatic `%matplotlib inline` setup on connect so plot rendering works out of the box
+- **Background keep-alive & token refresh** — Prevents runtime idle timeout (5-min pings) and refreshes proxy tokens before expiry
+- **Stale runtime cleanup** — Automatically unassigns existing runtimes on connect to avoid `TooManyAssignmentsError`
+- **Namespace introspection** — Variables/functions panel works with Colab kernels via remote code introspection
+- **Multi-kernel switching** — Users can switch between local Python and Colab per notebook through the `BaseKernel` interface
+
+#### Course Study Assistant Notebook
+- **YouTube transcript pipeline** — Download any YouTube video, extract subtitles, chunk transcript, and use LLM to identify chapters/sections with timestamps (parallel processing with 32 workers)
+- **9 interactive study tools** — `load_course_video`, `search_transcript`, `list_chapters`, `get_chapter`, `play_video_at`, `load_fastbook_chapter`, `load_docs`, `create_experiment`, `search_notebook`
+- **Video embedding** — Embed YouTube video at specific timestamps directly in the notebook via `play_video_at`
+- **Fastbook integration** — Load any of the 20 fastbook chapters on demand with local caching (`~/.dialeng/cache/`)
+- **Documentation loading** — Access fastcore, fasthtml, fastlite, docker, and claudette docs via `contextpack` with compatibility fix for contextkit's `read_url` → `read_link` rename
+- **LLM provider abstraction** — `llm_complete()` wrapper that uses claudette first, falls back to direct Anthropic SDK for transcript processing
+
+### Changed
+- **Colab OAuth credentials** — Built-in credentials validated at startup and auto-updated if rotated; env vars are now optional overrides; added `.env.example` template and `.env` to `.gitignore`
+- **"Connect Google" → "Connect Colab"** — Renamed the authentication button; button now auto-updates to "Disconnect" after OAuth without page refresh (via `postMessage` from popup)
+
+### Fixed
+- **Matplotlib plots not rendering from Colab kernel** — Fixed race condition where `execute_reply` (Shell channel) could arrive before `display_data` (IOPub channel) on Colab's multiplexed WebSocket. The execution loop now waits for `status: idle` instead of `execute_reply`, ensuring all IOPub outputs (including plots) are delivered before the loop exits.
+
+### Documentation
+- Added `docs/how_it_works/12_colab_kernel.md` — Comprehensive technical documentation covering the Colab kernel architecture, authentication flow, credential resolution, connection lifecycle, Jupyter wire protocol details, the multiplexed WebSocket subtlety, and rich output pipeline
+- Added `docs/guides/colab_oauth_setup.md` — Step-by-step guide for users to create their own Google OAuth2 credentials when auto-update is not possible
+
 #### Shell Command Execution (pshnb + safecmd)
 - **Shell cells (optional)** - New cell type for dedicated bash command execution:
   - Disabled by default - enable via Settings > Shell Settings > "Enable Shell Cells"

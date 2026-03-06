@@ -14,18 +14,10 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from document.cell import CellOutput
+from .base_kernel import BaseKernel, KernelInfo, KernelStatus
 
 
-@dataclass
-class KernelStatus:
-    """Current status of the kernel."""
-    is_alive: bool
-    is_busy: bool
-    execution_count: int
-    pid: Optional[int] = None
-
-
-class SubprocessKernel:
+class SubprocessKernel(BaseKernel):
     """
     Kernel running in a subprocess with streaming output.
 
@@ -88,7 +80,18 @@ class SubprocessKernel:
             is_alive=self.is_alive,
             is_busy=self._is_busy,
             execution_count=self._execution_count,
+            kernel_type="local",
             pid=self.pid
+        )
+
+    def get_info(self) -> KernelInfo:
+        """Get static kernel backend information."""
+        return KernelInfo(
+            kernel_type="local",
+            display_name="Local Python",
+            is_remote=False,
+            supports_shell_cells=True,
+            supports_interrupt=True,
         )
 
     async def execute_streaming(

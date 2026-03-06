@@ -31,6 +31,10 @@ class Notebook:
     # Shell execution settings
     safe_mode: bool = False  # Enable safecmd validation for shell commands
 
+    # Kernel settings
+    kernel_type: str = "local"  # "local" or "colab"
+    colab_runtime_type: str = "cpu"  # "cpu", "gpu", or "tpu"
+
     def get_cell(self, cell_id: str) -> Optional[Cell]:
         """Get cell by ID."""
         return next((c for c in self.cells if c.id == cell_id), None)

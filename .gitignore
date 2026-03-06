@@ -13,6 +13,9 @@ ENV/
 .sesskey
 *.key
 
+# Environment variables (never commit actual .env)
+.env
+
 # IDE settings
 .idea/
 .vscode/

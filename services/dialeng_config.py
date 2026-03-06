@@ -86,6 +86,10 @@ DEFAULT_CONFIG = {
     "shell": {
         "shell_cells_enabled": False,
         "comment": "Shell settings. shell_cells_enabled: if true, show dedicated Shell cell type in UI. If false, use %bash/%% bash magic or !command in code cells instead."
+    },
+    "colab": {
+        "enabled": False,
+        "comment": "Google Colab integration. Enable to use Colab as a remote kernel. Authentication uses the same OAuth flow as the Colab VS Code extension — just click 'Connect Google' in the toolbar."
     }
 }
 
@@ -135,6 +139,9 @@ class DialengConfig:
 
     # Shell settings
     shell_cells_enabled: bool = False  # If true, show dedicated Shell cell type in UI
+
+    # Colab settings
+    colab_enabled: bool = False
 
     # Raw config for reference
     raw_config: Dict[str, Any] = field(default_factory=dict)
@@ -253,6 +260,10 @@ def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
     # Shell settings
     shell = raw.get("shell", {})
     config.shell_cells_enabled = shell.get("shell_cells_enabled", False)
+
+    # Colab settings
+    colab = raw.get("colab", {})
+    config.colab_enabled = colab.get("enabled", False)
 
     return config
 

@@ -109,6 +109,28 @@ class ShellExecutionCallback(Callback):
         if cell_type != "shell":
             return  # Not a shell cell, let normal execution proceed
 
+        # Check if kernel is remote (e.g. Colab) — shell cells only work locally
+        try:
+            import sys
+            if 'app' in sys.modules:
+                app_module = sys.modules['app']
+                notebooks = getattr(app_module, 'notebooks', {})
+                notebook = notebooks.get(ctx.notebook_id)
+                if notebook and getattr(notebook, 'kernel_type', 'local') != 'local':
+                    ctx.skip_execution = True
+                    ctx.outputs.append(CellOutput(
+                        output_type='error',
+                        ename='UnsupportedKernel',
+                        evalue='Shell cells are not supported with remote kernels.',
+                        traceback=[
+                            'Shell cells only work with the local Python kernel.',
+                            'Use !command syntax in a code cell for remote execution.',
+                        ]
+                    ))
+                    return
+        except Exception:
+            pass
+
         # Mark that we're handling execution ourselves
         ctx.skip_execution = True
 

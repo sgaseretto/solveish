@@ -53,6 +53,9 @@ class CellOutput:
     # Display data metadata
     metadata: Optional[dict] = None
 
+    # Display ID for update_display_data (tqdm, widgets)
+    display_id: Optional[str] = None
+
 
 @dataclass
 class Cell:

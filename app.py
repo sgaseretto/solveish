@@ -357,6 +357,28 @@ class Notebook:
 
 kernel_service = KernelService()
 
+# Initialize Colab session manager if configured
+colab_session_manager = None
+colab_auth_service = None
+if DIALENG_CONFIG.colab_enabled:
+    import asyncio
+    import concurrent.futures
+    from services.colab import ColabAuthService, ColabSessionManager
+    from services.colab.colab_auth import resolve_oauth_credentials, print_colab_credential_status
+
+    # Resolve and validate OAuth credentials (validates defaults, auto-extracts from VSIX if needed)
+    # Use a thread to avoid "cannot be called from a running event loop" in uvicorn workers
+    def _resolve_creds():
+        return asyncio.run(resolve_oauth_credentials())
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+        _colab_creds = _pool.submit(_resolve_creds).result()
+
+    colab_auth_service = ColabAuthService(credentials=_colab_creds)
+    colab_session_manager = ColabSessionManager(colab_auth_service)
+    kernel_service.set_colab_session_manager(colab_session_manager)
+    print_colab_credential_status(_colab_creds)
+    print(f"   Colab: enabled (authenticated={colab_auth_service.is_authenticated})")
+
 # ExecutionQueue instances per notebook (created lazily)
 execution_queues: Dict[str, ExecutionQueue] = {}
 
@@ -414,9 +436,10 @@ async def finalize_cell_execution(nb_id: str, cell, has_error: bool):
         elif output.output_type == 'error':
             tb_text = '\n'.join(output.traceback or [])
             output_parts.append(ansi_to_html(tb_text))
-        elif output.output_type == 'display_data':
+        elif output.output_type in ('display_data', 'update_display_data'):
             html_content = render_mime_bundle(output.content, output.metadata)
             output_parts.append(html_content)
+        # clear_output and other transient types are skipped in final HTML
 
     cell.output = ''.join(output_parts)
     cell.time_run = datetime.now().strftime("%H:%M:%S")
@@ -563,15 +586,19 @@ def render_mime_bundle(data: dict, metadata: dict = None) -> str:
             style_parts.append(f'height:{height}px')
         style = ';'.join(style_parts)
         style_attr = f' style="{style}"' if style else ''
-        return f'<img class="mime-image" src="data:image/png;base64,{data["image/png"]}"{style_attr} />'
+        # Strip newlines from base64 data (Jupyter wire protocol may include them)
+        b64 = data["image/png"].replace('\n', '').replace('\r', '')
+        return f'<img class="mime-image" src="data:image/png;base64,{b64}"{style_attr} />'
 
     # JPEG image
     if 'image/jpeg' in data:
-        return f'<img class="mime-image" src="data:image/jpeg;base64,{data["image/jpeg"]}" />'
+        b64 = data["image/jpeg"].replace('\n', '').replace('\r', '')
+        return f'<img class="mime-image" src="data:image/jpeg;base64,{b64}" />'
 
     # GIF image
     if 'image/gif' in data:
-        return f'<img class="mime-image" src="data:image/gif;base64,{data["image/gif"]}" />'
+        b64 = data["image/gif"].replace('\n', '').replace('\r', '')
+        return f'<img class="mime-image" src="data:image/gif;base64,{b64}" />'
 
     # Markdown - wrap for potential rendering
     if 'text/markdown' in data:
@@ -979,10 +1006,27 @@ async def broadcast_cell_output(nb_id: str, cell_id: str, output):
         })
     elif output.output_type == 'display_data':
         html_content = render_mime_bundle(output.content, output.metadata)
-        msg = json.dumps({
+        msg_data = {
             "type": "code_display_data",
             "cell_id": cell_id,
             "html": html_content
+        }
+        if output.display_id:
+            msg_data["display_id"] = output.display_id
+        msg = json.dumps(msg_data)
+    elif output.output_type == 'update_display_data':
+        html_content = render_mime_bundle(output.content, output.metadata)
+        msg = json.dumps({
+            "type": "code_update_display",
+            "cell_id": cell_id,
+            "html": html_content,
+            "display_id": output.display_id
+        })
+    elif output.output_type == 'clear_output':
+        msg = json.dumps({
+            "type": "code_clear_output",
+            "cell_id": cell_id,
+            "wait": output.content  # bool: wait for next output before clearing
         })
     else:
         return  # Unknown type, skip
@@ -1074,7 +1118,9 @@ def get(nb_id: str):
     # Pass config for settings sidebar
     config = get_config()
     return NotebookPage(nb, nb_list, AVAILABLE_DIALOG_MODES, AVAILABLE_MODELS, config,
-                        shfmt_available=SHFMT_AVAILABLE)
+                        shfmt_available=SHFMT_AVAILABLE,
+                        colab_enabled=colab_auth_service is not None,
+                        colab_authenticated=colab_auth_service.is_authenticated if colab_auth_service else False)
 
 @rt("/notebook/{nb_id}/save")
 def post(nb_id: str):
@@ -1100,6 +1146,135 @@ def post(nb_id: str, safe_mode: str = "false"):
     # Convert string to boolean (checkbox sends "true" or "false")
     nb.safe_mode = safe_mode.lower() in ("true", "on", "1", "yes")
     return ""
+
+# ============================================================================
+# Kernel Management Routes
+# ============================================================================
+
+@rt("/notebook/{nb_id}/kernel/type")
+async def post(nb_id: str, kernel_type: str):
+    """Change the kernel type for a notebook."""
+    nb = get_notebook(nb_id)
+    if kernel_type not in ("local", "colab"):
+        return Div("Invalid kernel type", cls="status error")
+    if kernel_type == "colab" and not colab_auth_service:
+        return Div("Colab not configured. Enable it in Settings.", cls="status error")
+    if kernel_type == "colab" and not colab_auth_service.is_authenticated:
+        return Div("Not authenticated with Google. Click 'Connect Colab' first.", cls="status error")
+
+    nb.kernel_type = kernel_type
+    runtime_type = getattr(nb, 'colab_runtime_type', 'cpu')
+    await kernel_service.set_kernel_type(nb_id, kernel_type, runtime_type=runtime_type)
+
+    # Broadcast kernel type change to all clients
+    msg = json.dumps({"type": "kernel_type_changed", "kernel_type": kernel_type})
+    if nb_id in ws_connections and ws_connections[nb_id]:
+        for send in list(ws_connections[nb_id]):
+            try:
+                await send(msg)
+            except Exception:
+                pass
+
+    label = "Google Colab" if kernel_type == "colab" else "Local Python"
+    return Div(f"Kernel: {label}", cls="status success")
+
+@rt("/notebook/{nb_id}/kernel/runtime")
+async def post(nb_id: str, runtime_type: str):
+    """Change the Colab runtime type (cpu/gpu/tpu) for a notebook."""
+    nb = get_notebook(nb_id)
+    if runtime_type not in ("cpu", "gpu", "tpu"):
+        return Div("Invalid runtime type", cls="status error")
+    if getattr(nb, 'kernel_type', 'local') != 'colab':
+        return Div("Runtime type only applies to Colab kernels", cls="status error")
+
+    nb.colab_runtime_type = runtime_type
+
+    # Switch the runtime type - this creates a new kernel object
+    if colab_session_manager:
+        new_kernel = await colab_session_manager.set_runtime_type(nb_id, runtime_type)
+        # Update kernel_service to point to the new kernel (old reference is stale)
+        kernel_service._kernels[nb_id] = new_kernel
+
+    labels = {"cpu": "CPU", "gpu": "GPU (T4)", "tpu": "TPU"}
+    return Div(f"Runtime: {labels.get(runtime_type, runtime_type)}", cls="status success")
+
+@rt("/notebook/{nb_id}/kernel/status")
+def get(nb_id: str):
+    """Get current kernel status for the notebook."""
+    if kernel_service.has_kernel(nb_id):
+        kernel = kernel_service.get_kernel(nb_id)
+        status = kernel.get_status()
+        return status.__dict__
+    nb = get_notebook(nb_id)
+    return {"is_alive": False, "kernel_type": getattr(nb, 'kernel_type', 'local')}
+
+# ============================================================================
+# Google OAuth Routes (for Colab integration)
+# ============================================================================
+
+@rt("/auth/google")
+def get(request):
+    """Initiate Google OAuth2 flow for Colab access."""
+    if not colab_auth_service:
+        return Div("Colab integration not configured", cls="status error")
+    import secrets
+    state = secrets.token_urlsafe(32)
+    # Derive redirect URI from the actual request so it works on any port
+    redirect_uri = f"{request.url.scheme}://{request.url.netloc}/auth/google/callback"
+    auth_url = colab_auth_service.get_auth_url(state=state, redirect_uri=redirect_uri)
+    return RedirectResponse(auth_url)
+
+@rt("/auth/google/callback")
+async def get(request, code: str = "", error: str = "", state: str = ""):
+    """Handle Google OAuth2 callback."""
+    if error:
+        return Titled("Authentication Error", Div(f"Google auth failed: {error}", cls="status error"),
+                       A("← Back to Dialeng", href="/"))
+    if not code:
+        return Titled("Authentication Error", Div("No authorization code received", cls="status error"),
+                       A("← Back to Dialeng", href="/"))
+    if not colab_auth_service:
+        return Titled("Error", Div("Colab integration not configured", cls="status error"))
+    try:
+        # Redirect URI must match what was used in get_auth_url()
+        redirect_uri = f"{request.url.scheme}://{request.url.netloc}/auth/google/callback"
+        await colab_auth_service.handle_callback(code, redirect_uri=redirect_uri)
+        # Notify the parent window and close the popup
+        from starlette.responses import HTMLResponse
+        return HTMLResponse("""<!DOCTYPE html><html><body>
+<script>
+// Signal auth success via both postMessage and localStorage (localStorage
+// fires a 'storage' event on other same-origin tabs even when window.opener
+// is null due to cross-origin navigation through accounts.google.com)
+try { localStorage.setItem('colab-auth-event', Date.now().toString()); } catch(e) {}
+if (window.opener) { window.opener.postMessage('colab-authenticated', '*'); }
+window.close();
+</script>
+<p>Authenticated! You can close this window.</p>
+</body></html>""")
+    except Exception as e:
+        return Titled("Authentication Error",
+                       Div(f"Failed to exchange token: {e}", cls="status error"),
+                       A("← Back to Dialeng", href="/"))
+
+@rt("/auth/google/logout")
+async def post():
+    """Disconnect from Google / clear Colab tokens."""
+    if colab_auth_service:
+        colab_auth_service.logout()
+    return Div(
+        Button("Connect Colab", cls="btn btn-sm btn-colab", id="colab-auth-btn",
+               onclick="window.open('/auth/google', '_blank', 'width=500,height=700')",
+               title="Sign in with Google for Colab access"),
+        id="colab-auth-container",
+    )
+
+@rt("/auth/google/status")
+def get():
+    """Check Colab authentication status (JSON)."""
+    if not colab_auth_service:
+        return {"authenticated": False, "enabled": False}
+    return {"authenticated": colab_auth_service.is_authenticated, "enabled": True}
 
 @rt("/notebook/{nb_id}/export")
 def get(nb_id: str):
@@ -1165,20 +1340,13 @@ def get():
                     media_type="application/json")
 
 @rt("/settings")
-def post(request):
+async def post(request):
     """Update settings from the settings form.
 
     Parses form data and updates the config file.
     Returns a status message for the settings sidebar.
     """
-    from starlette.datastructures import FormData
-    import asyncio
-
-    # Get form data - need to handle this synchronously
-    async def get_form():
-        return await request.form()
-
-    form_data = asyncio.get_event_loop().run_until_complete(get_form())
+    form_data = await request.form()
 
     # Build updates dict from form data
     # Form field names use dot notation: "aws.region", "modes.default", etc.
@@ -1217,7 +1385,9 @@ def post(request):
         'tool_settings.require_confirmation',
         'tool_settings.builtin_tools_enabled',
         'llm.use_sdk_directly',
-        'llm.debug_mode'
+        'llm.debug_mode',
+        'shell.shell_cells_enabled',
+        'colab.enabled',
     ]
     for field in checkbox_fields:
         keys = field.split('.')
@@ -1236,8 +1406,36 @@ def post(request):
         update_config(updates)
 
         # Reload the global config
-        global DIALENG_CONFIG
+        global DIALENG_CONFIG, colab_auth_service, colab_session_manager
         DIALENG_CONFIG = load_config(force_reload=True)
+
+        # Lazily initialize or tear down Colab services based on new config
+        colab_changed = False
+        if DIALENG_CONFIG.colab_enabled and colab_auth_service is None:
+            from services.colab import ColabAuthService, ColabSessionManager
+            from services.colab.colab_auth import resolve_oauth_credentials
+            _creds = await resolve_oauth_credentials()
+            colab_auth_service = ColabAuthService(credentials=_creds)
+            colab_session_manager = ColabSessionManager(colab_auth_service)
+            kernel_service.set_colab_session_manager(colab_session_manager)
+            logger.info(f"Colab services initialized from settings (OAuth source: {_creds.source})")
+            colab_changed = True
+        elif not DIALENG_CONFIG.colab_enabled and colab_auth_service is not None:
+            if colab_session_manager:
+                colab_session_manager.shutdown_all()
+            colab_auth_service = None
+            colab_session_manager = None
+            kernel_service.set_colab_session_manager(None)
+            logger.info("Colab services disabled from settings")
+            colab_changed = True
+
+        # If Colab state changed, reload the page so toolbar updates
+        if colab_changed:
+            return Div(
+                "Settings saved! Reloading...",
+                Script("setTimeout(() => window.location.reload(), 500);"),
+                cls="settings-status success"
+            )
 
         return Div(
             "Settings saved successfully!",
@@ -1705,15 +1903,15 @@ async def post(nb_id: str, cid: str, source: str = None):
     )
 
 @rt("/notebook/{nb_id}/kernel/restart")
-def post(nb_id: str):
+async def post(nb_id: str):
     """Restart the kernel for a specific notebook."""
-    kernel_service.restart(nb_id)
+    await kernel_service.restart_async(nb_id)
     return Div("✓ Kernel restarted", cls="status success")
 
 @rt("/notebook/{nb_id}/kernel/interrupt")
-def post(nb_id: str):
+async def post(nb_id: str):
     """Interrupt currently running code in the notebook's kernel."""
-    success = kernel_service.interrupt(nb_id)
+    success = await kernel_service.interrupt_async(nb_id)
     if success:
         return Div("✓ Execution interrupted", cls="status success")
     else:
@@ -2033,7 +2231,7 @@ async def ws_on_disconnect(send, scope):
         print(f"[WS] Client disconnected from {nb_id}. Total: {len(ws_connections[nb_id])}", flush=True)
 
 @app.ws('/ws/{nb_id}', conn=ws_on_connect, disconn=ws_on_disconnect)
-async def ws(msg, send, nb_id: str):
+async def ws(msg: str, send, nb_id: str):
     """Handle incoming WebSocket messages."""
     # FastHTML may pass _empty or None for empty/initial messages - ignore them
     if msg is None or not isinstance(msg, str) or not msg:

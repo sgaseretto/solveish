@@ -1,0 +1,590 @@
+"""Colab kernel implementation using Jupyter wire protocol over WebSocket.
+
+Connects to a Google Colab runtime via:
+1. REST API to assign a runtime (two-step XSRF pattern)
+2. REST API to create a Jupyter session (gets kernel ID)
+3. WebSocket to runtime proxy for Jupyter wire protocol (execute, interrupt, etc.)
+4. HTTP keep-alive pings every 5 minutes
+5. Proxy token refresh before expiry
+
+Lifecycle: assign → create session → connect WS → execute → keep-alive → disconnect
+"""
+import asyncio
+import json
+import uuid
+import logging
+import time
+from typing import AsyncIterator, Optional
+
+import aiohttp
+
+from document.cell import CellOutput
+from services.kernel.base_kernel import BaseKernel, KernelInfo, KernelStatus
+from .colab_api import ColabAPIClient, ColabAssignment, JupyterSession
+
+logger = logging.getLogger(__name__)
+
+KEEP_ALIVE_INTERVAL = 300  # 5 minutes
+TOKEN_REFRESH_BUFFER = 300  # Refresh proxy token 5 min before expiry
+
+
+class ColabKernel(BaseKernel):
+    """Kernel running on Google Colab via WebSocket.
+
+    Implements BaseKernel using Jupyter wire protocol over WebSocket
+    to communicate with a remote Colab runtime.
+    """
+
+    # Close-related WebSocket message types
+    _WS_CLOSE_TYPES = frozenset({
+        aiohttp.WSMsgType.CLOSE,
+        aiohttp.WSMsgType.CLOSING,
+        aiohttp.WSMsgType.CLOSED,
+        aiohttp.WSMsgType.ERROR,
+    })
+
+    def __init__(self, api_client: ColabAPIClient, runtime_type: str = "cpu"):
+        self._api = api_client
+        self._assignment: Optional[ColabAssignment] = None
+        self._jupyter_session: Optional[JupyterSession] = None
+        self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
+        self._ws_session: Optional[aiohttp.ClientSession] = None
+        self._execution_count: int = 0
+        self._is_busy: bool = False
+        self._keep_alive_task: Optional[asyncio.Task] = None
+        self._token_refresh_task: Optional[asyncio.Task] = None
+        self._connection_state: str = "disconnected"  # disconnected|connecting|connected
+        self._current_msg_id: Optional[str] = None
+        self._token_expires_at: float = 0  # Unix timestamp when proxy token expires
+        # Consistent session ID for all Jupyter wire protocol messages
+        self._session_id: str = uuid.uuid4().hex
+        # Runtime type: "cpu", "gpu", "tpu"
+        self.runtime_type: str = runtime_type
+
+    def _make_header(self, msg_type: str, msg_id: str = None) -> dict:
+        """Build a Jupyter wire protocol message header with consistent session ID."""
+        return {
+            "msg_id": msg_id or uuid.uuid4().hex,
+            "msg_type": msg_type,
+            "username": "dialeng",
+            "session": self._session_id,
+            "date": "",
+            "version": "5.3",
+        }
+
+    @property
+    def connection_state(self) -> str:
+        return self._connection_state
+
+    async def assign_and_connect(self) -> None:
+        """Assign a Colab runtime, create session, and connect WebSocket.
+
+        Uses self.runtime_type to determine the variant (cpu/gpu/tpu).
+        """
+        self._connection_state = "connecting"
+        # Map runtime_type to Colab API variant + accelerator parameters
+        _RUNTIME_MAP = {
+            "cpu":  {"variant": "", "accelerator": ""},
+            "gpu":  {"variant": "GPU", "accelerator": "T4"},
+            "tpu":  {"variant": "TPU", "accelerator": ""},
+        }
+        rt = _RUNTIME_MAP.get(self.runtime_type, _RUNTIME_MAP["cpu"])
+        try:
+            # 0. Clean up any stale runtimes to avoid TooManyAssignmentsError
+            await self._cleanup_stale_runtimes()
+
+            # 1. Assign runtime via REST API (two-step XSRF)
+            self._assignment = await self._api.assign_kernel(
+                variant=rt["variant"], accelerator=rt["accelerator"]
+            )
+            proxy = self._assignment.proxy_info
+            self._token_expires_at = time.time() + proxy.token_expires_seconds
+
+            # 2. Create Jupyter session on the runtime
+            self._jupyter_session = await self._api.create_jupyter_session(
+                proxy.url, proxy.token
+            )
+
+            # 3. Open WebSocket to runtime
+            await self._connect_websocket()
+
+            # 4. Wait for kernel to be ready (kernel_info handshake)
+            await self._wait_for_kernel_ready()
+
+            # 5. Initialize kernel (matplotlib inline backend, etc.)
+            await self._initialize_kernel()
+
+            # 6. Start background tasks
+            self._keep_alive_task = asyncio.create_task(self._keep_alive_loop())
+            self._token_refresh_task = asyncio.create_task(self._token_refresh_loop())
+
+            self._connection_state = "connected"
+            logger.info(
+                f"Connected to Colab runtime: endpoint={self._assignment.endpoint}, "
+                f"kernel={self._jupyter_session.kernel_id}"
+            )
+        except Exception as e:
+            self._connection_state = "disconnected"
+            logger.error(f"Failed to connect to Colab: {e}")
+            raise
+
+    async def _cleanup_stale_runtimes(self) -> None:
+        """Unassign all existing runtimes to avoid TooManyAssignmentsError."""
+        try:
+            assignments = await self._api.list_assignments()
+            for assignment in assignments:
+                endpoint = assignment.get("endpoint", "")
+                if endpoint:
+                    logger.info(f"Cleaning up stale Colab runtime: {endpoint}")
+                    try:
+                        await self._api.unassign_kernel(endpoint)
+                    except Exception as e:
+                        logger.warning(f"Failed to unassign stale runtime {endpoint}: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to list Colab assignments for cleanup: {e}")
+
+    async def _connect_websocket(self) -> None:
+        """Open WebSocket connection to Colab runtime's Jupyter kernel."""
+        if not self._assignment or not self._jupyter_session:
+            raise RuntimeError("No assignment/session - call assign_and_connect() first")
+
+        proxy = self._assignment.proxy_info
+        # Convert https:// to wss://
+        ws_base = proxy.url.replace("https://", "wss://").replace("http://", "ws://").rstrip("/")
+        ws_url = (
+            f"{ws_base}/api/kernels/{self._jupyter_session.kernel_id}"
+            f"/channels?session_id={self._session_id}"
+        )
+
+        self._ws_session = aiohttp.ClientSession()
+        self._ws = await self._ws_session.ws_connect(
+            ws_url,
+            headers={
+                "X-Colab-Runtime-Proxy-Token": proxy.token,
+                "X-Colab-Client-Agent": "dialeng",
+            },
+            # No heartbeat - Colab's proxy may not handle WebSocket pings.
+            # Connection is kept alive via HTTP keep-alive pings instead.
+        )
+        logger.info(f"WebSocket connected to Colab runtime")
+
+    async def _wait_for_kernel_ready(self, timeout: float = 30.0) -> None:
+        """Send kernel_info_request and wait for reply to confirm kernel is ready.
+
+        The Colab VS Code extension does this with a 30-second timeout.
+        Without this handshake, the kernel may not be ready for execute requests.
+        """
+        if not self._ws:
+            raise RuntimeError("WebSocket not connected")
+
+        msg_id = uuid.uuid4().hex
+        kernel_info_msg = {
+            "header": self._make_header("kernel_info_request", msg_id),
+            "parent_header": {},
+            "metadata": {},
+            "content": {},
+            "channel": "shell",
+        }
+        await self._ws.send_json(kernel_info_msg)
+        logger.info("Sent kernel_info_request, waiting for kernel to be ready...")
+
+        deadline = asyncio.get_event_loop().time() + timeout
+        while True:
+            if asyncio.get_event_loop().time() > deadline:
+                logger.warning("Kernel readiness check timed out")
+                break
+
+            ws_msg = await self._ws.receive(timeout=timeout)
+
+            if ws_msg.type == aiohttp.WSMsgType.TEXT:
+                data = json.loads(ws_msg.data)
+                msg_type = data.get("header", {}).get("msg_type", "")
+                parent_id = data.get("parent_header", {}).get("msg_id")
+
+                if msg_type == "kernel_info_reply" and parent_id == msg_id:
+                    logger.info("Colab kernel is ready")
+                    return
+
+            elif ws_msg.type in self._WS_CLOSE_TYPES:
+                raise RuntimeError(f"WebSocket closed during kernel readiness check: {ws_msg}")
+
+        logger.warning("kernel_info_reply not received, proceeding anyway")
+
+    async def _initialize_kernel(self) -> None:
+        """Run setup code on kernel to configure matplotlib inline backend, etc.
+
+        Without this, plt.show() won't generate display_data messages
+        because the inline backend isn't activated by default when
+        connecting via raw WebSocket (bypassing the Colab frontend).
+        """
+        if not self._ws:
+            return
+
+        setup_code = "%matplotlib inline"
+        msg_id = uuid.uuid4().hex
+        execute_msg = {
+            "header": self._make_header("execute_request", msg_id),
+            "parent_header": {},
+            "metadata": {},
+            "content": {
+                "code": setup_code,
+                "silent": True,
+                "store_history": False,
+                "user_expressions": {},
+                "allow_stdin": False,
+                "stop_on_error": False,
+            },
+            "channel": "shell",
+        }
+        await self._ws.send_json(execute_msg)
+
+        # Wait for execute_reply (with timeout)
+        deadline = asyncio.get_event_loop().time() + 10.0
+        while True:
+            if asyncio.get_event_loop().time() > deadline:
+                logger.warning("Kernel initialization timed out")
+                break
+            ws_msg = await self._ws.receive(timeout=10.0)
+            if ws_msg.type == aiohttp.WSMsgType.TEXT:
+                data = json.loads(ws_msg.data)
+                parent_id = data.get("parent_header", {}).get("msg_id")
+                if parent_id == msg_id and data.get("header", {}).get("msg_type") == "execute_reply":
+                    logger.info("Kernel initialized (matplotlib inline backend enabled)")
+                    break
+            elif ws_msg.type in self._WS_CLOSE_TYPES:
+                logger.warning("WebSocket closed during kernel initialization")
+                break
+
+    async def execute_streaming(
+        self,
+        code: str,
+        notebook_id: str = "",
+        cell_id: str = ""
+    ) -> AsyncIterator[CellOutput]:
+        """Execute code on Colab runtime and stream outputs.
+
+        Sends an execute_request via Jupyter wire protocol and yields
+        CellOutput objects for each response message until status:idle.
+
+        We wait for status:idle (the last IOPub message) rather than
+        execute_reply (Shell) because Colab multiplexes both channels
+        onto a single WebSocket and execute_reply can arrive before
+        late IOPub messages like display_data from matplotlib plots.
+        """
+        if not self._ws or self._ws.closed or self._connection_state != "connected":
+            await self.assign_and_connect()
+
+        msg_id = uuid.uuid4().hex
+        self._current_msg_id = msg_id
+        self._is_busy = True
+
+        # Send execute_request (Jupyter wire protocol v5.3)
+        execute_msg = {
+            "header": self._make_header("execute_request", msg_id),
+            "parent_header": {},
+            "metadata": {},
+            "content": {
+                "code": code,
+                "silent": False,
+                "store_history": True,
+                "user_expressions": {},
+                "allow_stdin": False,
+                "stop_on_error": True,
+            },
+            "channel": "shell",
+        }
+        try:
+            await self._ws.send_json(execute_msg)
+        except (ConnectionResetError, ConnectionError, OSError) as e:
+            # Connection dropped, reconnect and retry
+            logger.warning(f"WebSocket send failed ({e}), reconnecting...")
+            self._connection_state = "disconnected"
+            await self.assign_and_connect()
+            msg_id = uuid.uuid4().hex
+            self._current_msg_id = msg_id
+            execute_msg["header"] = self._make_header("execute_request", msg_id)
+            await self._ws.send_json(execute_msg)
+
+        # Read messages until status:idle on IOPub.
+        #
+        # Colab multiplexes Shell and IOPub onto a single WebSocket, so
+        # execute_reply (Shell) may arrive BEFORE display_data (IOPub).
+        # Breaking on execute_reply would miss late-arriving rich outputs
+        # like matplotlib plots.  Instead we break on status:idle, which
+        # is the *last* IOPub message and guarantees all outputs have been
+        # delivered.  We also capture execution_count from execute_reply
+        # when it arrives (without breaking).
+        try:
+            while True:
+                ws_msg = await self._ws.receive()
+
+                if ws_msg.type == aiohttp.WSMsgType.TEXT:
+                    data = json.loads(ws_msg.data)
+
+                    # Only process messages for our request
+                    parent_msg_id = data.get("parent_header", {}).get("msg_id")
+                    if parent_msg_id != msg_id:
+                        continue
+
+                    msg_type = data.get("header", {}).get("msg_type", "")
+                    channel = data.get("channel", "")
+                    content = data.get("content", {})
+
+                    logger.debug(
+                        f"WS msg: type={msg_type} channel={channel} "
+                        f"content_keys={list(content.keys())[:5]}"
+                    )
+
+                    if msg_type == "stream":
+                        yield CellOutput(
+                            output_type="stream",
+                            content=content.get("text", ""),
+                            stream_name=content.get("name", "stdout"),
+                        )
+
+                    elif msg_type in ("display_data", "update_display_data"):
+                        display_id = content.get("transient", {}).get("display_id")
+                        yield CellOutput(
+                            output_type="display_data" if msg_type == "display_data" else "update_display_data",
+                            content=content.get("data", {}),
+                            metadata=content.get("metadata"),
+                            display_id=display_id,
+                        )
+
+                    elif msg_type == "execute_result":
+                        data_content = content.get("data", {})
+                        # If result contains rich MIME types (images, HTML),
+                        # treat as display_data so they get rendered properly
+                        _RICH_MIMES = {"image/png", "image/jpeg", "image/svg+xml", "text/html", "image/gif"}
+                        if _RICH_MIMES & set(data_content.keys()):
+                            yield CellOutput(
+                                output_type="display_data",
+                                content=data_content,
+                                metadata=content.get("metadata"),
+                            )
+                        else:
+                            yield CellOutput(
+                                output_type="execute_result",
+                                content=data_content.get("text/plain", ""),
+                                metadata=content.get("metadata"),
+                            )
+
+                    elif msg_type == "clear_output":
+                        yield CellOutput(
+                            output_type="clear_output",
+                            content=content.get("wait", False),
+                        )
+
+                    elif msg_type == "error":
+                        yield CellOutput(
+                            output_type="error",
+                            ename=content.get("ename", "Error"),
+                            evalue=content.get("evalue", ""),
+                            traceback=content.get("traceback", []),
+                        )
+
+                    elif msg_type == "execute_reply":
+                        # Capture execution_count but do NOT break yet —
+                        # display_data messages may still be in flight on IOPub.
+                        self._execution_count = content.get(
+                            "execution_count", self._execution_count + 1
+                        )
+
+                    elif msg_type == "status":
+                        execution_state = content.get("execution_state")
+                        self._is_busy = execution_state == "busy"
+                        if execution_state == "idle":
+                            # Last IOPub message — all outputs delivered
+                            break
+
+                elif ws_msg.type in self._WS_CLOSE_TYPES:
+                    logger.warning(f"WebSocket close frame received: type={ws_msg.type}")
+                    yield CellOutput(
+                        output_type="error",
+                        ename="ColabConnectionError",
+                        evalue="WebSocket connection to Colab lost",
+                        traceback=["Connection to Colab runtime was lost"],
+                    )
+                    self._connection_state = "disconnected"
+                    break
+                else:
+                    # Ignore BINARY, PING, PONG etc.
+                    logger.debug(f"Ignoring WS message type: {ws_msg.type}")
+        finally:
+            self._is_busy = False
+            self._current_msg_id = None
+
+    def interrupt(self) -> bool:
+        """Send interrupt_request to Colab kernel."""
+        if not self._ws or self._connection_state != "connected":
+            return False
+
+        interrupt_msg = {
+            "header": self._make_header("interrupt_request"),
+            "parent_header": {},
+            "metadata": {},
+            "content": {},
+            "channel": "control",
+        }
+        try:
+            asyncio.get_running_loop()
+            asyncio.create_task(self._ws.send_json(interrupt_msg))
+        except RuntimeError:
+            # No running loop - can't send async from sync context
+            logger.warning("Cannot send interrupt: no running event loop")
+            return False
+        return True
+
+    def restart(self) -> bool:
+        """Restart Colab runtime by disconnecting and reconnecting.
+
+        Prefer calling _restart_async() directly from async context.
+        """
+        try:
+            asyncio.get_running_loop()
+            asyncio.create_task(self._restart_async())
+        except RuntimeError:
+            logger.warning("Cannot restart Colab kernel: no running event loop")
+            return False
+        return True
+
+    async def _restart_async(self):
+        await self.shutdown_async()
+        self._session_id = uuid.uuid4().hex  # Fresh session for new connection
+        await self.assign_and_connect()
+        self._execution_count = 0
+
+    def shutdown(self):
+        """Synchronous shutdown entry point."""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(self.shutdown_async())
+            else:
+                loop.run_until_complete(self.shutdown_async())
+        except RuntimeError:
+            pass
+
+    async def shutdown_async(self):
+        """Clean shutdown: cancel tasks, close WS, delete session, unassign runtime."""
+        # Cancel background tasks
+        for task in (self._keep_alive_task, self._token_refresh_task):
+            if task:
+                task.cancel()
+        self._keep_alive_task = None
+        self._token_refresh_task = None
+
+        # Close WebSocket
+        if self._ws and not self._ws.closed:
+            await self._ws.close()
+        self._ws = None
+
+        # Close aiohttp session
+        if self._ws_session and not self._ws_session.closed:
+            await self._ws_session.close()
+        self._ws_session = None
+
+        # Delete Jupyter session on runtime
+        if self._assignment and self._jupyter_session:
+            proxy = self._assignment.proxy_info
+            await self._api.delete_jupyter_session(
+                proxy.url, proxy.token, self._jupyter_session.session_id
+            )
+        self._jupyter_session = None
+
+        # Unassign runtime
+        if self._assignment:
+            try:
+                await self._api.unassign_kernel(self._assignment.endpoint)
+            except Exception as e:
+                logger.warning(f"Failed to unassign Colab runtime: {e}")
+            self._assignment = None
+
+        self._connection_state = "disconnected"
+        logger.info("Colab kernel shutdown complete")
+
+    async def _keep_alive_loop(self):
+        """HTTP keep-alive ping every 5 minutes."""
+        while True:
+            await asyncio.sleep(KEEP_ALIVE_INTERVAL)
+            if self._assignment:
+                try:
+                    await self._api.keep_alive(self._assignment.endpoint)
+                except Exception as e:
+                    logger.warning(f"Keep-alive failed: {e}")
+
+    async def _token_refresh_loop(self):
+        """Refresh proxy token before it expires."""
+        while True:
+            # Sleep until 5 min before expiry
+            now = time.time()
+            sleep_time = max(60, self._token_expires_at - now - TOKEN_REFRESH_BUFFER)
+            await asyncio.sleep(sleep_time)
+
+            if self._assignment:
+                try:
+                    new_proxy = await self._api.refresh_proxy_token(
+                        self._assignment.endpoint
+                    )
+                    self._assignment.proxy_info.token = new_proxy.token
+                    self._token_expires_at = time.time() + new_proxy.token_expires_seconds
+                    logger.info("Colab proxy token refreshed")
+                except Exception as e:
+                    logger.warning(f"Proxy token refresh failed: {e}")
+
+    @property
+    def is_alive(self) -> bool:
+        return (
+            self._connection_state == "connected"
+            and self._ws is not None
+            and not self._ws.closed
+        )
+
+    def get_status(self) -> KernelStatus:
+        return KernelStatus(
+            is_alive=self.is_alive,
+            is_busy=self._is_busy,
+            execution_count=self._execution_count,
+            kernel_type="colab",
+            runtime_id=self._assignment.endpoint if self._assignment else None,
+            connection_state=self._connection_state,
+        )
+
+    def get_info(self) -> KernelInfo:
+        return KernelInfo(
+            kernel_type="colab",
+            display_name="Google Colab",
+            is_remote=True,
+            supports_shell_cells=False,
+            supports_interrupt=True,
+        )
+
+    async def get_namespace_info(self, timeout: float = 5.0) -> dict:
+        """Get namespace info by executing introspection code on Colab."""
+        if not self.is_alive:
+            return {'variables': [], 'functions': []}
+
+        introspection_code = '''
+import json as _json, types as _types, inspect as _inspect
+_ns_info = {"variables": [], "functions": []}
+for _name, _obj in dict(globals()).items():
+    if _name.startswith("_") or isinstance(_obj, _types.ModuleType):
+        continue
+    if callable(_obj) and not isinstance(_obj, type):
+        try: _sig = str(_inspect.signature(_obj))
+        except: _sig = "(...)"
+        _ns_info["functions"].append({"name": _name, "signature": _sig, "type": type(_obj).__name__})
+    else:
+        _preview = repr(_obj)[:50]
+        _ns_info["variables"].append({"name": _name, "type": type(_obj).__name__, "preview": _preview})
+print("__NS_INFO__" + _json.dumps(_ns_info))
+'''
+        result = {'variables': [], 'functions': []}
+        async for output in self.execute_streaming(introspection_code):
+            if output.output_type == 'stream' and '__NS_INFO__' in str(output.content):
+                try:
+                    json_str = str(output.content).split('__NS_INFO__', 1)[1].strip()
+                    result = json.loads(json_str)
+                except (json.JSONDecodeError, IndexError):
+                    pass
+        return result

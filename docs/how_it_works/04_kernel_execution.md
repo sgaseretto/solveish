@@ -440,6 +440,10 @@ kernel.input_queue.put({
 # {'type': 'complete_reply', 'matches': ['import'], 'cursor_start': 0}
 ```
 
+### Remote Execution via Google Colab
+
+For remote kernel execution on Colab runtimes (GPU/TPU), see [12_colab_kernel.md](12_colab_kernel.md). The `ColabKernel` implements the same `BaseKernel` interface using Jupyter wire protocol over WebSocket.
+
 ### Supporting Other Languages
 
 Create a new kernel worker that uses a different execution engine:
