@@ -7,14 +7,15 @@ This document explains how Dialeng connects to Google Colab runtimes to execute 
 1. [Architecture Overview](#architecture-overview)
 2. [Module Structure](#module-structure)
 3. [Authentication Flow](#authentication-flow)
-4. [Connection Lifecycle](#connection-lifecycle)
-5. [Jupyter Wire Protocol over WebSocket](#jupyter-wire-protocol-over-websocket)
-6. [Code Execution & Streaming Output](#code-execution--streaming-output)
-7. [Rich Output Handling](#rich-output-handling)
-8. [Multiplexed WebSocket Subtlety](#multiplexed-websocket-subtlety)
-9. [Background Tasks](#background-tasks)
-10. [Integration with Multi-Kernel System](#integration-with-multi-kernel-system)
-11. [How to Extend](#how-to-extend)
+4. [Credential Resolution & Validation](#credential-resolution--validation)
+5. [Connection Lifecycle](#connection-lifecycle)
+6. [Jupyter Wire Protocol over WebSocket](#jupyter-wire-protocol-over-websocket)
+7. [Code Execution & Streaming Output](#code-execution--streaming-output)
+8. [Rich Output Handling](#rich-output-handling)
+9. [Multiplexed WebSocket Subtlety](#multiplexed-websocket-subtlety)
+10. [Background Tasks](#background-tasks)
+11. [Integration with Multi-Kernel System](#integration-with-multi-kernel-system)
+12. [How to Extend](#how-to-extend)
 
 ## Architecture Overview
 
@@ -100,10 +101,10 @@ classDiagram
 
 ## Authentication Flow
 
-Dialeng uses a Google OAuth2 desktop/native client to authenticate with the Colaboratory API. Credentials must be provided via environment variables:
+Dialeng uses a Google OAuth2 desktop/native client to authenticate with the Colaboratory API. Built-in credentials from the [Colab VS Code extension](https://github.com/googlecolab/colab-vscode) are used by default — no configuration required. You can optionally override them via environment variables:
 
-- `COLAB_CLIENT_ID` — OAuth2 client ID
-- `COLAB_CLIENT_SECRET` — OAuth2 client secret
+- `COLAB_CLIENT_ID` — OAuth2 client ID (optional override)
+- `COLAB_CLIENT_SECRET` — OAuth2 client secret (optional override)
 
 ```mermaid
 sequenceDiagram
@@ -111,7 +112,7 @@ sequenceDiagram
     participant Dialeng
     participant Google as Google OAuth2
 
-    User->>Dialeng: Click "Connect Google"
+    User->>Dialeng: Click "Connect Colab"
     Dialeng->>Google: Redirect to auth URL<br/>(scope: colaboratory)
     Google->>User: Login & consent screen
     User->>Google: Approve
@@ -124,10 +125,73 @@ sequenceDiagram
 ```
 
 **Key details:**
-- `COLAB_CLIENT_ID` and `COLAB_CLIENT_SECRET` env vars are **required** for Colab integration
+- Built-in OAuth credentials work out of the box (validated and auto-updated at startup)
+- `COLAB_CLIENT_ID` and `COLAB_CLIENT_SECRET` env vars are optional overrides
 - Tokens persist in `~/.dialeng/colab_tokens.json` (file permissions `0600`)
 - Access tokens auto-refresh 5 minutes before expiry
 - Scopes: `profile`, `email`, `https://www.googleapis.com/auth/colaboratory`
+
+## Credential Resolution & Validation
+
+At startup, Dialeng validates that the OAuth client credentials are still accepted by Google. If the built-in defaults have been rotated, it automatically extracts updated credentials from the published Colab VS Code extension.
+
+### Resolution Cascade
+
+```mermaid
+flowchart TD
+    Start[Startup: Colab enabled] --> EnvCheck{COLAB_CLIENT_ID +<br/>COLAB_CLIENT_SECRET<br/>in .env?}
+
+    EnvCheck -->|Yes| UseEnv[Use env vars — skip validation]
+    EnvCheck -->|No| ValidateDefaults[Validate built-in defaults<br/>POST to Google token endpoint]
+
+    ValidateDefaults -->|"invalid_grant = valid client"| UseDefaults[Use defaults]
+    ValidateDefaults -->|"invalid_client = rotated"| CheckCache[Check ~/.dialeng/colab_oauth_client.json]
+
+    CheckCache -->|Cache hit + valid| UseCache[Use cached credentials]
+    CheckCache -->|Miss or invalid| VSIX[Download VSIX from Open VSX<br/>Extract from extension/out/extension.js]
+
+    VSIX -->|Success + valid| CacheAndUse[Cache + use extracted credentials]
+    VSIX -->|Failure| Fallback[Use defaults + warn user]
+
+    ValidateDefaults -->|Network error| UseDefaults
+```
+
+### How Validation Works
+
+A POST to `https://oauth2.googleapis.com/token` with a dummy refresh token distinguishes between valid and invalid clients:
+
+| Google Response | Meaning | Action |
+|----------------|---------|--------|
+| `"error": "invalid_grant"` | Client exists, token is bad | Credentials are valid |
+| `"error": "invalid_client"` | Client ID/secret unknown | Credentials rotated — cascade to next source |
+| Network error / timeout | Can't reach Google | Assume valid (fail-open) |
+
+### VSIX Extraction
+
+The Colab VS Code extension is published on [Open VSX](https://open-vsx.org/extension/Google/colab). A VSIX is a ZIP archive containing the bundled extension JavaScript. Dialeng:
+
+1. Fetches the latest version from the Open VSX API
+2. Downloads the VSIX archive
+3. Reads `extension/out/extension.js` from the ZIP
+4. Extracts credentials via regex (Google OAuth client IDs/secrets have distinctive formats)
+5. Validates the extracted credentials
+6. Caches them to `~/.dialeng/colab_oauth_client.json` (7-day TTL, `0600` permissions)
+
+### Implementation
+
+All credential resolution logic lives in `services/colab/colab_auth.py`:
+
+| Function | Purpose |
+|----------|---------|
+| `resolve_oauth_credentials()` | Main orchestrator — runs the cascade, returns `OAuthClientCredentials` |
+| `validate_oauth_client()` | Async POST to Google token endpoint |
+| `extract_credentials_from_vsix()` | Download + extract from Open VSX |
+| `load_cached_credentials()` / `save_cached_credentials()` | Cache management |
+| `print_colab_credential_status()` | Startup status output |
+
+### Manual Setup
+
+If auto-update fails, users can create their own OAuth credentials. See [Colab OAuth Setup Guide](../guides/colab_oauth_setup.md).
 
 ## Connection Lifecycle
 

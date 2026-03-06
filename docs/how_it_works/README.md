@@ -48,6 +48,7 @@ These documents are intended for developers who want to:
 | Colab kernel internals | [12_colab_kernel.md](12_colab_kernel.md) |
 | Add remote kernel backend | [12_colab_kernel.md](12_colab_kernel.md) |
 | Colab OAuth & auth | [12_colab_kernel.md](12_colab_kernel.md) |
+| Set up own Colab OAuth | [Colab OAuth Setup Guide](../guides/colab_oauth_setup.md) |
 | Remote notebook API | [05_dialoghelper_integration.md](05_dialoghelper_integration.md) |
 | LLM integration | [06_llm_integration.md](06_llm_integration.md) |
 | Headless interaction | [05_dialoghelper_integration.md](05_dialoghelper_integration.md) |

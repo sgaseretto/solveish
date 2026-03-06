@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Google Colab Kernel Integration
 - **Remote execution on Colab runtimes** — Execute notebook cells on Google's cloud infrastructure (CPU, GPU T4, TPU) via the same APIs as the Colab VS Code extension
-- **OAuth2 authentication** — Google sign-in via OAuth2; requires `COLAB_CLIENT_ID` and `COLAB_CLIENT_SECRET` environment variables (see `.env.example`); user tokens persist in `~/.dialeng/colab_tokens.json`
+- **OAuth2 authentication** — Google sign-in via OAuth2 with built-in credentials (zero configuration); optionally override with `COLAB_CLIENT_ID` and `COLAB_CLIENT_SECRET` environment variables; user tokens persist in `~/.dialeng/colab_tokens.json`
+- **Credential auto-validation & auto-update** — At startup, validates OAuth credentials against Google's token endpoint. If Google rotates the built-in credentials, Dialeng automatically extracts updated ones from the published Colab VS Code extension VSIX on Open VSX. Resolution cascade: env vars → validated defaults → cached extraction → live VSIX extraction → fallback with warning
 - **Jupyter wire protocol over WebSocket** — Full implementation of Jupyter v5.3 protocol over Colab's multiplexed WebSocket
 - **Rich output support** — Matplotlib plots, HTML, images, tqdm progress bars, and interactive widgets render correctly from Colab kernels
 - **Kernel initialization** — Automatic `%matplotlib inline` setup on connect so plot rendering works out of the box
@@ -29,13 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **LLM provider abstraction** — `llm_complete()` wrapper that uses claudette first, falls back to direct Anthropic SDK for transcript processing
 
 ### Changed
-- **Colab OAuth credentials** — Moved hardcoded OAuth client ID/secret to environment variables (`COLAB_CLIENT_ID`, `COLAB_CLIENT_SECRET`); added `.env.example` template and `.env` to `.gitignore`
+- **Colab OAuth credentials** — Built-in credentials validated at startup and auto-updated if rotated; env vars are now optional overrides; added `.env.example` template and `.env` to `.gitignore`
+- **"Connect Google" → "Connect Colab"** — Renamed the authentication button; button now auto-updates to "Disconnect" after OAuth without page refresh (via `postMessage` from popup)
 
 ### Fixed
 - **Matplotlib plots not rendering from Colab kernel** — Fixed race condition where `execute_reply` (Shell channel) could arrive before `display_data` (IOPub channel) on Colab's multiplexed WebSocket. The execution loop now waits for `status: idle` instead of `execute_reply`, ensuring all IOPub outputs (including plots) are delivered before the loop exits.
 
 ### Documentation
-- Added `docs/how_it_works/12_colab_kernel.md` — Comprehensive technical documentation covering the Colab kernel architecture, authentication flow, connection lifecycle, Jupyter wire protocol details, the multiplexed WebSocket subtlety, and rich output pipeline
+- Added `docs/how_it_works/12_colab_kernel.md` — Comprehensive technical documentation covering the Colab kernel architecture, authentication flow, credential resolution, connection lifecycle, Jupyter wire protocol details, the multiplexed WebSocket subtlety, and rich output pipeline
+- Added `docs/guides/colab_oauth_setup.md` — Step-by-step guide for users to create their own Google OAuth2 credentials when auto-update is not possible
 
 #### Shell Command Execution (pshnb + safecmd)
 - **Shell cells (optional)** - New cell type for dedicated bash command execution:

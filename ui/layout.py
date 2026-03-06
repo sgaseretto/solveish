@@ -64,42 +64,51 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
     # Build kernel selector (only shown if Colab is enabled)
     kernel_selector = []
     if colab_enabled:
+        # Determine visibility: runtime dropdown only when colab + authenticated
+        is_colab = kernel_type == "colab"
+        show_runtime = is_colab and colab_authenticated
+
+        # Auth button
+        if not colab_authenticated:
+            auth_btn = Button("Connect Colab", cls="btn btn-sm btn-colab", id="colab-auth-btn",
+                              onclick="window.open('/auth/google', '_blank', 'width=500,height=700')",
+                              title="Sign in with Google for Colab access")
+        else:
+            auth_btn = Button("Disconnect", cls="btn btn-sm", id="colab-disconnect-btn",
+                              hx_post="/auth/google/logout", hx_target="#colab-auth-container",
+                              **{"hx-on::after-swap": "onColabDisconnected()"},
+                              title="Disconnect Colab account")
+
         kernel_selector = [
+            # Kernel type dropdown (always visible when colab feature is enabled)
             Select(
-                Option("Local Python", value="local", selected=kernel_type == "local"),
-                Option("Google Colab", value="colab", selected=kernel_type == "colab"),
+                Option("Local Python", value="local", selected=not is_colab),
+                Option("Google Colab", value="colab", selected=is_colab),
                 cls="kernel-select", name="kernel_type", id="kernel-select",
                 hx_post=f"/notebook/{nb.id}/kernel/type",
                 hx_target="#status",
                 title="Kernel Runtime",
             ),
-            # Runtime type selector (only shown when Colab is selected)
-            Select(
-                Option("CPU", value="cpu", selected=colab_runtime_type == "cpu"),
-                Option("GPU (T4)", value="gpu", selected=colab_runtime_type == "gpu"),
-                Option("TPU", value="tpu", selected=colab_runtime_type == "tpu"),
-                cls="kernel-select", name="runtime_type", id="runtime-select",
-                hx_post=f"/notebook/{nb.id}/kernel/runtime",
-                hx_target="#status",
-                title="Colab Runtime Type",
-                style="" if kernel_type == "colab" else "display: none;",
+            # Colab-specific controls — hidden when kernel=local
+            Div(
+                Span(cls=f"colab-status-dot {'connected' if is_colab and colab_authenticated else 'disconnected'}",
+                     id="colab-status-dot",
+                     title="Colab connection status"),
+                Select(
+                    Option("CPU", value="cpu", selected=colab_runtime_type == "cpu"),
+                    Option("GPU (T4)", value="gpu", selected=colab_runtime_type == "gpu"),
+                    Option("TPU", value="tpu", selected=colab_runtime_type == "tpu"),
+                    cls="kernel-select", name="runtime_type", id="runtime-select",
+                    hx_post=f"/notebook/{nb.id}/kernel/runtime",
+                    hx_target="#status",
+                    title="Colab Runtime Type",
+                    style="" if show_runtime else "display: none;",
+                ),
+                Div(auth_btn, id="colab-auth-container"),
+                id="colab-controls",
+                style="" if is_colab else "display: none;",
             ),
-            Span(cls=f"colab-status-dot {'connected' if kernel_type == 'colab' and colab_authenticated else 'disconnected'}",
-                 id="colab-status-dot",
-                 title="Colab connection status"),
         ]
-        if not colab_authenticated:
-            kernel_selector.append(
-                Button("Connect Google", cls="btn btn-sm btn-colab", id="colab-auth-btn",
-                       onclick="window.open('/auth/google', '_blank', 'width=500,height=700')",
-                       title="Sign in with Google for Colab access")
-            )
-        else:
-            kernel_selector.append(
-                Button("Disconnect", cls="btn btn-sm", id="colab-disconnect-btn",
-                       hx_post="/auth/google/logout", hx_target="#status",
-                       title="Disconnect Google account")
-            )
 
     return Titled(
         f"{nb.title} - Dialeng",

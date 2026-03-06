@@ -361,10 +361,22 @@ kernel_service = KernelService()
 colab_session_manager = None
 colab_auth_service = None
 if DIALENG_CONFIG.colab_enabled:
+    import asyncio
+    import concurrent.futures
     from services.colab import ColabAuthService, ColabSessionManager
-    colab_auth_service = ColabAuthService()  # Uses built-in Colab OAuth credentials
+    from services.colab.colab_auth import resolve_oauth_credentials, print_colab_credential_status
+
+    # Resolve and validate OAuth credentials (validates defaults, auto-extracts from VSIX if needed)
+    # Use a thread to avoid "cannot be called from a running event loop" in uvicorn workers
+    def _resolve_creds():
+        return asyncio.run(resolve_oauth_credentials())
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+        _colab_creds = _pool.submit(_resolve_creds).result()
+
+    colab_auth_service = ColabAuthService(credentials=_colab_creds)
     colab_session_manager = ColabSessionManager(colab_auth_service)
     kernel_service.set_colab_session_manager(colab_session_manager)
+    print_colab_credential_status(_colab_creds)
     print(f"   Colab: enabled (authenticated={colab_auth_service.is_authenticated})")
 
 # ExecutionQueue instances per notebook (created lazily)
@@ -1148,7 +1160,7 @@ async def post(nb_id: str, kernel_type: str):
     if kernel_type == "colab" and not colab_auth_service:
         return Div("Colab not configured. Enable it in Settings.", cls="status error")
     if kernel_type == "colab" and not colab_auth_service.is_authenticated:
-        return Div("Not authenticated with Google. Click 'Connect Google' first.", cls="status error")
+        return Div("Not authenticated with Google. Click 'Connect Colab' first.", cls="status error")
 
     nb.kernel_type = kernel_type
     runtime_type = getattr(nb, 'colab_runtime_type', 'cpu')
@@ -1227,7 +1239,19 @@ async def get(request, code: str = "", error: str = "", state: str = ""):
         # Redirect URI must match what was used in get_auth_url()
         redirect_uri = f"{request.url.scheme}://{request.url.netloc}/auth/google/callback"
         await colab_auth_service.handle_callback(code, redirect_uri=redirect_uri)
-        return RedirectResponse("/")
+        # Notify the parent window and close the popup
+        from starlette.responses import HTMLResponse
+        return HTMLResponse("""<!DOCTYPE html><html><body>
+<script>
+// Signal auth success via both postMessage and localStorage (localStorage
+// fires a 'storage' event on other same-origin tabs even when window.opener
+// is null due to cross-origin navigation through accounts.google.com)
+try { localStorage.setItem('colab-auth-event', Date.now().toString()); } catch(e) {}
+if (window.opener) { window.opener.postMessage('colab-authenticated', '*'); }
+window.close();
+</script>
+<p>Authenticated! You can close this window.</p>
+</body></html>""")
     except Exception as e:
         return Titled("Authentication Error",
                        Div(f"Failed to exchange token: {e}", cls="status error"),
@@ -1238,7 +1262,12 @@ async def post():
     """Disconnect from Google / clear Colab tokens."""
     if colab_auth_service:
         colab_auth_service.logout()
-    return Div("Disconnected from Google", cls="status success")
+    return Div(
+        Button("Connect Colab", cls="btn btn-sm btn-colab", id="colab-auth-btn",
+               onclick="window.open('/auth/google', '_blank', 'width=500,height=700')",
+               title="Sign in with Google for Colab access"),
+        id="colab-auth-container",
+    )
 
 @rt("/auth/google/status")
 def get():
@@ -1384,10 +1413,12 @@ async def post(request):
         colab_changed = False
         if DIALENG_CONFIG.colab_enabled and colab_auth_service is None:
             from services.colab import ColabAuthService, ColabSessionManager
-            colab_auth_service = ColabAuthService()
+            from services.colab.colab_auth import resolve_oauth_credentials
+            _creds = await resolve_oauth_credentials()
+            colab_auth_service = ColabAuthService(credentials=_creds)
             colab_session_manager = ColabSessionManager(colab_auth_service)
             kernel_service.set_colab_session_manager(colab_session_manager)
-            logger.info("Colab services initialized from settings")
+            logger.info(f"Colab services initialized from settings (OAuth source: {_creds.source})")
             colab_changed = True
         elif not DIALENG_CONFIG.colab_enabled and colab_auth_service is not None:
             if colab_session_manager:
@@ -2200,7 +2231,7 @@ async def ws_on_disconnect(send, scope):
         print(f"[WS] Client disconnected from {nb_id}. Total: {len(ws_connections[nb_id])}", flush=True)
 
 @app.ws('/ws/{nb_id}', conn=ws_on_connect, disconn=ws_on_disconnect)
-async def ws(msg, send, nb_id: str):
+async def ws(msg: str, send, nb_id: str):
     """Handle incoming WebSocket messages."""
     # FastHTML may pass _empty or None for empty/initial messages - ignore them
     if msg is None or not isinstance(msg, str) or not msg:

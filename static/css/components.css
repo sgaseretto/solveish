@@ -59,6 +59,10 @@
 .model-select { margin-left: 4px; }
 .kernel-select { margin-left: 4px; }
 
+/* Colab controls group (inline with toolbar) */
+#colab-controls { display: inline-flex; gap: 6px; align-items: center; flex-shrink: 0; }
+#colab-auth-container { display: contents; }
+
 /* Colab status indicator */
 .colab-status-dot {
     display: inline-block; width: 8px; height: 8px;

@@ -888,6 +888,45 @@ function toggleModelSelect(mode) {
     }
 }
 
+// ==================== Colab Auth State Listener ====================
+function onColabAuthenticated() {
+    // Swap button to Disconnect (with after-swap hook for disconnect flow)
+    const container = document.getElementById('colab-auth-container');
+    if (container) {
+        container.innerHTML = '<button class="btn btn-sm" id="colab-disconnect-btn" '
+            + 'title="Disconnect Colab account" '
+            + 'hx-post="/auth/google/logout" hx-target="#colab-auth-container" '
+            + 'hx-on::after-swap="onColabDisconnected()">'
+            + 'Disconnect</button>';
+        htmx.process(container);
+    }
+    // Show runtime dropdown now that we're authenticated
+    const runtimeSelect = document.getElementById('runtime-select');
+    if (runtimeSelect) runtimeSelect.style.display = '';
+    // Status dot → green
+    const statusDot = document.getElementById('colab-status-dot');
+    if (statusDot) statusDot.className = 'colab-status-dot connected';
+}
+
+function onColabDisconnected() {
+    // Hide runtime dropdown (can't pick runtime without auth)
+    const runtimeSelect = document.getElementById('runtime-select');
+    if (runtimeSelect) runtimeSelect.style.display = 'none';
+    // Status dot → gray
+    const statusDot = document.getElementById('colab-status-dot');
+    if (statusDot) statusDot.className = 'colab-status-dot disconnected';
+}
+
+// Listen for postMessage from popup (works if browser preserves window.opener)
+window.addEventListener('message', function(event) {
+    if (event.data === 'colab-authenticated') onColabAuthenticated();
+});
+
+// Listen for localStorage event from popup (reliable cross-origin fallback)
+window.addEventListener('storage', function(event) {
+    if (event.key === 'colab-auth-event') onColabAuthenticated();
+});
+
 // ==================== Kernel Type Management ====================
 function handleKernelTypeChanged(kernelType) {
     // Update kernel selector dropdown
@@ -896,16 +935,31 @@ function handleKernelTypeChanged(kernelType) {
         kernelSelect.value = kernelType;
     }
 
-    // Show/hide runtime type selector
-    const runtimeSelect = document.getElementById('runtime-select');
-    if (runtimeSelect) {
-        runtimeSelect.style.display = kernelType === 'colab' ? '' : 'none';
+    // Show/hide entire Colab controls group (status dot + runtime + auth button)
+    const colabControls = document.getElementById('colab-controls');
+    if (colabControls) {
+        colabControls.style.display = kernelType === 'colab' ? '' : 'none';
     }
 
-    // Update colab status dot
-    const statusDot = document.getElementById('colab-status-dot');
-    if (statusDot) {
-        statusDot.className = 'colab-status-dot ' + (kernelType === 'colab' ? 'connecting' : 'disconnected');
+    // Runtime selector: only show if colab AND authenticated
+    const runtimeSelect = document.getElementById('runtime-select');
+    if (runtimeSelect) {
+        if (kernelType === 'colab') {
+            fetch('/auth/google/status')
+                .then(r => r.json())
+                .then(data => {
+                    runtimeSelect.style.display = data.authenticated ? '' : 'none';
+                    const statusDot = document.getElementById('colab-status-dot');
+                    if (statusDot) {
+                        statusDot.className = 'colab-status-dot ' + (data.authenticated ? 'connected' : 'disconnected');
+                    }
+                })
+                .catch(() => {
+                    runtimeSelect.style.display = 'none';
+                });
+        } else {
+            runtimeSelect.style.display = 'none';
+        }
     }
 
     // Hide shell cell add buttons when using remote kernel
