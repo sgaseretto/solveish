@@ -171,27 +171,9 @@ class Notebook:
         return nb
 ```
 
-### Cell Class (`app.py:71-85`)
+### Cell Class (`document/cell.py`)
 
-See [02_cell_types.md](02_cell_types.md) for complete Cell documentation.
-
-```python
-@dataclass
-class Cell:
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
-    cell_type: str = CellType.CODE.value
-    source: str = ""
-    output: str = ""
-    execution_count: Optional[int] = None
-    time_run: str = ""
-    skipped: bool = False
-    use_thinking: bool = False
-    collapsed: bool = False
-    input_collapse: int = 0
-    output_collapse: int = 0
-    pinned: bool = False
-    is_exported: bool = False
-```
+See [02_cell_types.md](02_cell_types.md) for complete Cell documentation. The unified `Cell` dataclass lives in `document/cell.py` and is imported by both `app.py` and the kernel execution layer.
 
 ---
 
@@ -513,7 +495,7 @@ async def post(nb_id: str, cid: str, ...):
 
 ### Adding a New Cell Field
 
-1. **Add to Cell dataclass** (`app.py:71`):
+1. **Add to Cell dataclass** (`document/cell.py`):
    ```python
    @dataclass
    class Cell:
@@ -521,20 +503,15 @@ async def post(nb_id: str, cid: str, ...):
        new_field: str = ""
    ```
 
-2. **Add serialization** (`app.py:87`):
+2. **Add serialization** in `to_jupyter_cell()` (`document/cell.py`) and `_cell_to_jupyter()` (`document/serialization.py`):
    ```python
-   def to_jupyter_cell(self):
-       # ... existing code ...
-       if self.new_field:
-           cell["metadata"]["new_field"] = self.new_field
+   if self.new_field:
+       cell["metadata"]["new_field"] = self.new_field
    ```
 
-3. **Add deserialization** (`app.py:130`):
+3. **Add deserialization** in `from_jupyter_cell()` / `_jupyter_to_cell()` (`document/serialization.py`):
    ```python
-   @classmethod
-   def from_jupyter_cell(cls, cell):
-       # ... existing code ...
-       new_field=metadata.get("new_field", "")
+   new_field=metadata.get("new_field", "")
    ```
 
 4. **Add route if needed**:

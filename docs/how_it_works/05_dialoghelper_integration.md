@@ -26,7 +26,10 @@ For headless interaction with Dialeng (e.g., a remote Jupyter notebook calling D
 **`app.py` endpoints** - HTTP API for dialoghelper library:
 - Information: `/curr_dialog_`, `/msg_idx_`, `/find_msgs_`, `/read_msg_`
 - Modification: `/add_relative_`, `/rm_msg_`, `/update_msg_`, `/add_runq_`
-- Content editing: `/msg_insert_line_`, `/msg_str_replace_`, `/msg_strs_replace_`, `/msg_replace_lines_`
+- Content editing: `/msg_insert_line_`, `/msg_str_replace_`, `/msg_strs_replace_`, `/msg_replace_lines_`, `/msg_del_lines_`, `/msg_pyrun_`
+- Clipboard: `/msg_clipboard_`, `/msg_paste_`
+- UI toggles: `/toggle_header_collapse_`, `/bookmark_`, `/toggle_comment_`
+- Dialog management: `/create_dialog_`, `/stop_kernel_`, `/rm_dialog_`
 - Utility: `/add_html_`, `/push_data_blocking_`, `/pop_data_blocking_`
 
 **`services/kernel/kernel_worker.py`** - Magic variable injection:
@@ -181,18 +184,31 @@ The `services/dialoghelper_service.py` module provides core functions used by bo
 | `cell_to_dict(cell)` | Convert cell for JSON | Endpoints |
 | `build_context_messages(notebook, cell_id)` | Build LLM context | LLM Service |
 | `cell_to_messages(cell)` | Convert to LLM format | LLM Service |
+| `format_msgs_as_xml(results, ...)` | Format search results as XML | find_msgs endpoint |
+| `format_msgs_as_json(results, ...)` | Format search results as JSON | find_msgs endpoint |
+| `clipboard_copy(notebook, nb_id, ids, cut)` | Copy/cut cells to clipboard | msg_clipboard endpoint |
+| `clipboard_paste(notebook, nb_id, ref_id, after)` | Paste cells from clipboard | msg_paste endpoint |
+| `log_change(nb_id, action, cell_id, details)` | Log cell changes for audit | update_msg, rm_msg |
 
 ### find_msgs() Parameters
 
 ```python
 find_msgs(
-    notebook,           # Notebook object
-    re_pattern="",      # Regex to match source
-    msg_type="",        # Filter by cell type
-    pinned_only=False,  # Only pinned cells
-    skipped=None,       # None=all, True=skipped, False=non-skipped
-    limit=100,          # Max results
-    before_idx=None     # Only cells before this index
+    notebook,             # Notebook object
+    re_pattern="",        # Regex/literal pattern to match source
+    msg_type="",          # Filter by cell type (code, note, prompt, raw)
+    pinned_only=False,    # Only pinned cells
+    skipped=None,         # None=all, True=skipped, False=non-skipped
+    limit=100,            # Max results
+    before_idx=None,      # Only cells before this index
+    # New parameters (dialoghelper v2)
+    use_case=False,       # Case-sensitive search
+    use_regex=True,       # Regex vs literal matching
+    only_err=False,       # Only cells with error outputs
+    only_exp=False,       # Only exported cells
+    only_chg=False,       # Only changed cells (version > 0)
+    ids="",               # Comma-separated cell IDs to filter by
+    include_output=True,  # Also search in output text
 )
 ```
 
@@ -206,30 +222,55 @@ All endpoints receive `dlg_name` parameter (the notebook ID).
 |----------|---------|------------|
 | `POST /curr_dialog_` | Get dialog info | `with_messages: bool` |
 | `POST /msg_idx_` | Get cell index | `id_: str` |
-| `POST /find_msgs_` | Search cells | `re_pattern, msg_type, limit` |
+| `POST /find_msgs_` | Search cells (XML/JSON) | `re_pattern, msg_type, limit, use_case, use_regex, only_err, only_exp, only_chg, ids, include_output, include_meta, as_xml, nums, trunc_out, trunc_in, headers_only, header_section` |
 | `POST /read_msg_` | Read cell content | `n, relative, id_, view_range, nums` |
 
 ### Modification Endpoints
 
 | Endpoint | Purpose | Parameters |
 |----------|---------|------------|
-| `POST /add_relative_` | Add new cell | `content, placement, id_, msg_type, ...` |
-| `POST /rm_msg_` | Remove cell | `msid: str` |
-| `POST /update_msg_` | Update properties | `id_, **kwargs` |
-| `POST /add_runq_` | Queue for execution | `id_, api` |
+| `POST /add_relative_` | Add new cell | `content, placement (add_after/add_before/at_start/at_end), id_, msg_type, run_mode, ...` |
+| `POST /rm_msg_` | Remove cell | `msid, log_changed` |
+| `POST /update_msg_` | Update properties | `id_, log_changed, content, msg_type, output, pinned, skipped, ...` |
+| `POST /add_runq_` | Queue for execution | `ids, api` |
 
 ### Content Editing Endpoints
 
 | Endpoint | Purpose | Parameters |
 |----------|---------|------------|
 | `POST /msg_insert_line_` | Insert line | `id_, insert_line, new_str` |
-| `POST /msg_str_replace_` | Replace string | `id_, old_str, new_str` |
+| `POST /msg_str_replace_` | Replace string | `id_, old_str, new_str, start_line, end_line, n_matches, re_filter, invert_filter` |
 | `POST /msg_strs_replace_` | Replace multiple | `id_, old_strs, new_strs` (JSON arrays) |
 | `POST /msg_replace_lines_` | Replace line range | `id_, start_line, end_line, new_content` |
+| `POST /msg_del_lines_` | Delete line range | `id_, start_line, end_line, re_filter, invert_filter` |
+| `POST /msg_pyrun_` | Execute Python against text | `id_, code` (cell source available as `text`) |
 
 > **Note:** The server endpoints use `id_` (with underscore) as the parameter name due to FastHTML conventions, but the dialoghelper library uses `id=` in its function calls and handles the mapping internally.
 
 > **Note:** Line-based functions (`msg_insert_line`, `msg_replace_lines`, `msg_del_lines`) use **1-based line indexing** in the dialoghelper library.
+
+### Clipboard Endpoints
+
+| Endpoint | Purpose | Parameters |
+|----------|---------|------------|
+| `POST /msg_clipboard_` | Copy/cut cells | `ids, id_, cmd` (copy/cut) |
+| `POST /msg_paste_` | Paste cells from clipboard | `id_, after` |
+
+### UI Toggle Endpoints
+
+| Endpoint | Purpose | Parameters |
+|----------|---------|------------|
+| `POST /toggle_header_collapse_` | Toggle header collapse | `id_` |
+| `POST /bookmark_` | Toggle bookmark (1-9) | `id_, n` |
+| `POST /toggle_comment_` | Toggle line comments | `ids, id_` |
+
+### Dialog Management Endpoints
+
+| Endpoint | Purpose | Parameters |
+|----------|---------|------------|
+| `POST /create_dialog_` | Create/load notebook | `name` |
+| `POST /stop_kernel_` | Stop execution queue | `name` |
+| `POST /rm_dialog_` | Delete notebook from memory | `name` |
 
 ### Utility Endpoints
 
@@ -866,5 +907,7 @@ Run both notebooks to verify all dialoghelper features are working correctly.
 
 ## See Also
 
+- [DialogHelper Proxy for Colab](./13_colab_dialoghelper_proxy.md) - How dialoghelper works on remote Colab kernels (stdin proxy, auto-install, monkey-patching)
+- [Google Colab Kernel](./12_colab_kernel.md) - Colab kernel architecture and Jupyter wire protocol
 - [LLM Integration](./06_llm_integration.md) - How the LLM service uses context building
 - [Cell Types](./02_cell_types.md) - Details on cell types and their properties

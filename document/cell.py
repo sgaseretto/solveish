@@ -11,6 +11,10 @@ class CellType(str, Enum):
     CODE = "code"
     NOTE = "note"
     PROMPT = "prompt"
+    RAW = "raw"
+
+    def __str__(self): return self.value
+    def __format__(self, format_spec): return str.__format__(self.value, format_spec)
 
 
 class CellState(str, Enum):
@@ -68,7 +72,7 @@ class Cell:
     - Queue position awareness
     - Version tracking for change detection
     """
-    id: str = field(default_factory=lambda: f"_{uuid.uuid4().hex[:8]}")
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     cell_type: CellType = CellType.CODE
     source: str = ""
     outputs: List[CellOutput] = field(default_factory=list)
@@ -93,6 +97,23 @@ class Cell:
     collapsed: bool = False
     input_collapse: CollapseLevel = CollapseLevel.EXPANDED
     output_collapse: CollapseLevel = CollapseLevel.EXPANDED
+    heading_collapsed: bool = False
+
+    # Bookmark (0 = no bookmark, 1-9 = numbered bookmark)
+    bookmark: int = 0
+
+    def __post_init__(self):
+        # Coerce string cell_type to CellType enum
+        if isinstance(self.cell_type, str) and not isinstance(self.cell_type, CellType):
+            try: self.cell_type = CellType(self.cell_type)
+            except ValueError: pass  # Extension types like "shell" stay as string
+        # Coerce int collapse levels to CollapseLevel enum
+        if isinstance(self.input_collapse, int) and not isinstance(self.input_collapse, CollapseLevel):
+            try: self.input_collapse = CollapseLevel(self.input_collapse)
+            except ValueError: pass
+        if isinstance(self.output_collapse, int) and not isinstance(self.output_collapse, CollapseLevel):
+            try: self.output_collapse = CollapseLevel(self.output_collapse)
+            except ValueError: pass
 
     @property
     def output(self) -> str:
@@ -116,16 +137,21 @@ class Cell:
     @output.setter
     def output(self, value: str):
         """For backwards compatibility - converts string to CellOutput."""
-        self.outputs = [CellOutput(
-            output_type='stream',
-            content=value,
-            stream_name='stdout'
-        )]
+        if not value:
+            self.outputs = []
+        else:
+            self.outputs = [CellOutput(
+                output_type='stream',
+                content=value,
+                stream_name='stdout'
+            )]
 
     def clear_outputs(self):
         """Clear all outputs and reset state for re-execution."""
         self.outputs = []
         self.state = CellState.IDLE
+        self.execution_count = None
+        self.time_run = None
 
     def update_source(self, new_source: str) -> bool:
         """
@@ -175,6 +201,8 @@ class Cell:
             'collapsed': self.collapsed,
             'input_collapse': self.input_collapse.value,
             'output_collapse': self.output_collapse.value,
+            'heading_collapsed': self.heading_collapsed,
+            'bookmark': self.bookmark,
         }
 
     @classmethod
@@ -201,7 +229,7 @@ class Cell:
                 pass
 
         return cls(
-            id=data.get('id', f"_{uuid.uuid4().hex[:8]}"),
+            id=data.get('id', uuid.uuid4().hex[:8]),
             cell_type=CellType(data.get('cell_type', 'code')),
             source=data.get('source', ''),
             outputs=outputs,
@@ -216,4 +244,131 @@ class Cell:
             collapsed=data.get('collapsed', False),
             input_collapse=CollapseLevel(data.get('input_collapse', 0)),
             output_collapse=CollapseLevel(data.get('output_collapse', 0)),
+            heading_collapsed=data.get('heading_collapsed', False),
+            bookmark=data.get('bookmark', 0),
         )
+
+    # ========================================================================
+    # Jupyter .ipynb serialization
+    # ========================================================================
+
+    def to_jupyter_cell(self) -> dict:
+        """Convert to Jupyter .ipynb cell format following Solveit conventions."""
+        from .prompt_utils import join_prompt_content
+
+        cell_type_str = str(self.cell_type)
+
+        if cell_type_str == "code":
+            cell = {
+                "cell_type": "code",
+                "id": self.id,
+                "metadata": {},
+                "source": self._to_source_lines(self.source),
+                "execution_count": self.execution_count,
+                "outputs": self._format_outputs_jupyter() if self.outputs else []
+            }
+            if self.time_run: cell["metadata"]["time_run"] = self.time_run
+            if self.skipped: cell["metadata"]["skipped"] = True
+            if self.is_exported: cell["metadata"]["is_exported"] = True
+            if self.pinned: cell["metadata"]["pinned"] = True
+            if self.input_collapse: cell["metadata"]["input_collapse"] = int(self.input_collapse)
+            if self.output_collapse: cell["metadata"]["output_collapse"] = int(self.output_collapse)
+            if self.heading_collapsed: cell["metadata"]["heading_collapsed"] = True
+            if self.bookmark: cell["metadata"]["bookmark"] = self.bookmark
+        elif cell_type_str == "note":
+            cell = {
+                "cell_type": "markdown",
+                "id": self.id,
+                "metadata": {},
+                "source": self._to_source_lines(self.source)
+            }
+            if self.collapsed: cell["metadata"]["collapsed"] = True
+            if self.pinned: cell["metadata"]["pinned"] = True
+            if self.input_collapse: cell["metadata"]["input_collapse"] = int(self.input_collapse)
+        else:  # prompt (and any other type)
+            combined = join_prompt_content(self.source, self.output)
+            cell = {
+                "cell_type": "markdown",
+                "id": self.id,
+                "metadata": {"solveit_ai": True},
+                "source": self._to_source_lines(combined)
+            }
+            if self.use_thinking: cell["metadata"]["use_thinking"] = True
+            if self.time_run: cell["metadata"]["time_run"] = self.time_run
+            if self.collapsed: cell["metadata"]["collapsed"] = True
+            if self.pinned: cell["metadata"]["pinned"] = True
+            if self.input_collapse: cell["metadata"]["input_collapse"] = int(self.input_collapse)
+            if self.output_collapse: cell["metadata"]["output_collapse"] = int(self.output_collapse)
+        return cell
+
+    @classmethod
+    def from_jupyter_cell(cls, cell: dict) -> 'Cell':
+        """Create Cell from Jupyter .ipynb cell format."""
+        from .serialization import _jupyter_to_cell
+        return _jupyter_to_cell(cell)
+
+    @staticmethod
+    def _to_source_lines(text: str) -> list:
+        """Convert source text to Jupyter source line format."""
+        if not text: return []
+        lines = text.split('\n')
+        return [line + '\n' if i < len(lines) - 1 else line for i, line in enumerate(lines)]
+
+    @staticmethod
+    def _from_source_lines(source) -> str:
+        """Convert Jupyter source lines back to text."""
+        if isinstance(source, list): return ''.join(source)
+        return source or ""
+
+    def _format_outputs_jupyter(self) -> list:
+        """Convert CellOutput list to Jupyter output format."""
+        jupyter_outputs = []
+        for out in self.outputs:
+            if out.output_type == 'stream':
+                text = str(out.content)
+                lines = text.split('\n')
+                text_lines = [line + '\n' for line in lines[:-1]]
+                if lines[-1]: text_lines.append(lines[-1])
+                jupyter_outputs.append({
+                    "output_type": "stream",
+                    "name": out.stream_name or "stdout",
+                    "text": text_lines if text_lines else [text]
+                })
+            elif out.output_type == 'execute_result':
+                jupyter_outputs.append({
+                    "output_type": "execute_result",
+                    "data": {"text/plain": [str(out.content)]},
+                    "metadata": out.metadata or {},
+                    "execution_count": self.execution_count
+                })
+            elif out.output_type == 'display_data':
+                jupyter_outputs.append({
+                    "output_type": "display_data",
+                    "data": out.content if isinstance(out.content, dict) else {"text/plain": [str(out.content)]},
+                    "metadata": out.metadata or {}
+                })
+            elif out.output_type == 'error':
+                jupyter_outputs.append({
+                    "output_type": "error",
+                    "ename": out.ename or "Error",
+                    "evalue": out.evalue or "",
+                    "traceback": out.traceback or []
+                })
+        return jupyter_outputs
+
+    @staticmethod
+    def _extract_output(outputs: list) -> str:
+        """Extract flat output string from Jupyter output list."""
+        result = []
+        for out in outputs:
+            if out.get("output_type") == "stream":
+                text = out.get("text", [])
+                result.append(''.join(text) if isinstance(text, list) else text)
+            elif out.get("output_type") == "execute_result":
+                data = out.get("data", {})
+                if "text/plain" in data:
+                    text = data["text/plain"]
+                    result.append(''.join(text) if isinstance(text, list) else text)
+            elif out.get("output_type") == "error":
+                result.append('\n'.join(out.get("traceback", [])))
+        return '\n'.join(result)

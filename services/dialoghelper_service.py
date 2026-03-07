@@ -11,11 +11,20 @@ service implements the server-side logic that dialoghelper's call_endp() calls.
 """
 import re
 import logging
+from collections import defaultdict
 from typing import List, Dict, Optional, Tuple, Any
+from xml.sax.saxutils import escape as xml_escape
 
 logger = logging.getLogger(__name__)
 
 MAX_CONTEXT_CELLS = 25
+MAX_TRUNC_LEN = 200  # Default truncation length for output/source
+
+# Per-notebook clipboard storage for copy/paste operations
+_clipboards: Dict[str, List[Dict]] = defaultdict(list)
+
+# Per-notebook change logs for log_changed support
+_change_logs: Dict[str, List[Dict]] = defaultdict(list)
 
 # ============================================================================
 # Core Cell Query Functions (reused by endpoints AND context building)
@@ -50,7 +59,15 @@ def find_msgs(
     pinned_only: bool = False,
     skipped: Optional[bool] = None,  # None=include all, True=only skipped, False=only non-skipped
     limit: int = 100,
-    before_idx: Optional[int] = None  # Only include cells before this index
+    before_idx: Optional[int] = None,  # Only include cells before this index
+    # New dialoghelper params
+    use_case: bool = False,
+    use_regex: bool = True,
+    only_err: bool = False,
+    only_exp: bool = False,
+    only_chg: bool = False,
+    ids: str = "",
+    include_output: bool = True,
 ) -> List[Tuple[int, Any]]:
     """
     Search cells by pattern, type, or properties.
@@ -62,12 +79,19 @@ def find_msgs(
 
     Args:
         notebook: Notebook object with cells list
-        re_pattern: Regex pattern to match against cell source
-        msg_type: Filter by cell type (code, note, prompt)
+        re_pattern: Regex/literal pattern to match against cell source
+        msg_type: Filter by cell type (code, note, prompt, raw)
         pinned_only: If True, only return pinned cells
         skipped: None=all, True=only skipped, False=only non-skipped
         limit: Maximum number of results
         before_idx: Only include cells before this index
+        use_case: If True, case-sensitive search
+        use_regex: If True, use regex matching; otherwise literal
+        only_err: If True, only cells with error outputs
+        only_exp: If True, only exported cells
+        only_chg: If True, only changed cells (version > 0)
+        ids: Comma-separated cell IDs to filter by
+        include_output: If True, also search in output text
 
     Returns:
         List of (index, cell) tuples matching the criteria
@@ -75,22 +99,54 @@ def find_msgs(
     results = []
     cells = notebook.cells[:before_idx] if before_idx is not None else notebook.cells
 
+    # Pre-parse ID filter
+    id_set = {s.strip() for s in ids.split(',') if s.strip()} if ids else None
+
+    # Compile search pattern
+    re_flags = 0 if use_case else re.IGNORECASE
+    compiled_pattern = None
+    if re_pattern:
+        if use_regex:
+            try:
+                compiled_pattern = re.compile(re_pattern, re_flags)
+            except re.error:
+                compiled_pattern = re.compile(re.escape(re_pattern), re_flags)
+        else:
+            compiled_pattern = re.compile(re.escape(re_pattern), re_flags)
+
     for i, c in enumerate(cells):
+        # Filter by IDs
+        if id_set and c.id not in id_set:
+            continue
         # Filter by type
         if msg_type and c.cell_type != msg_type:
             continue
-        # Filter by pattern
-        if re_pattern and not re.search(re_pattern, c.source):
-            continue
+        # Filter by pattern (search source and optionally output)
+        if compiled_pattern:
+            source_match = compiled_pattern.search(c.source)
+            output_match = include_output and c.output and compiled_pattern.search(c.output)
+            if not source_match and not output_match:
+                continue
         # Filter by pinned
-        if pinned_only and not c.pinned:
+        if pinned_only and not getattr(c, 'pinned', False):
             continue
         # Filter by skipped
-        if skipped is not None and c.skipped != skipped:
+        if skipped is not None and getattr(c, 'skipped', False) != skipped:
+            continue
+        # Filter by error
+        if only_err:
+            has_error = any(o.output_type == 'error' for o in getattr(c, 'outputs', []))
+            if not has_error:
+                continue
+        # Filter by exported
+        if only_exp and not getattr(c, 'is_exported', False):
+            continue
+        # Filter by changed
+        if only_chg and getattr(c, 'version', 0) == 0:
             continue
 
         results.append((i, c))
-        if len(results) >= limit:
+        if limit and len(results) >= limit:
             break
     return results
 
@@ -153,16 +209,19 @@ def read_msg(
         lines = content.split('\n')
         content = '\n'.join(f"{i+1}: {line}" for i, line in enumerate(lines))
 
-    # dialoghelper expects flat dict format - msg_str_replace uses read_msg()['content']
-    # dict2obj converts this so both result.content and result['content'] work
+    # dialoghelper expects flat dict format - dict2obj converts this so
+    # both result.content and result['content'] work
+    ct = getattr(cell, 'cell_type', 'code')
+    type_str = ct.value if hasattr(ct, 'value') else str(ct)
     return {
         "id": cell.id,
         "idx": idx,
-        "type": cell.cell_type,
+        "type": type_str,
+        "msg_type": type_str,
         "content": content,  # dialoghelper uses 'content', not 'source'
         "output": cell.output,
-        "pinned": cell.pinned,
-        "skipped": cell.skipped
+        "pinned": getattr(cell, 'pinned', False),
+        "skipped": getattr(cell, 'skipped', False)
     }
 
 
@@ -196,19 +255,308 @@ def cell_to_dict(cell) -> Dict:
     Returns:
         Dictionary representation of the cell
     """
+    ct = getattr(cell, 'cell_type', 'code')
+    type_str = ct.value if hasattr(ct, 'value') else str(ct)
+    ic = getattr(cell, 'input_collapse', 0)
+    oc = getattr(cell, 'output_collapse', 0)
     return {
         "id": cell.id,
-        "type": cell.cell_type,
+        "type": type_str,
+        "msg_type": type_str,
         "source": cell.source,
         "output": cell.output,
-        "pinned": cell.pinned,
-        "skipped": cell.skipped,
-        "collapsed": cell.collapsed,
-        "input_collapse": cell.input_collapse,
-        "output_collapse": cell.output_collapse,
-        "execution_count": cell.execution_count,
-        "time_run": cell.time_run
+        "pinned": getattr(cell, 'pinned', False),
+        "skipped": getattr(cell, 'skipped', False),
+        "collapsed": getattr(cell, 'collapsed', False),
+        "input_collapse": ic.value if hasattr(ic, 'value') else int(ic),
+        "output_collapse": oc.value if hasattr(oc, 'value') else int(oc),
+        "heading_collapsed": getattr(cell, 'heading_collapsed', False),
+        "bookmark": getattr(cell, 'bookmark', 0),
+        "is_exported": getattr(cell, 'is_exported', False),
+        "execution_count": getattr(cell, 'execution_count', None),
+        "time_run": getattr(cell, 'time_run', None)
     }
+
+
+# ============================================================================
+# XML Formatting for find_msgs (as_xml=True)
+# ============================================================================
+
+def _truncate(text: str, max_len: int = MAX_TRUNC_LEN) -> str:
+    """Truncate text to max_len, adding ellipsis if truncated."""
+    if not text or len(text) <= max_len:
+        return text or ""
+    return text[:max_len] + "..."
+
+
+def _add_line_nums(text: str) -> str:
+    """Add line numbers to text."""
+    if not text:
+        return ""
+    lines = text.split('\n')
+    return '\n'.join(f"{i+1}: {line}" for i, line in enumerate(lines))
+
+
+def _extract_header_section(source: str, header: str) -> str:
+    """Extract content under a specific markdown header."""
+    lines = source.split('\n')
+    in_section = False
+    section_lines = []
+    header_level = 0
+
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith('#'):
+            level = len(stripped) - len(stripped.lstrip('#'))
+            heading_text = stripped.lstrip('#').strip()
+            if not in_section and header.lower() in heading_text.lower():
+                in_section = True
+                header_level = level
+                section_lines.append(line)
+                continue
+            elif in_section and level <= header_level:
+                break
+        if in_section:
+            section_lines.append(line)
+
+    return '\n'.join(section_lines)
+
+
+def _get_headers(source: str) -> str:
+    """Extract only markdown header lines."""
+    lines = source.split('\n')
+    return '\n'.join(l for l in lines if l.lstrip().startswith('#'))
+
+
+def format_msgs_as_xml(
+    results: List[Tuple[int, Any]],
+    include_output: bool = True,
+    include_meta: bool = False,
+    nums: bool = False,
+    trunc_out: bool = True,
+    trunc_in: bool = False,
+    headers_only: bool = False,
+    header_section: str = "",
+) -> str:
+    """
+    Format find_msgs results as XML string.
+
+    Args:
+        results: List of (index, cell) tuples
+        include_output: Include output in XML
+        include_meta: Include metadata (pinned, skipped, etc.)
+        nums: Add line numbers to source
+        trunc_out: Truncate output text
+        trunc_in: Truncate source text
+        headers_only: Only include markdown headers from source
+        header_section: Extract specific header section
+
+    Returns:
+        XML string representation
+    """
+    parts = ["<messages>"]
+
+    for idx, cell in results:
+        type_str = cell.cell_type.value if hasattr(cell.cell_type, 'value') else str(cell.cell_type)
+        attrs = f'idx="{idx}" id="{xml_escape(cell.id)}" type="{xml_escape(type_str)}"'
+        if include_meta:
+            attrs += f' pinned="{getattr(cell, "pinned", False)}" skipped="{getattr(cell, "skipped", False)}"'
+            attrs += f' exported="{getattr(cell, "is_exported", False)}" bookmark="{getattr(cell, "bookmark", 0)}"'
+        parts.append(f"<msg {attrs}>")
+
+        # Source content
+        source = cell.source
+        if header_section:
+            source = _extract_header_section(source, header_section)
+        elif headers_only:
+            source = _get_headers(source)
+
+        if nums:
+            source = _add_line_nums(source)
+        if trunc_in:
+            source = _truncate(source)
+
+        parts.append(f"<source>{xml_escape(source)}</source>")
+
+        # Output
+        if include_output and cell.output:
+            output = _truncate(cell.output) if trunc_out else cell.output
+            parts.append(f"<output>{xml_escape(output)}</output>")
+
+        parts.append("</msg>")
+
+    parts.append("</messages>")
+    return '\n'.join(parts)
+
+
+def format_msgs_as_json(
+    results: List[Tuple[int, Any]],
+    include_output: bool = True,
+    include_meta: bool = False,
+    nums: bool = False,
+    trunc_out: bool = True,
+    trunc_in: bool = False,
+    headers_only: bool = False,
+    header_section: str = "",
+) -> List[Dict]:
+    """
+    Format find_msgs results as list of dicts (JSON-compatible).
+
+    Args:
+        results: List of (index, cell) tuples
+        Same params as format_msgs_as_xml
+
+    Returns:
+        List of message dicts
+    """
+    msgs = []
+    for idx, cell in results:
+        source = cell.source
+        if header_section:
+            source = _extract_header_section(source, header_section)
+        elif headers_only:
+            source = _get_headers(source)
+
+        if nums:
+            source = _add_line_nums(source)
+        if trunc_in:
+            source = _truncate(source)
+
+        type_str = cell.cell_type.value if hasattr(cell.cell_type, 'value') else str(cell.cell_type)
+        msg = {
+            "idx": idx,
+            "id": cell.id,
+            "type": type_str,
+            "msg_type": type_str,
+            "content": source,
+        }
+
+        if include_output:
+            output = cell.output or ""
+            if trunc_out:
+                output = _truncate(output)
+            msg["output"] = output
+
+        if include_meta:
+            msg["pinned"] = getattr(cell, 'pinned', False)
+            msg["skipped"] = getattr(cell, 'skipped', False)
+            msg["is_exported"] = getattr(cell, 'is_exported', False)
+            msg["bookmark"] = getattr(cell, 'bookmark', 0)
+
+        msgs.append(msg)
+
+    return msgs
+
+
+# ============================================================================
+# Clipboard Operations
+# ============================================================================
+
+def clipboard_copy(notebook, notebook_id: str, cell_ids: List[str], cut: bool = False) -> Dict:
+    """
+    Copy (or cut) cells to the clipboard.
+
+    Args:
+        notebook: Notebook object
+        notebook_id: Notebook identifier for clipboard storage
+        cell_ids: List of cell IDs to copy
+        cut: If True, also remove cells from notebook
+
+    Returns:
+        Dict with status and count
+    """
+    copied = []
+    for cid in cell_ids:
+        idx = get_msg_idx(notebook, cid)
+        if idx >= 0:
+            cell = notebook.cells[idx]
+            copied.append(cell_to_dict(cell))
+
+    _clipboards[notebook_id] = copied
+
+    if cut:
+        # Remove cells in reverse order to maintain indices
+        for cid in reversed(cell_ids):
+            idx = get_msg_idx(notebook, cid)
+            if idx >= 0:
+                notebook.cells.pop(idx)
+
+    return {"status": "ok", "count": len(copied), "cmd": "cut" if cut else "copy"}
+
+
+def clipboard_paste(notebook, notebook_id: str, ref_id: str = "", after: bool = True) -> List[str]:
+    """
+    Paste cells from clipboard into notebook.
+
+    Args:
+        notebook: Notebook object
+        notebook_id: Notebook identifier for clipboard storage
+        ref_id: Reference cell ID for insertion point
+        after: If True, paste after ref_id; otherwise before
+
+    Returns:
+        List of new cell IDs
+    """
+    from document.cell import Cell
+
+    clipboard = _clipboards.get(notebook_id, [])
+    if not clipboard:
+        return []
+
+    # Find insertion point
+    if ref_id:
+        ref_idx = get_msg_idx(notebook, ref_id)
+        if ref_idx == -1:
+            ref_idx = len(notebook.cells) - 1
+        insert_idx = ref_idx + 1 if after else ref_idx
+    else:
+        insert_idx = len(notebook.cells)
+
+    new_ids = []
+    for i, cell_data in enumerate(clipboard):
+        new_cell = Cell(
+            cell_type=cell_data.get("type", "code"),
+            source=cell_data.get("source", ""),
+            pinned=cell_data.get("pinned", False),
+            skipped=cell_data.get("skipped", False),
+            is_exported=cell_data.get("is_exported", False),
+        )
+        if cell_data.get("output"):
+            new_cell.output = cell_data["output"]
+        notebook.cells.insert(insert_idx + i, new_cell)
+        new_ids.append(new_cell.id)
+
+    return new_ids
+
+
+# ============================================================================
+# Change Logging (for log_changed support)
+# ============================================================================
+
+def log_change(notebook_id: str, action: str, cell_id: str, details: Dict = None):
+    """
+    Log a change for audit trail.
+
+    Args:
+        notebook_id: Notebook identifier
+        action: Type of change (update, delete, etc.)
+        cell_id: ID of affected cell
+        details: Additional details about the change
+    """
+    from datetime import datetime
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "action": action,
+        "cell_id": cell_id,
+        "details": details or {}
+    }
+    _change_logs[notebook_id].append(entry)
+    logger.info(f"Change logged: {action} on {cell_id} in {notebook_id}")
+
+
+def get_change_log(notebook_id: str) -> List[Dict]:
+    """Get the change log for a notebook."""
+    return _change_logs.get(notebook_id, [])
 
 
 # ============================================================================

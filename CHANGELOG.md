@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### DialogHelper v2 Compatibility Update
+- **Expanded `find_msgs` endpoint** — New search parameters: `use_case` (case-sensitive), `use_regex` (regex/literal toggle), `only_err` (error cells), `only_exp` (exported cells), `only_chg` (changed cells), `ids` (filter by IDs), `include_output`, `include_meta`, `as_xml`, `nums`, `trunc_out`, `trunc_in`, `headers_only`, `header_section`. Supports both XML and JSON response formats.
+- **New text editing endpoints** — `msg_del_lines_` (delete line range with regex filter) and `msg_pyrun_` (execute Python code against cell text)
+- **Clipboard operations** — `msg_clipboard_` (copy/cut cells) and `msg_paste_` (paste cells) with per-notebook clipboard storage
+- **UI toggle endpoints** — `toggle_header_collapse_` (toggle heading collapse), `bookmark_` (numbered bookmarks 1-9), `toggle_comment_` (toggle line comments on code)
+- **Dialog management endpoints** — `create_dialog_` (create/load notebook), `stop_kernel_` (stop execution queue), `rm_dialog_` (delete notebook from memory)
+- **RAW cell type** — New `CellType.RAW` for raw content cells
+- **Cell model fields** — Added `heading_collapsed` (persisted), `bookmark` (numbered 1-9)
+- **Change logging** — `log_changed` parameter on `update_msg_` and `rm_msg_` for audit trail
+
+#### Cell Class Unification
+- **Unified Cell class** — Merged the duplicate `Cell` from `app.py` into the single `document/cell.py` Cell, eliminating the fragile duck-typing bridge between UI and execution layers
+- **Extracted `document/prompt_utils.py`** — Prompt separator constants and split/join functions moved from `app.py` to a shared module
+
+### Changed
+
+#### Cell Class Unification
+- **`CellType` enum** — Added `__str__`/`__format__` so f-string interpolation produces `"code"` not `"CellType.CODE"`
+- **Cell `__post_init__` coercion** — Accepts both string (`"code"`) and enum (`CellType.CODE`) for `cell_type`, and both int (`1`) and enum (`CollapseLevel.SCROLLABLE`) for collapse levels
+- **Cell ID generation** — Removed underscore prefix from auto-generated IDs to match existing notebook format
+- **`output` property setter** — Empty string now clears the outputs list instead of creating an empty CellOutput
+- **`clear_outputs()`** — Now also resets `execution_count` and `time_run` (matching original app.py behavior)
+- **Removed ~150 lines** of duplicate `Cell`, `CellType`, and `CollapseLevel` definitions from `app.py`
+
+#### DialogHelper Endpoint Updates
+- **`add_relative_` placement values** — Now supports `add_after`, `add_before`, `at_start`, `at_end` (with backwards compat for `after`/`before`). Added `run_mode` param alongside existing `run`.
+- **`msg_str_replace_` enhanced** — New parameters: `start_line`, `end_line` (line range restriction), `n_matches` (replacement count), `re_filter`, `invert_filter` (regex line filtering)
+- **`rm_msg_` response** — Now returns JSON with `id` field alongside `status`
+- **`cell_to_dict` expanded** — Now includes `heading_collapsed`, `bookmark`, `is_exported` fields
+- **Serialization** — `heading_collapsed` and `bookmark` now persist in `.ipynb` metadata
+
 #### Google Colab Kernel Integration
 - **Remote execution on Colab runtimes** — Execute notebook cells on Google's cloud infrastructure (CPU, GPU T4, TPU) via the same APIs as the Colab VS Code extension
 - **OAuth2 authentication** — Google sign-in via OAuth2 with built-in credentials (zero configuration); optionally override with `COLAB_CLIENT_ID` and `COLAB_CLIENT_SECRET` environment variables; user tokens persist in `~/.dialeng/colab_tokens.json`

@@ -25,12 +25,17 @@ from pathlib import Path
 # New streaming kernel
 from services.kernel import KernelService
 from services.kernel.execution_queue import ExecutionQueue
-from document.cell import CellState
+from document.cell import Cell, CellType, CellState, CellOutput, CollapseLevel
 
 # DialogHelper compatibility and LLM services
 from services import (
     get_msg_idx, find_msgs, read_msg, cell_to_dict,
     build_context_messages, llm_service
+)
+from services.dialoghelper_service import (
+    format_msgs_as_xml, format_msgs_as_json,
+    clipboard_copy, clipboard_paste,
+    log_change, get_change_log,
 )
 from services.credential_service import (
     detect_credentials, get_available_modes, print_credential_status, CredentialStatus
@@ -100,185 +105,16 @@ _loaded_extensions = load_extensions(silent=True)
 if _loaded_extensions:
     print(f"Loaded {len(_loaded_extensions)} extension(s): {', '.join(_loaded_extensions)}")
 
-SEPARATOR_PREFIX = "##### 🤖Reply🤖<!-- SOLVEIT_SEPARATOR_"
-SEPARATOR_SUFFIX = " -->"
-SEPARATOR_PATTERN = re.compile(r'##### 🤖Reply🤖<!-- SOLVEIT_SEPARATOR_([a-f0-9]+) -->')
-
-def make_separator() -> str:
-    """Generate a new separator with random ID"""
-    sep_id = uuid.uuid4().hex[:8]
-    return f"{SEPARATOR_PREFIX}{sep_id}{SEPARATOR_SUFFIX}"
-
-def split_prompt_content(content: str) -> tuple[str, str]:
-    """Split prompt cell content into (user_prompt, ai_response)"""
-    match = SEPARATOR_PATTERN.search(content)
-    if match:
-        idx = match.start()
-        user_prompt = content[:idx].strip()
-        after_sep = content[match.end():]
-        ai_response = after_sep.strip()
-        return user_prompt, ai_response
-    else:
-        return content.strip(), ""
-
-def join_prompt_content(user_prompt: str, ai_response: str) -> str:
-    """Join user prompt and AI response with separator"""
-    if not ai_response:
-        return user_prompt
-    return f"{user_prompt}\n\n{make_separator()}\n\n{ai_response}"
+from document.prompt_utils import (
+    SEPARATOR_PREFIX, SEPARATOR_SUFFIX, SEPARATOR_PATTERN,
+    make_separator, split_prompt_content, join_prompt_content
+)
 
 # ============================================================================
 # Data Models
 # ============================================================================
 
-class CellType(str, Enum):
-    CODE = "code"
-    NOTE = "note"
-    PROMPT = "prompt"
-
-class CollapseLevel(int, Enum):
-    EXPANDED = 0    # Fully visible
-    SCROLLABLE = 1  # Limited height, scrollable
-    SUMMARY = 2     # First line only with ellipsis
-
-@dataclass
-class Cell:
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
-    cell_type: str = CellType.CODE.value
-    source: str = ""
-    output: str = ""
-    execution_count: Optional[int] = None
-    time_run: str = ""
-    skipped: bool = False
-    use_thinking: bool = False
-    collapsed: bool = False  # Legacy: kept for backwards compatibility
-    input_collapse: int = 0  # CollapseLevel: 0=expanded, 1=scrollable, 2=summary
-    output_collapse: int = 0  # CollapseLevel: 0=expanded, 1=scrollable, 2=summary
-    pinned: bool = False
-    is_exported: bool = False
-
-    def clear_outputs(self):
-        """Clear all outputs and reset execution state."""
-        self.output = ""
-        self.execution_count = None
-        self.time_run = ""
-
-    def to_jupyter_cell(self) -> Dict[str, Any]:
-        """Convert to Jupyter .ipynb cell format"""
-        if self.cell_type == CellType.CODE.value:
-            cell = {
-                "cell_type": "code",
-                "id": self.id,
-                "metadata": {},
-                "source": self._to_source_lines(self.source),
-                "execution_count": self.execution_count,
-                "outputs": self._format_outputs(self.output) if self.output else []
-            }
-            if self.time_run: cell["metadata"]["time_run"] = self.time_run
-            if self.skipped: cell["metadata"]["skipped"] = True
-            if self.is_exported: cell["metadata"]["is_exported"] = True
-            if self.pinned: cell["metadata"]["pinned"] = True
-            if self.input_collapse: cell["metadata"]["input_collapse"] = self.input_collapse
-            if self.output_collapse: cell["metadata"]["output_collapse"] = self.output_collapse
-        elif self.cell_type == CellType.NOTE.value:
-            cell = {
-                "cell_type": "markdown",
-                "id": self.id,
-                "metadata": {},
-                "source": self._to_source_lines(self.source)
-            }
-            if self.collapsed: cell["metadata"]["collapsed"] = True
-            if self.pinned: cell["metadata"]["pinned"] = True
-            if self.input_collapse: cell["metadata"]["input_collapse"] = self.input_collapse
-        else:  # Prompt
-            combined = join_prompt_content(self.source, self.output)
-            cell = {
-                "cell_type": "markdown",
-                "id": self.id,
-                "metadata": {"solveit_ai": True},
-                "source": self._to_source_lines(combined)
-            }
-            if self.use_thinking: cell["metadata"]["use_thinking"] = True
-            if self.time_run: cell["metadata"]["time_run"] = self.time_run
-            if self.collapsed: cell["metadata"]["collapsed"] = True
-            if self.pinned: cell["metadata"]["pinned"] = True
-            if self.input_collapse: cell["metadata"]["input_collapse"] = self.input_collapse
-            if self.output_collapse: cell["metadata"]["output_collapse"] = self.output_collapse
-        return cell
-    
-    @classmethod
-    def from_jupyter_cell(cls, cell: Dict[str, Any]) -> "Cell":
-        cell_id = cell.get("id", uuid.uuid4().hex[:8])
-        metadata = cell.get("metadata", {})
-        source = cls._from_source_lines(cell.get("source", []))
-        
-        if cell["cell_type"] == "code":
-            output = cls._extract_output(cell.get("outputs", []))
-            return cls(
-                id=cell_id, cell_type=CellType.CODE.value, source=source, output=output,
-                execution_count=cell.get("execution_count"),
-                time_run=metadata.get("time_run", ""),
-                skipped=metadata.get("skipped", False),
-                is_exported=metadata.get("is_exported", False),
-                pinned=metadata.get("pinned", False),
-                input_collapse=metadata.get("input_collapse", 0),
-                output_collapse=metadata.get("output_collapse", 1)  # Default to scrollable for code cells
-            )
-        else:
-            if metadata.get("solveit_ai"):
-                user_prompt, ai_response = split_prompt_content(source)
-                return cls(
-                    id=cell_id, cell_type=CellType.PROMPT.value,
-                    source=user_prompt, output=ai_response,
-                    use_thinking=metadata.get("use_thinking", False),
-                    time_run=metadata.get("time_run", ""),
-                    collapsed=metadata.get("collapsed", False),
-                    pinned=metadata.get("pinned", False),
-                    input_collapse=metadata.get("input_collapse", 0),
-                    output_collapse=metadata.get("output_collapse", 0)
-                )
-            else:
-                return cls(
-                    id=cell_id, cell_type=CellType.NOTE.value, source=source,
-                    collapsed=metadata.get("collapsed", False),
-                    pinned=metadata.get("pinned", False),
-                    input_collapse=metadata.get("input_collapse", 0)
-                )
-    
-    @staticmethod
-    def _to_source_lines(text: str) -> List[str]:
-        if not text: return []
-        lines = text.split('\n')
-        return [line + '\n' if i < len(lines) - 1 else line for i, line in enumerate(lines)]
-    
-    @staticmethod
-    def _from_source_lines(source) -> str:
-        if isinstance(source, list): return ''.join(source)
-        return source or ""
-    
-    def _format_outputs(self, output: str) -> List[Dict]:
-        if not output: return []
-        lines = output.split('\n')
-        text = [line + '\n' for line in lines[:-1]]
-        if lines[-1]: text.append(lines[-1])
-        return [{"output_type": "stream", "name": "stdout", "text": text if text else [output]}]
-    
-    @staticmethod
-    def _extract_output(outputs: List[Dict]) -> str:
-        result = []
-        for out in outputs:
-            if out.get("output_type") == "stream":
-                text = out.get("text", [])
-                result.append(''.join(text) if isinstance(text, list) else text)
-            elif out.get("output_type") == "execute_result":
-                data = out.get("data", {})
-                if "text/plain" in data:
-                    text = data["text/plain"]
-                    result.append(''.join(text) if isinstance(text, list) else text)
-            elif out.get("output_type") == "error":
-                result.append('\n'.join(out.get("traceback", [])))
-        return '\n'.join(result)
-
+# Cell, CellType, CellState, CellOutput, CollapseLevel imported from document.cell
 
 # Default dialog mode based on credentials and config
 DEFAULT_DIALOG_MODE = DIALENG_CONFIG.default_mode if CREDENTIAL_STATUS.available else "mock"
@@ -1951,6 +1787,19 @@ async def post(nb_id: str):
 # uses to programmatically manipulate cells. They leverage the shared logic in
 # services/dialoghelper_service.py
 
+def _resolve_current_idx(dlg_name: str, nb) -> int:
+    """Resolve the index of the currently executing cell for a notebook.
+    Used by endpoints with relative addressing (e.g. read_msg_) when
+    dialoghelper doesn't send current_idx explicitly."""
+    if dlg_name in execution_queues:
+        queue = execution_queues[dlg_name]
+        status = queue.get_status(dlg_name)
+        if status.current_cell_id:
+            idx = get_msg_idx(nb, status.current_cell_id)
+            if idx >= 0:
+                return idx
+    return 0
+
 @rt("/curr_dialog_")
 def post(dlg_name: str, with_messages: bool = False):
     """Get current dialog info."""
@@ -1968,57 +1817,98 @@ def post(dlg_name: str, id_: str):
     return {"idx": get_msg_idx(nb, id_)}
 
 @rt("/find_msgs_")
-def post(dlg_name: str, re_pattern: str = "", msg_type: str = "", limit: int = 100):
-    """Search messages - uses shared find_msgs()."""
+def post(dlg_name: str, re_pattern: str = "", msg_type: str = "", limit: int = 100,
+         use_case: str = "", use_regex: str = "True",
+         only_err: str = "", only_exp: str = "", only_chg: str = "",
+         ids: str = "", include_output: str = "True", include_meta: str = "",
+         as_xml: str = "", nums: str = "",
+         trunc_out: str = "True", trunc_in: str = "",
+         headers_only: str = "", header_section: str = ""):
+    """Search messages - uses shared find_msgs() with XML/JSON output."""
     nb = get_notebook(dlg_name)
-    results = find_msgs(nb, re_pattern=re_pattern, msg_type=msg_type, limit=limit)
-    # dialoghelper expects {"msgs": [...]} - use 'content' for consistency with read_msg
-    msgs = [{
-        "idx": i,
-        "id": c.id,
-        "type": c.cell_type,
-        "content": c.source,  # Use 'content' to match dialoghelper's read_msg format
-        "output": c.output,
-        "pinned": c.pinned,
-        "skipped": c.skipped
-    } for i, c in results]
+    results = find_msgs(
+        nb, re_pattern=re_pattern, msg_type=msg_type, limit=limit,
+        use_case=_str_to_bool(use_case),
+        use_regex=_str_to_bool(use_regex) if use_regex else True,
+        only_err=_str_to_bool(only_err),
+        only_exp=_str_to_bool(only_exp),
+        only_chg=_str_to_bool(only_chg),
+        ids=ids,
+        include_output=_str_to_bool(include_output) if include_output else True,
+    )
+
+    fmt_kwargs = dict(
+        include_output=_str_to_bool(include_output) if include_output else True,
+        include_meta=_str_to_bool(include_meta),
+        nums=_str_to_bool(nums),
+        trunc_out=_str_to_bool(trunc_out) if trunc_out else True,
+        trunc_in=_str_to_bool(trunc_in),
+        headers_only=_str_to_bool(headers_only),
+        header_section=header_section,
+    )
+
+    if _str_to_bool(as_xml):
+        return format_msgs_as_xml(results, **fmt_kwargs)
+
+    msgs = format_msgs_as_json(results, **fmt_kwargs)
     return {"msgs": msgs}
 
 @rt("/read_msg_")
 def post(dlg_name: str, n: int = 0, relative: bool = True, id_: str = "",
-         view_range: str = "", nums: bool = False, current_idx: int = 0):
+         view_range: str = "", nums: bool = False, current_idx: int = -1):
     """Read message content - uses shared read_msg()."""
     nb = get_notebook(dlg_name)
+    # Resolve current_idx from execution queue if not explicitly provided
+    if current_idx < 0 and relative and not id_:
+        current_idx = _resolve_current_idx(dlg_name, nb)
+    elif current_idx < 0:
+        current_idx = 0
     return read_msg(nb, n=n, relative=relative, msgid=id_,
                     current_idx=current_idx, view_range=view_range, nums=nums)
 
 @rt("/add_relative_")
-async def post(dlg_name: str, content: str, placement: str = "after", id_: str = "",
+async def post(dlg_name: str, content: str, placement: str = "add_after", id_: str = "",
          msg_type: str = "code", output: str = "", time_run: str = "",
          is_exported: str = "", skipped: str = "",
          i_collapsed: str = "0", o_collapsed: str = "0",
-         heading_collapsed: str = "", pinned: str = "", run: str = ""):
+         heading_collapsed: str = "", pinned: str = "",
+         run: str = "", run_mode: str = ""):
     """Add message relative to another - uses shared get_msg_idx().
 
+    Supports both old placement values (after/before) and new ones
+    (add_after/add_before/at_start/at_end).
     Boolean params use str type because HTTP form data sends 'True'/'False' strings.
     """
     print(f"[ADD_RELATIVE] dlg_name={dlg_name}, ws_connections keys={list(ws_connections.keys())}", flush=True)
     nb = get_notebook(dlg_name)
     new_cell = Cell(
-        cell_type=msg_type, source=content, output=output,
+        cell_type=msg_type, source=content,
         skipped=_str_to_bool(skipped), pinned=_str_to_bool(pinned),
         input_collapse=int(i_collapsed) if i_collapsed else 0,
         output_collapse=int(o_collapsed) if o_collapsed else 0,
+        heading_collapsed=_str_to_bool(heading_collapsed),
         is_exported=_str_to_bool(is_exported), time_run=time_run
     )
+    if output: new_cell.output = output
+
+    # Normalize placement values (support both old and new)
+    placement_map = {"after": "add_after", "before": "add_before"}
+    placement = placement_map.get(placement, placement)
+
     # Find insertion point using shared function
-    if id_:
+    if placement == "at_start":
+        insert_idx = 0
+    elif placement == "at_end":
+        insert_idx = len(nb.cells)
+    elif id_:
         ref_idx = get_msg_idx(nb, id_)
         if ref_idx == -1:
             return {"error": f"Message {id_} not found"}
-        insert_idx = ref_idx + 1 if placement == "after" else ref_idx
+        insert_idx = ref_idx + 1 if placement == "add_after" else ref_idx
     else:
-        insert_idx = len(nb.cells)  # Append to end
+        # No explicit id_ — resolve from currently executing cell
+        ref_idx = _resolve_current_idx(dlg_name, nb)
+        insert_idx = ref_idx + 1 if placement == "add_after" else ref_idx
 
     nb.cells.insert(insert_idx, new_cell)
 
@@ -2029,25 +1919,32 @@ async def post(dlg_name: str, content: str, placement: str = "after", id_: str =
     except Exception as e:
         print(f"[ADD_RELATIVE] Broadcast error: {e}", flush=True)
 
-    # Optionally trigger execution
-    if _str_to_bool(run):
-        # Queue for execution (implementation depends on kernel service)
-        pass
+    # Optionally trigger execution (support both old 'run' and new 'run_mode')
+    should_run = _str_to_bool(run) or run_mode
+    if should_run:
+        queue = get_execution_queue(dlg_name)
+        queue.queue_cell(dlg_name, new_cell)
 
-    # dialoghelper expects just the cell ID as plain text (not JSON)
-    # This is used to set __msg_id for relative operations
-    return new_cell.id
+    # New dialoghelper expects JSON with 'id' key (res['id'])
+    return {"id": new_cell.id}
 
 @rt("/rm_msg_")
-async def post(dlg_name: str, msid: str):
-    """Remove message by ID."""
+async def post(dlg_name: str, msid: str, log_changed: str = ""):
+    """Remove message by ID. Optionally logs the deleted content."""
     nb = get_notebook(dlg_name)
     idx = get_msg_idx(nb, msid)
     if idx >= 0:
+        cell = nb.cells[idx]
+        if _str_to_bool(log_changed):
+            log_change(dlg_name, "delete", msid, {
+                "source": cell.source,
+                "type": cell.cell_type,
+                "output": cell.output[:200] if cell.output else "",
+            })
         nb.cells.pop(idx)
         # Broadcast to all connected clients so they see the cell removed immediately
         await broadcast_to_notebook(dlg_name, AllCellsOOB(nb))
-    return {"status": "ok"}
+    return {"status": "ok", "id": msid}
 
 def _str_to_bool(val: str) -> bool:
     """Convert string form value to boolean. Handles 'True', 'true', '1', etc."""
@@ -2061,7 +1958,8 @@ async def post(dlg_name: str, id_: str,
                content: str = None, msg_type: str = None, output: str = None,
                time_run: str = None, is_exported: str = None, skipped: str = None,
                i_collapsed: str = None, o_collapsed: str = None,
-               heading_collapsed: str = None, pinned: str = None):
+               heading_collapsed: str = None, pinned: str = None,
+               log_changed: str = ""):
     """Update message properties.
 
     FastHTML requires explicit params (no **kwargs).
@@ -2075,10 +1973,17 @@ async def post(dlg_name: str, id_: str,
         cell = nb.cells[idx]
         print(f"[UPDATE_MSG] Cell {cell.id} before: pinned={cell.pinned}", flush=True)
 
+        # Track changes for logging
+        changes = {}
+
         # Map and apply each field if provided (not None)
         if content is not None:
+            if _str_to_bool(log_changed) and cell.source != content:
+                changes["content"] = {"old": cell.source[:200], "new": content[:200]}
             cell.source = content
         if msg_type is not None:
+            if _str_to_bool(log_changed) and cell.cell_type != msg_type:
+                changes["msg_type"] = {"old": cell.cell_type, "new": msg_type}
             cell.cell_type = msg_type
         if output is not None:
             cell.output = output
@@ -2098,11 +2003,15 @@ async def post(dlg_name: str, id_: str,
             cell.pinned = _str_to_bool(pinned)
             print(f"[UPDATE_MSG] Set pinned={cell.pinned}", flush=True)
 
+        # Log changes if requested
+        if _str_to_bool(log_changed) and changes:
+            log_change(dlg_name, "update", id_, changes)
+
         print(f"[UPDATE_MSG] Cell {cell.id} after: pinned={cell.pinned}", flush=True)
         # Broadcast the updated cell to all connected clients
         await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
-    # Return the cell ID - dialoghelper uses this to set __msg_id for relative operations
-    return id_
+    # New dialoghelper expects JSON with 'id' key (res['id'])
+    return {"id": id_}
 
 @rt("/add_runq_")
 async def post(dlg_name: str, ids: str, api: str = ""):
@@ -2128,7 +2037,7 @@ async def post(dlg_name: str, ids: str, api: str = ""):
     return {"status": "ok", "cell_id": cell.id}
 
 @rt("/msg_insert_line_")
-def post(dlg_name: str, id_: str, insert_line: int, new_str: str):
+async def post(dlg_name: str, id_: str, insert_line: int, new_str: str):
     """Insert line at position in message."""
     nb = get_notebook(dlg_name)
     idx = get_msg_idx(nb, id_)
@@ -2137,19 +2046,57 @@ def post(dlg_name: str, id_: str, insert_line: int, new_str: str):
         lines = cell.source.split('\n')
         lines.insert(insert_line, new_str)
         cell.source = '\n'.join(lines)
+        await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
     return {"status": "ok"}
 
 @rt("/msg_str_replace_")
-def post(dlg_name: str, id_: str, old_str: str, new_str: str):
-    """Replace string in message."""
+async def post(dlg_name: str, id_: str, old_str: str, new_str: str,
+         start_line: int = 0, end_line: int = 0,
+         n_matches: int = 1, re_filter: str = "", invert_filter: str = ""):
+    """Replace string in message with optional line range and regex filtering."""
     nb = get_notebook(dlg_name)
     idx = get_msg_idx(nb, id_)
-    if idx >= 0:
-        nb.cells[idx].source = nb.cells[idx].source.replace(old_str, new_str, 1)
+    if idx < 0:
+        return {"error": f"Message {id_} not found"}
+
+    cell = nb.cells[idx]
+    source = cell.source
+
+    # Apply line range restriction if specified
+    if start_line or end_line:
+        lines = source.split('\n')
+        s = (start_line - 1) if start_line > 0 else 0
+        e = end_line if end_line > 0 else len(lines)
+        # Only replace within the specified line range
+        before = '\n'.join(lines[:s])
+        target = '\n'.join(lines[s:e])
+        after_lines = '\n'.join(lines[e:])
+
+        # Apply regex filter if specified
+        if re_filter:
+            inv = _str_to_bool(invert_filter)
+            filtered_lines = []
+            for line in target.split('\n'):
+                matches = bool(re.search(re_filter, line))
+                if (matches and not inv) or (not matches and inv):
+                    line = line.replace(old_str, new_str, n_matches if n_matches else 0) if n_matches != 0 else line.replace(old_str, new_str)
+                filtered_lines.append(line)
+            target = '\n'.join(filtered_lines)
+        else:
+            count = n_matches if n_matches else 0  # 0 means replace all
+            target = target.replace(old_str, new_str, count) if count else target.replace(old_str, new_str)
+
+        parts = [p for p in [before, target, after_lines] if p]
+        cell.source = '\n'.join(parts)
+    else:
+        count = n_matches if n_matches else 0
+        cell.source = source.replace(old_str, new_str, count) if count else source.replace(old_str, new_str)
+
+    await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
     return {"status": "ok"}
 
 @rt("/msg_strs_replace_")
-def post(dlg_name: str, id_: str, old_strs: str, new_strs: str):
+async def post(dlg_name: str, id_: str, old_strs: str, new_strs: str):
     """Replace multiple strings (JSON arrays)."""
     nb = get_notebook(dlg_name)
     idx = get_msg_idx(nb, id_)
@@ -2159,10 +2106,11 @@ def post(dlg_name: str, id_: str, old_strs: str, new_strs: str):
         new_list = json.loads(new_strs)
         for old, new in zip(old_list, new_list):
             cell.source = cell.source.replace(old, new, 1)
+        await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
     return {"status": "ok"}
 
 @rt("/msg_replace_lines_")
-def post(dlg_name: str, id_: str, start_line: int, end_line: int, new_content: str):
+async def post(dlg_name: str, id_: str, start_line: int, end_line: int, new_content: str):
     """Replace line range in message."""
     nb = get_notebook(dlg_name)
     idx = get_msg_idx(nb, id_)
@@ -2171,7 +2119,219 @@ def post(dlg_name: str, id_: str, start_line: int, end_line: int, new_content: s
         lines = cell.source.split('\n')
         lines[start_line:end_line] = [new_content]
         cell.source = '\n'.join(lines)
+        await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
     return {"status": "ok"}
+
+@rt("/msg_del_lines_")
+async def post(dlg_name: str, id_: str, start_line: int, end_line: int,
+         re_filter: str = "", invert_filter: str = ""):
+    """Delete line range in message, optionally filtered by regex."""
+    nb = get_notebook(dlg_name)
+    idx = get_msg_idx(nb, id_)
+    if idx < 0:
+        return {"error": f"Message {id_} not found"}
+
+    cell = nb.cells[idx]
+    lines = cell.source.split('\n')
+    s = (start_line - 1) if start_line > 0 else 0
+    e = end_line if end_line > 0 else len(lines)
+
+    if re_filter:
+        inv = _str_to_bool(invert_filter)
+        # Only delete lines matching (or not matching if inverted) the filter
+        target_lines = lines[s:e]
+        kept = []
+        for line in target_lines:
+            matches = bool(re.search(re_filter, line))
+            if (matches and not inv) or (not matches and inv):
+                continue  # Delete this line
+            kept.append(line)
+        lines[s:e] = kept
+    else:
+        del lines[s:e]
+
+    cell.source = '\n'.join(lines)
+    await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
+    return {"status": "ok"}
+
+@rt("/msg_pyrun_")
+async def post(dlg_name: str, id_: str, code: str):
+    """Execute Python code against message text.
+
+    The cell source is available as `text` in the code's namespace.
+    The code should modify `text` to update the cell.
+    """
+    nb = get_notebook(dlg_name)
+    idx = get_msg_idx(nb, id_)
+    if idx < 0:
+        return {"error": f"Message {id_} not found"}
+
+    cell = nb.cells[idx]
+    namespace = {"text": cell.source}
+    try:
+        exec(code, namespace)
+        if "text" in namespace and namespace["text"] != cell.source:
+            cell.source = namespace["text"]
+            await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
+        return {"status": "ok"}
+    except Exception as e:
+        return {"error": str(e)}
+
+# ============================================================================
+# Clipboard Operations
+# ============================================================================
+
+@rt("/msg_clipboard_")
+async def post(dlg_name: str, ids: str = "", id_: str = "", cmd: str = "copy"):
+    """Copy or cut messages to clipboard."""
+    nb = get_notebook(dlg_name)
+    # Build list of cell IDs
+    cell_ids = [s.strip() for s in ids.split(',') if s.strip()] if ids else []
+    if id_ and id_ not in cell_ids:
+        cell_ids.append(id_)
+
+    if not cell_ids:
+        return {"error": "No cell IDs provided"}
+
+    result = clipboard_copy(nb, dlg_name, cell_ids, cut=(cmd == "cut"))
+
+    if cmd == "cut":
+        await broadcast_to_notebook(dlg_name, AllCellsOOB(nb))
+
+    return result
+
+@rt("/msg_paste_")
+async def post(dlg_name: str, id_: str = "", after: str = "True"):
+    """Paste messages from clipboard."""
+    nb = get_notebook(dlg_name)
+    new_ids = clipboard_paste(nb, dlg_name, ref_id=id_, after=_str_to_bool(after))
+
+    if new_ids:
+        await broadcast_to_notebook(dlg_name, AllCellsOOB(nb))
+
+    return {"status": "ok", "ids": new_ids}
+
+# ============================================================================
+# UI Toggle Operations
+# ============================================================================
+
+@rt("/toggle_header_collapse_")
+async def post(dlg_name: str, id_: str):
+    """Toggle heading_collapsed state on a cell."""
+    nb = get_notebook(dlg_name)
+    idx = get_msg_idx(nb, id_)
+    if idx < 0:
+        return {"error": f"Message {id_} not found"}
+
+    cell = nb.cells[idx]
+    cell.heading_collapsed = not cell.heading_collapsed
+    await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
+    return {"status": "ok", "heading_collapsed": cell.heading_collapsed}
+
+@rt("/bookmark_")
+async def post(dlg_name: str, id_: str, n: int):
+    """Toggle numbered bookmark (1-9) on a cell."""
+    nb = get_notebook(dlg_name)
+    idx = get_msg_idx(nb, id_)
+    if idx < 0:
+        return {"error": f"Message {id_} not found"}
+
+    cell = nb.cells[idx]
+    # Toggle: if already bookmarked with same number, remove it
+    if cell.bookmark == n:
+        cell.bookmark = 0
+    else:
+        # Clear any existing bookmark with this number from other cells
+        for c in nb.cells:
+            if c.bookmark == n:
+                c.bookmark = 0
+        cell.bookmark = n
+
+    await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
+    return {"status": "ok", "bookmark": cell.bookmark}
+
+@rt("/toggle_comment_")
+async def post(dlg_name: str, ids: str = "", id_: str = ""):
+    """Toggle line comments on code cells."""
+    nb = get_notebook(dlg_name)
+    cell_ids = [s.strip() for s in ids.split(',') if s.strip()] if ids else []
+    if id_ and id_ not in cell_ids:
+        cell_ids.append(id_)
+
+    for cid in cell_ids:
+        idx = get_msg_idx(nb, cid)
+        if idx < 0:
+            continue
+        cell = nb.cells[idx]
+        lines = cell.source.split('\n')
+        # Determine if we should comment or uncomment (majority rules)
+        commented = sum(1 for l in lines if l.lstrip().startswith('#') and l.strip() != '#')
+        if commented > len(lines) / 2:
+            # Uncomment: remove leading '# ' or '#'
+            new_lines = []
+            for l in lines:
+                stripped = l.lstrip()
+                indent = l[:len(l) - len(stripped)]
+                if stripped.startswith('# '):
+                    new_lines.append(indent + stripped[2:])
+                elif stripped.startswith('#'):
+                    new_lines.append(indent + stripped[1:])
+                else:
+                    new_lines.append(l)
+            cell.source = '\n'.join(new_lines)
+        else:
+            # Comment: add '# ' prefix
+            cell.source = '\n'.join(
+                (l[:len(l) - len(l.lstrip())] + '# ' + l.lstrip()) if l.strip() else l
+                for l in lines
+            )
+        await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
+
+    return {"status": "ok"}
+
+# ============================================================================
+# Dialog Management Endpoints
+# ============================================================================
+
+@rt("/create_dialog_")
+async def post(name: str):
+    """Create a new dialog/notebook or ensure it's loaded.
+
+    If the notebook exists on disk, it will be loaded.
+    If not, a new empty notebook is created.
+    The kernel is shared across all notebooks.
+    """
+    try:
+        nb = get_notebook(name)  # get_notebook handles creation
+        return {"status": "ok", "name": name, "action": "loaded" if nb.cells else "created"}
+    except Exception as e:
+        return {"error": str(e)}
+
+@rt("/stop_kernel_")
+async def post(name: str):
+    """Stop the execution queue for a dialog/notebook."""
+    try:
+        if name in execution_queues:
+            queue = execution_queues[name]
+            queue.cancel_all()
+        return {"status": "ok", "name": name}
+    except Exception as e:
+        return {"error": str(e)}
+
+@rt("/rm_dialog_")
+async def post(name: str):
+    """Delete a dialog/notebook from memory and optionally disk."""
+    try:
+        # Cancel any running executions
+        if name in execution_queues:
+            execution_queues[name].cancel_all()
+            del execution_queues[name]
+        # Remove from in-memory registry
+        if name in notebooks:
+            del notebooks[name]
+        return {"status": "ok", "name": name}
+    except Exception as e:
+        return {"error": str(e)}
 
 @rt("/add_html_")
 async def post(dlg_name: str, content: str):

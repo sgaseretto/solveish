@@ -53,36 +53,58 @@ flowchart TB
 
 ### CellType Enum
 
-Defined in `app.py:61-64`:
+Defined in `document/cell.py`:
 
 ```python
 class CellType(str, Enum):
     CODE = "code"
     NOTE = "note"
     PROMPT = "prompt"
+    RAW = "raw"
 ```
+
+`CellType` has custom `__str__`/`__format__` so it behaves like a plain string in f-strings and comparisons (e.g., `f"badge {cell.cell_type}"` → `"badge code"`).
 
 ### Cell Dataclass
 
-The `Cell` dataclass (`app.py:71-85`) stores all cell data:
+The unified `Cell` dataclass in `document/cell.py` stores all cell data, supporting both UI display and kernel execution:
 
 ```python
 @dataclass
 class Cell:
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
-    cell_type: str = CellType.CODE.value
-    source: str = ""           # Code, markdown, or user prompt
-    output: str = ""           # Execution output or AI response
+    id: str                          # Auto-generated 8-char hex
+    cell_type: CellType = CellType.CODE  # Accepts strings too via __post_init__
+    source: str = ""                 # Code, markdown, or user prompt
+    outputs: List[CellOutput] = []   # Streaming execution outputs
+
+    # Execution state (runtime, not persisted)
+    state: CellState = CellState.IDLE
     execution_count: Optional[int] = None
-    time_run: str = ""         # Timestamp of last run
-    skipped: bool = False      # Solveit compatibility
-    use_thinking: bool = False # Enable thinking mode for prompts
-    collapsed: bool = False    # Legacy collapse state
-    input_collapse: int = 0    # CollapseLevel: 0=expanded, 1=scrollable, 2=summary
-    output_collapse: int = 0   # CollapseLevel: 0=expanded, 1=scrollable, 2=summary
-    pinned: bool = False       # Pin to context (future feature)
-    is_exported: bool = False  # Mark as exported (future feature)
+    time_run: Optional[str] = None
+
+    # Version tracking
+    version: int = 0
+    last_modified: Optional[datetime] = None
+
+    # Cell metadata (persisted)
+    skipped: bool = False
+    pinned: bool = False
+    use_thinking: bool = False
+    is_exported: bool = False
+
+    # UI collapse state
+    collapsed: bool = False
+    input_collapse: CollapseLevel = CollapseLevel.EXPANDED  # 0=expanded, 1=scrollable, 2=summary
+    output_collapse: CollapseLevel = CollapseLevel.EXPANDED
+    heading_collapsed: bool = False
+
+    # Bookmark (0 = no bookmark, 1-9 = numbered bookmark)
+    bookmark: int = 0
 ```
+
+The `output` property (getter/setter) provides backwards compatibility — getting concatenates `outputs` to a string, setting replaces the list with a single `CellOutput`.
+
+The `__post_init__` method coerces string cell types to `CellType` enum and int collapse levels to `CollapseLevel` enum, so `Cell(cell_type="code", output_collapse=1)` works.
 
 ### Field Meanings by Cell Type
 
