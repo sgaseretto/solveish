@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Test notebook** — `notebooks/test_tracetools.ipynb` with 7 cells covering `tracetool()`, `fmt_trace()`, stdlib tracing, `target_func`, and recursive function tracing.
 - **Markdown table styling** (`static/css/components.css`) — Added `.mime-markdown` CSS rules for rendered markdown tables: themed borders, header styling with blue accent, alternating row shading, hover highlights, and monospace font. Works in both dark and light themes.
 
+#### Tmux Tools Support
+- **Test notebook** — `notebooks/test_tmux.ipynb` with 14 cells covering `shell_ret()`, `pane()`, `panes()`, `windows()`, `sessions()`, `flatten_dict()`, `set_default_history()`, and cross-pane keyword search. Auto-creates/cleans up a test tmux session.
+
 #### Screen Capture Support
 - **Global `pushData()` JS function** (`static/js/app.js`) — Enables dialoghelper's `screenshot.js` to send captured image data back to Python via `/push_data_blocking_`. Uses `URLSearchParams` for proper encoding of base64 data.
 - **Rich result promotion** (`kernel_worker.py`) — Cell return values with `_repr_png_()` or `_repr_html_()` (PIL Images, DataFrames, etc.) are automatically promoted from `execute_result` to `display_data` with full MIME bundle, so they render inline.
@@ -83,7 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `docs/how_it_works/12_colab_kernel.md` — Comprehensive technical documentation covering the Colab kernel architecture, authentication flow, credential resolution, connection lifecycle, Jupyter wire protocol details, the multiplexed WebSocket subtlety, and rich output pipeline
 - Added `docs/guides/colab_oauth_setup.md` — Step-by-step guide for users to create their own Google OAuth2 credentials when auto-update is not possible
 - Updated `docs/how_it_works/04_kernel_execution.md` — Added "Rich Result Promotion" subsection documenting how PIL Images and DataFrames auto-promote to `display_data`
-- Updated `docs/how_it_works/05_dialoghelper_integration.md` — Added `pushData()` global function docs, Screen Capture section with Mermaid diagram, `test_capture.ipynb` entry, and Tracetools section
+- Updated `docs/how_it_works/05_dialoghelper_integration.md` — Added `pushData()` global function docs, Screen Capture section, Tracetools section, Tmux Tools section, Markdown Rendering Pipeline with Mermaid diagram, and test notebook entries
 
 #### Shell Command Execution (pshnb + safecmd)
 - **Shell cells (optional)** - New cell type for dedicated bash command execution:

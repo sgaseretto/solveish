@@ -992,6 +992,71 @@ Markdown(fmt_trace(r))
   2. **`display()` call** → IPython's `StreamingDisplayPublisher` produces a `text/markdown` MIME bundle → `render_mime_bundle()` in `app.py` converts to HTML
 - **Table styling** (`static/css/components.css`) — `.mime-markdown` CSS provides themed borders, header styling (blue accent, secondary background), alternating row shading, hover highlights, and monospace font. All colors use CSS variables for dark/light theme compatibility.
 
+## Tmux Tools (Terminal Buffer Viewing)
+
+DialogHelper provides a `tmux` module for capturing and inspecting content from tmux sessions, windows, and panes. All capture functions are `@llmtool` decorated for use as AI assistant tools.
+
+### Functions
+
+| Function | Purpose |
+|----------|---------|
+| `shell_ret(cmd, host, ip, user, keyfile)` | Run shell commands locally or over SSH. Returns stdout/stderr. |
+| `pane(n, pane, session, window)` | Capture scrollback history from a specific tmux pane. |
+| `list_panes(session, window)` | List panes with dimensions, history size, and active status. |
+| `panes(session, window, n)` | Capture all panes in a window as a `{pane_num: content}` dict. |
+| `list_windows(session)` | List windows with names, pane counts, and active markers. |
+| `windows(session, n)` | Capture all windows and panes as a nested dict. |
+| `list_sessions()` | List all active tmux sessions. |
+| `sessions(n)` | Capture entire tmux state as a nested dict (sessions > windows > panes). |
+| `flatten_dict(d, sep)` | Flatten nested dicts into `(path, value)` tuples for searching. |
+| `set_default_history(n)` | Set default scrollback line count (default: 500). |
+
+### Function Hierarchy
+
+```
+sessions()                              # All sessions → nested dict
+  └─ windows(session=...)               # All windows in a session
+       └─ panes(session=..., window=...)  # All panes in a window
+            └─ pane(session=..., window=..., pane=...)  # Single pane content
+
+list_sessions() / list_windows() / list_panes()  # Metadata only (no content)
+
+flatten_dict(sessions())  # Flat list of (path, content) for keyword search
+```
+
+### Usage
+
+```python
+from dialoghelper.tmux import pane, sessions, flatten_dict
+
+# Capture a specific pane
+content = pane(n=50, session='dev', window=0)
+
+# Search across all tmux content
+flat = flatten_dict(sessions(n=20))
+matches = [(path, c) for path, c in flat if 'Error' in c]
+for path, c in matches:
+    lines = [l for l in c.split('\n') if 'Error' in l]
+    print(f'{path}: {lines}')
+```
+
+### SSH Support
+
+All functions accept SSH parameters for remote tmux access:
+
+```python
+# Via SSH host alias
+pane(n=50, host='myserver')
+
+# Via IP/user/keyfile
+pane(n=50, ip='192.168.1.100', user='ubuntu', keyfile='~/.ssh/id_rsa')
+```
+
+### Requirements
+
+- tmux installed (`brew install tmux` on macOS)
+- No additional Python dependencies (uses `subprocess` from stdlib)
+
 ## Markdown Rendering Pipeline
 
 Any cell that returns or displays an IPython `Markdown` object (e.g., `Markdown(fmt_trace(r))`) is rendered as styled HTML via the following pipeline:
@@ -1063,7 +1128,7 @@ All colors use CSS custom properties (`--border`, `--bg-secondary`, `--accent-bl
 
 ## Test Notebooks
 
-Four test notebooks are available:
+Five test notebooks are available:
 
 ### Basic Tests: `notebooks/test_dialoghelper.ipynb`
 
@@ -1128,7 +1193,19 @@ Tests the function tracing functionality:
 - `target_func` parameter - Trace internal/stdlib functions
 - Recursive function tracing - One trace entry per call
 
-Run all four notebooks to verify all dialoghelper features are working correctly.
+### Tmux Tests: `notebooks/test_tmux.ipynb`
+
+Tests tmux terminal buffer viewing:
+
+- `shell_ret()` - Run shell commands and capture output
+- `list_sessions()` / `list_windows()` / `list_panes()` - Enumerate tmux hierarchy
+- `pane()` - Capture scrollback history from a specific pane
+- `panes()` / `windows()` / `sessions()` - Capture content as nested dicts
+- `flatten_dict()` - Flatten nested dicts for searching across all panes
+- `set_default_history()` - Configure default scrollback line count
+- Cross-pane keyword search example
+
+Run all five notebooks to verify all dialoghelper features are working correctly.
 
 ## See Also
 
