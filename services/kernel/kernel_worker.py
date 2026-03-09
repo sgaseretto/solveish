@@ -116,11 +116,48 @@ def _run_streaming(self: CaptureShell, raw_cell: str, output_queue: Queue,
 
         # Send final result if there was one
         if result.result is not None:
-            output_queue.put({
-                'type': 'execute_result',
-                'data': {'text/plain': repr(result.result)},
-                'metadata': {}
-            })
+            obj = result.result
+            mime_data = {'text/plain': repr(obj)}
+
+            # Check for rich representations (PIL images, HTML widgets, etc.)
+            # and include them in the MIME bundle so they render inline.
+            try:
+                if hasattr(obj, '_repr_png_'):
+                    png = obj._repr_png_()
+                    if png:
+                        import base64
+                        if isinstance(png, bytes):
+                            png = base64.b64encode(png).decode('utf-8')
+                        mime_data['image/png'] = png
+                elif hasattr(obj, '_repr_html_'):
+                    html = obj._repr_html_()
+                    if html:
+                        mime_data['text/html'] = html
+                elif hasattr(obj, '_repr_markdown_'):
+                    md_text = obj._repr_markdown_()
+                    if md_text:
+                        try:
+                            from markdown_it import MarkdownIt
+                            mime_data['text/html'] = MarkdownIt().enable('table').render(md_text)
+                        except ImportError:
+                            mime_data['text/markdown'] = md_text
+            except Exception:
+                pass
+
+            # If we have rich content, send as display_data so the
+            # frontend renders it properly (images, HTML, etc.)
+            if len(mime_data) > 1:
+                output_queue.put({
+                    'type': 'display_data',
+                    'data': mime_data,
+                    'metadata': {}
+                })
+            else:
+                output_queue.put({
+                    'type': 'execute_result',
+                    'data': mime_data,
+                    'metadata': {}
+                })
 
         # Send error if execution failed
         if result.error_in_exec:

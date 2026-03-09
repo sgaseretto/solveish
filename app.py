@@ -436,9 +436,14 @@ def render_mime_bundle(data: dict, metadata: dict = None) -> str:
         b64 = data["image/gif"].replace('\n', '').replace('\r', '')
         return f'<img class="mime-image" src="data:image/gif;base64,{b64}" />'
 
-    # Markdown - wrap for potential rendering
+    # Markdown - convert to HTML for proper rendering (tables, formatting)
     if 'text/markdown' in data:
-        return f'<div class="mime-markdown">{data["text/markdown"]}</div>'
+        try:
+            from markdown_it import MarkdownIt
+            html = MarkdownIt().enable('table').render(data['text/markdown'])
+            return f'<div class="mime-markdown">{html}</div>'
+        except ImportError:
+            return f'<div class="mime-markdown">{data["text/markdown"]}</div>'
 
     # LaTeX - wrap for MathJax/KaTeX processing
     if 'text/latex' in data:

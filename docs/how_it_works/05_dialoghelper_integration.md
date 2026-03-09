@@ -431,6 +431,27 @@ iife("""
 """)
 ```
 
+## The `pushData()` Global Function
+
+Dialeng provides a global JavaScript function `pushData(idx, data)` (defined in `static/js/app.js`) that simplifies pushing data from browser JavaScript back to Python. It properly URL-encodes all parameters (critical for binary data like base64 images) and posts to `/push_data_blocking_`:
+
+```javascript
+// Defined globally in static/js/app.js
+async function pushData(idx, data) {
+    const params = new URLSearchParams();
+    params.append('dlg_name', window.NOTEBOOK_ID);
+    params.append('data_id', String(idx));
+    params.append('data', JSON.stringify(data));
+    await fetch('/push_data_blocking_', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: params.toString()
+    });
+}
+```
+
+This function is used by dialoghelper's `screenshot.js` for screen capture, and can be used by any injected JavaScript handler that needs to send data back to Python. Using `URLSearchParams` ensures proper encoding of special characters (e.g., `+`, `/`, `=` in base64 data).
+
 ## Bidirectional Data Transfer
 
 Dialeng supports bidirectional communication between Python and JavaScript via the `fire_event()`, `pop_data()`, and `event_get()` functions, along with the `/push_data_blocking_` and `/pop_data_blocking_` endpoints.
@@ -857,9 +878,192 @@ All endpoints return JSON. For complex responses, use `cell_to_dict()` to ensure
 
 Endpoints return `{"error": "message"}` on failure, otherwise `{"status": "ok"}` or the requested data.
 
+## Screen Capture
+
+DialogHelper provides a `capture` module that enables taking screenshots from Python notebook code. Dialeng supports this functionality through its bidirectional data transfer infrastructure.
+
+### How It Works
+
+```mermaid
+sequenceDiagram
+    participant Python as Python Notebook
+    participant Server as Dialeng Server
+    participant Browser as Browser JS
+
+    Note over Python: setup_share()
+    Python->>Server: iife(screenshot.js)
+    Server->>Browser: WebSocket: inject script
+    Browser->>Browser: Register shareScreen + captureScreen listeners
+
+    Note over Python: start_share()
+    Python->>Server: trigger_now('shareScreen')
+    Server->>Browser: WebSocket: htmx.trigger
+    Browser->>Browser: navigator.mediaDevices.getDisplayMedia()
+    Note over Browser: User picks a window/screen
+
+    Note over Python: capture_screen()
+    Python->>Server: fire_event_a('captureScreen', {idx: uuid})
+    Server->>Browser: WebSocket: htmx.trigger
+    Browser->>Browser: ImageCapture.grabFrame()
+    Browser->>Browser: Canvas resize + toDataURL()
+    Browser->>Server: pushData(idx, {img_data: dataURL})
+    Server->>Server: asyncio.Queue.put(data)
+    Python->>Server: pop_data_a(idx)
+    Server->>Python: {img_data: "data:image/png;base64,..."}
+    Python->>Python: base64 decode → PIL.Image
+```
+
+### Functions
+
+| Function | Purpose |
+|----------|---------|
+| `setup_share()` | Injects `screenshot.js` into the browser via `iife()`. Registers `shareScreen` and `captureScreen` event listeners. Call once per session. |
+| `start_share()` | Fires `shareScreen` event via `trigger_now()`. Browser shows the screen/window picker dialog. User must select a screen to share. |
+| `capture_screen(timeout=15)` | Async. Fires `captureScreen` event, waits for the JS handler to grab a frame and send it back via `pushData()`. Returns a PIL Image. |
+| `capture_tool(timeout=15)` | Async. LLM-friendly wrapper (`@llmtool` decorated). Returns PIL Image on success, error string on failure. |
+
+### Usage
+
+```python
+from dialoghelper.capture import setup_share, start_share, capture_screen
+
+# 1. Inject screenshot.js (once per session)
+setup_share()
+
+# 2. Prompt user to select a screen/window
+start_share()
+
+# 3. Capture screenshots (as many times as needed)
+img = await capture_screen()
+img.thumbnail((800, 600))
+img  # Displays inline thanks to rich result promotion
+```
+
+### Key Infrastructure
+
+- **`pushData()` global function** (`static/js/app.js`) — URL-encodes and posts data to `/push_data_blocking_`. Critical for base64 image data which contains `+`, `/`, `=` characters that break raw form encoding.
+- **Rich result promotion** (`kernel_worker.py`) — PIL Images returned as the last expression are automatically promoted from `execute_result` to `display_data` with a `image/png` MIME type, so they render inline.
+- **`window.NOTEBOOK_ID`** (`ui/layout.py`) — Set on page load, used by `pushData()` to identify which notebook's data queue to push to.
+
+## Tracetools (Function Tracing)
+
+DialogHelper provides a `tracetools` module for LLM-accessible function execution tracing using Python 3.12's `sys.monitoring`.
+
+### Functions
+
+| Function | Purpose |
+|----------|---------|
+| `tracetool(sym, args, kwargs, target_func)` | Trace execution of a callable. Returns list of `(stack_str, trace_dict)` tuples with per-line variable snapshots. Decorated with `@llmtool` for LLM tool calling. |
+| `fmt_trace(traces)` | Format raw trace output as markdown tables with Source, Hits, and Variables columns. |
+
+### Usage
+
+```python
+from dialoghelper.tracetools import tracetool, fmt_trace
+from IPython.display import Markdown
+
+# Define a function
+def demo(n, m='x'):
+    total = 0
+    for i in range(n): total += i
+    return m * total
+
+# Trace it
+r = tracetool(sym='demo', args=[5], kwargs={'m': 'y'})
+
+# Display formatted (renders as HTML table via markdown-it-py)
+Markdown(fmt_trace(r))
+```
+
+### Trace Output Semantics
+
+- Each call to `target_func` (including recursion) produces a separate trace entry
+- `trace_dict` maps source snippets to `(hit_count, variables)`
+- Unchanged variables → `('type', 'repr')` tuple; changed variables → `[('type', 'repr'), ...]` list
+- Comprehensions are monitored with per-iteration snapshots
+- Snapshots are recorded after each line finishes
+
+### Key Infrastructure
+
+- **`tracefunc` package** — Core tracing engine using `sys.monitoring` (Python 3.12+). Dev dependency of dialoghelper, must be installed explicitly.
+- **`toolslm.inspecttools.resolve()`** — Resolves dotted symbol paths (e.g., `'textwrap.TextWrapper._wrap_chunks'`) to Python callables.
+- **Markdown rendering pipeline** — `Markdown(fmt_trace(r))` flows through two paths depending on how it's used:
+  1. **Last expression** → `_repr_markdown_()` rich result promotion in `kernel_worker.py` converts to HTML via `markdown-it-py`
+  2. **`display()` call** → IPython's `StreamingDisplayPublisher` produces a `text/markdown` MIME bundle → `render_mime_bundle()` in `app.py` converts to HTML
+- **Table styling** (`static/css/components.css`) — `.mime-markdown` CSS provides themed borders, header styling (blue accent, secondary background), alternating row shading, hover highlights, and monospace font. All colors use CSS variables for dark/light theme compatibility.
+
+## Markdown Rendering Pipeline
+
+Any cell that returns or displays an IPython `Markdown` object (e.g., `Markdown(fmt_trace(r))`) is rendered as styled HTML via the following pipeline:
+
+```mermaid
+flowchart TB
+    subgraph "Cell Code"
+        EXPR["Markdown(text)<br/>(last expression)"]
+        DISP["display(Markdown(text))"]
+    end
+
+    subgraph "kernel_worker.py"
+        REPR["_repr_markdown_()"]
+        MDIT1["markdown-it-py<br/>.enable('table').render()"]
+        HTML1["text/html in MIME bundle"]
+    end
+
+    subgraph "IPython Display"
+        PUB["StreamingDisplayPublisher"]
+        MIME["text/markdown MIME bundle"]
+    end
+
+    subgraph "app.py"
+        RMB["render_mime_bundle()"]
+        MDIT2["markdown-it-py<br/>.enable('table').render()"]
+        HTML2["&lt;div class='mime-markdown'&gt;...&lt;/div&gt;"]
+    end
+
+    subgraph "Browser"
+        CSS[".mime-markdown CSS<br/>borders, headers, alternating rows"]
+        RENDER["Styled table output"]
+    end
+
+    EXPR --> REPR
+    REPR --> MDIT1
+    MDIT1 --> HTML1
+    HTML1 --> CSS
+
+    DISP --> PUB
+    PUB --> MIME
+    MIME --> RMB
+    RMB --> MDIT2
+    MDIT2 --> HTML2
+    HTML2 --> CSS
+    CSS --> RENDER
+```
+
+### Rich Result Promotion Order
+
+The kernel worker checks display representations in this order (`kernel_worker.py`):
+
+1. `_repr_png_()` → `image/png` (PIL Images)
+2. `_repr_html_()` → `text/html` (DataFrames, HTML objects)
+3. `_repr_markdown_()` → converted to `text/html` via `markdown-it-py` (Markdown display objects)
+
+### CSS Styling
+
+Markdown tables rendered inside `.mime-markdown` divs are styled via `static/css/components.css`:
+
+| CSS Rule | Effect |
+|----------|--------|
+| `.mime-markdown table` | Collapsed borders, monospace font, auto width |
+| `.mime-markdown th` | Secondary background, blue accent color, bold |
+| `.mime-markdown td` | Themed borders, padding, word-wrap |
+| `tr:nth-child(even) td` | Alternating row shading |
+| `tr:hover td` | Blue tint on hover |
+
+All colors use CSS custom properties (`--border`, `--bg-secondary`, `--accent-blue`, etc.) for automatic dark/light theme support.
+
 ## Test Notebooks
 
-Two comprehensive test notebooks are available:
+Four test notebooks are available:
 
 ### Basic Tests: `notebooks/test_dialoghelper.ipynb`
 
@@ -903,7 +1107,28 @@ Tests advanced dialoghelper functions:
   - Backup before modification
   - Find/replace across all cells
 
-Run both notebooks to verify all dialoghelper features are working correctly.
+### Capture Tests: `notebooks/test_capture.ipynb`
+
+Tests the screen capture functionality:
+
+- `setup_share()` - Inject `screenshot.js` event listeners into the browser
+- `start_share()` - Trigger browser screen/window picker dialog
+- `capture_screen()` - Capture current frame as PIL Image (async)
+- `capture_tool()` - LLM-friendly wrapper (async, returns Image or error string)
+- Multiple sequential captures with delay
+- Save screenshot to file
+
+### Tracetools Tests: `notebooks/test_tracetools.ipynb`
+
+Tests the function tracing functionality:
+
+- `tracetool()` - Trace a simple function with variable snapshots
+- `fmt_trace()` - Format trace output as markdown tables
+- `Markdown(fmt_trace(r))` - Render formatted traces inline
+- `target_func` parameter - Trace internal/stdlib functions
+- Recursive function tracing - One trace entry per call
+
+Run all four notebooks to verify all dialoghelper features are working correctly.
 
 ## See Also
 

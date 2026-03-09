@@ -321,6 +321,24 @@ CellOutput(
 )
 ```
 
+#### Rich Result Promotion
+
+When the result object has rich representations (`_repr_png_()` for PIL images, `_repr_html_()` for DataFrames, etc.), the kernel automatically promotes the result to `display_data` with a full MIME bundle. This ensures objects like PIL Images, pandas DataFrames, and other rich objects render inline rather than showing their text `repr()`.
+
+```python
+# A cell ending with `img` (a PIL Image) produces:
+CellOutput(
+    output_type='display_data',  # promoted from execute_result
+    content={
+        'text/plain': '<PIL.PngImagePlugin.PngImageFile ...>',
+        'image/png': 'base64...'
+    },
+    metadata={}
+)
+```
+
+The promotion check order is: `_repr_png_()` first, then `_repr_html_()`. If neither produces content, the result falls back to a plain `execute_result` with `text/plain` only.
+
 ### Error
 
 Exception information:

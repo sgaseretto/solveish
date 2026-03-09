@@ -15,6 +15,21 @@
    - OOB (Out-of-Band) swap handling for collaboration
    ========================================================================== */
 
+// ==================== DialogHelper Bidirectional Data ====================
+// Used by screenshot.js and other dialoghelper event handlers to push data
+// back to Python via the /push_data_blocking_ endpoint.
+async function pushData(idx, data) {
+    const params = new URLSearchParams();
+    params.append('dlg_name', window.NOTEBOOK_ID);
+    params.append('data_id', String(idx));
+    params.append('data', JSON.stringify(data));
+    await fetch('/push_data_blocking_', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: params.toString()
+    });
+}
+
 // ==================== Global Cell Selection (Event Delegation) ====================
 // Use event delegation on document to ensure cell selection works even when clicking buttons
 document.addEventListener('mousedown', (e) => {
