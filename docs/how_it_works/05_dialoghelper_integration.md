@@ -1057,6 +1057,65 @@ pane(n=50, ip='192.168.1.100', user='ubuntu', keyfile='~/.ssh/id_rsa')
 - tmux installed (`brew install tmux` on macOS)
 - No additional Python dependencies (uses `subprocess` from stdlib)
 
+## Exhash (Hash-Addressed Line Editor)
+
+DialogHelper provides an `exhash` module for verified line-addressed text editing. Each line is identified by a `lineno|hash|` address where the hash is a 4-char hex digest of the line content. This prevents stale edits — if the content has changed since viewing, the hash won't match and the edit is rejected.
+
+### Functions
+
+| Function | Source | Purpose |
+|----------|--------|---------|
+| `lnhashview(text)` | `exhash` | Show all lines with `lineno\|hash\|  content` addresses |
+| `exhash(text, cmds)` | `exhash` | Apply hash-addressed edit commands. Returns dict with `lines`, `hashes`, `modified`, `deleted` |
+| `lnhash(lineno, line)` | `exhash` | Get hash address `lineno\|hash\|` for a specific line |
+| `line_hash(line)` | `exhash` | Get just the 4-char hex hash for a line |
+| `exhash_result(results)` | `exhash` | Format only modified lines from result dicts |
+| `msg_lnhashview(id)` | `dialoghelper.exhash` | Show hash-addressed lines of a notebook cell |
+| `msg_exhash(id, cmds)` | `dialoghelper.exhash` | Apply exhash commands to a cell's content |
+| `file_lnhashview(path)` | `dialoghelper.exhash` | Show hash-addressed lines of a file |
+| `file_exhash(path, cmds)` | `dialoghelper.exhash` | Apply exhash commands to a file |
+
+### Commands
+
+Commands use lnhash addresses: `lineno|hash|cmd`
+
+| Command | Description |
+|---------|-------------|
+| `s/pat/rep/[flags]` | Substitute (regex). Flags: `g`=all, `i`=case-insensitive |
+| `d` | Delete line(s) |
+| `a` | Append text after line (text block follows after newline) |
+| `i` | Insert text before line |
+| `c` | Change/replace line(s) |
+| `j` | Join with next line; with range, joins all |
+| `>` / `<` | Indent / dedent (4 spaces per level) |
+| `m dest` | Move line(s) after dest address |
+| `t dest` | Copy line(s) after dest address |
+| `sort` | Sort lines alphabetically |
+| `g/pat/cmd` | Global: run cmd on matching lines |
+
+### Usage
+
+```python
+from exhash import lnhashview, exhash, line_hash
+
+text = """def hello():
+print('world')
+return True"""
+
+# View with hash addresses
+for line in lnhashview(text): print(line)
+# 1|a1b2|  def hello():
+# 2|c3d4|  print('world')
+# 3|e5f6|  return True
+
+# Indent lines 2-3 (range address)
+result = exhash(text, ['2|c3d4|,3|e5f6|>'])
+```
+
+### Why Hash Addresses?
+
+Hash verification prevents **stale edit** errors — if line content changes between viewing and editing, the hash won't match and the edit is rejected. This is critical for LLM tool calling where the model may reference line numbers from an earlier `lnhashview` call.
+
 ## Markdown Rendering Pipeline
 
 Any cell that returns or displays an IPython `Markdown` object (e.g., `Markdown(fmt_trace(r))`) is rendered as styled HTML via the following pipeline:
@@ -1128,7 +1187,7 @@ All colors use CSS custom properties (`--border`, `--bg-secondary`, `--accent-bl
 
 ## Test Notebooks
 
-Five test notebooks are available:
+Six test notebooks are available:
 
 ### Basic Tests: `notebooks/test_dialoghelper.ipynb`
 
@@ -1205,7 +1264,19 @@ Tests tmux terminal buffer viewing:
 - `set_default_history()` - Configure default scrollback line count
 - Cross-pane keyword search example
 
-Run all five notebooks to verify all dialoghelper features are working correctly.
+### Exhash Tests: `notebooks/test_exhash.ipynb`
+
+Tests the hash-addressed line editor:
+
+- `lnhashview()` - Display lines with hash addresses
+- `lnhash()` / `line_hash()` - Get hash addresses for specific lines
+- `exhash()` - All edit commands: substitute, delete, insert, append, change, indent, global
+- `exhash_result()` - Format only modified lines from results
+- Hash verification - Wrong hashes are rejected
+- Multiple commands in one call
+- File editing with exhash
+
+Run all six notebooks to verify all dialoghelper features are working correctly.
 
 ## See Also
 

@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Test notebook** — `notebooks/test_tracetools.ipynb` with 7 cells covering `tracetool()`, `fmt_trace()`, stdlib tracing, `target_func`, and recursive function tracing.
 - **Markdown table styling** (`static/css/components.css`) — Added `.mime-markdown` CSS rules for rendered markdown tables: themed borders, header styling with blue accent, alternating row shading, hover highlights, and monospace font. Works in both dark and light themes.
 
+#### Exhash (Hash-Addressed Editor) Support
+- **Test notebook** — `notebooks/test_exhash.ipynb` with 13 cells covering `lnhashview()`, `lnhash()`, `line_hash()`, `exhash()` (substitute, delete, insert, append, change, indent, global commands), `exhash_result()`, hash verification, multi-command edits, and file editing.
+
 #### Tmux Tools Support
 - **Test notebook** — `notebooks/test_tmux.ipynb` with 14 cells covering `shell_ret()`, `pane()`, `panes()`, `windows()`, `sessions()`, `flatten_dict()`, `set_default_history()`, and cross-pane keyword search. Auto-creates/cleans up a test tmux session.
 
