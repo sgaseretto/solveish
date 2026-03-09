@@ -27,6 +27,75 @@ logger = logging.getLogger(__name__)
 KEEP_ALIVE_INTERVAL = 300  # 5 minutes
 TOKEN_REFRESH_BUFFER = 300  # Refresh proxy token 5 min before expiry
 
+# ============================================================================
+# DialogHelper proxy protocol constants
+# ============================================================================
+# When Colab code calls dialoghelper functions, the monkey-patched call_endp
+# uses input() with these magic prefixes to tunnel HTTP requests through
+# Jupyter's stdin channel back to Dialeng.
+DH_PROXY_PREFIX = "__DH_PROXY__:"
+DH_PROXY_RESP_PREFIX = "__DH_PROXY_RESP__:"
+DH_PROXY_ERR_PREFIX = "__DH_PROXY_ERR__:"
+
+# Auto-install dialoghelper on Colab
+DIALOGHELPER_INSTALL = "%pip install -q dialoghelper"
+
+# Monkey-patch code injected into Colab kernel to replace HTTP transport
+# with stdin-based proxy. _prep_endp still runs on Colab (resolves dname,
+# assembles data dict), but the actual HTTP call is proxied through Dialeng.
+DIALOGHELPER_PROXY_SETUP = '''
+try:
+    import dialoghelper.core as _dhc
+    import json as _json
+
+    class _ProxyResponse:
+        """Shim matching httpx.Response interface for _handle_resp."""
+        def __init__(self, status_code, text):
+            self.status_code = status_code
+            self.text = text
+        def json(self): return _json.loads(self.text)
+        def raise_for_status(self):
+            if self.status_code >= 400: raise Exception(f"HTTP {self.status_code}: {self.text}")
+
+    def _proxy_call(path, data, headers):
+        """Send HTTP request via input() proxy, return Response-like object."""
+        request = _json.dumps({
+            "path": path,
+            "data": {k: str(v) if not isinstance(v, str) else v for k, v in data.items()},
+            "headers": dict(headers),
+        })
+        raw_reply = input("__DH_PROXY__:" + request)
+        if raw_reply.startswith("__DH_PROXY_RESP__:"):
+            resp = _json.loads(raw_reply[len("__DH_PROXY_RESP__:"):])
+            return _ProxyResponse(resp.get("status", 200), resp.get("body", ""))
+        elif raw_reply.startswith("__DH_PROXY_ERR__:"):
+            err = _json.loads(raw_reply[len("__DH_PROXY_ERR__:"):])
+            raise ConnectionError(f"Proxy error: {err.get('error', 'unknown')}")
+        else:
+            raise ConnectionError(f"Unexpected proxy response: {raw_reply[:200]}")
+
+    def _patched_call_endp(path, dname='', json=False, raiseex=False, id=None, **data):
+        url, data, headers = _dhc._prep_endp(path, dname, json, id, data)
+        return _dhc._handle_resp(_proxy_call(path, data, headers), json, raiseex)
+
+    async def _patched_call_endpa(path, dname='', json=False, raiseex=False, id=None, **data):
+        import asyncio
+        url, data, headers = _dhc._prep_endp(path, dname, json, id, data)
+        res = await asyncio.get_event_loop().run_in_executor(
+            None, _proxy_call, path, data, headers)
+        return _dhc._handle_resp(res, json, raiseex)
+
+    _dhc.call_endp = _patched_call_endp
+    _dhc.call_endpa = _patched_call_endpa
+    print("dialoghelper proxy: active")
+except ImportError:
+    import sys
+    print("dialoghelper proxy: package not found after install", file=sys.stderr)
+except Exception as _e:
+    import sys
+    print(f"dialoghelper proxy: setup failed: {_e}", file=sys.stderr)
+'''
+
 
 class ColabKernel(BaseKernel):
     """Kernel running on Google Colab via WebSocket.
@@ -43,7 +112,8 @@ class ColabKernel(BaseKernel):
         aiohttp.WSMsgType.ERROR,
     })
 
-    def __init__(self, api_client: ColabAPIClient, runtime_type: str = "cpu"):
+    def __init__(self, api_client: ColabAPIClient, runtime_type: str = "cpu",
+                 dialeng_port: int = 8000):
         self._api = api_client
         self._assignment: Optional[ColabAssignment] = None
         self._jupyter_session: Optional[JupyterSession] = None
@@ -60,6 +130,10 @@ class ColabKernel(BaseKernel):
         self._session_id: str = uuid.uuid4().hex
         # Runtime type: "cpu", "gpu", "tpu"
         self.runtime_type: str = runtime_type
+        # Dialeng server port for proxying dialoghelper HTTP calls
+        self._dialeng_port: int = dialeng_port
+        # Current init step description (for status reporting to UI)
+        self._init_status: str = ""
 
     def _make_header(self, msg_type: str, msg_id: str = None) -> dict:
         """Build a Jupyter wire protocol message header with consistent session ID."""
@@ -210,24 +284,18 @@ class ColabKernel(BaseKernel):
 
         logger.warning("kernel_info_reply not received, proceeding anyway")
 
-    async def _initialize_kernel(self) -> None:
-        """Run setup code on kernel to configure matplotlib inline backend, etc.
-
-        Without this, plt.show() won't generate display_data messages
-        because the inline backend isn't activated by default when
-        connecting via raw WebSocket (bypassing the Colab frontend).
-        """
+    async def _run_init_code(self, code: str, description: str,
+                            timeout: float = 30.0) -> None:
+        """Execute init code on kernel, log output, wait for completion."""
         if not self._ws:
             return
-
-        setup_code = "%matplotlib inline"
         msg_id = uuid.uuid4().hex
         execute_msg = {
             "header": self._make_header("execute_request", msg_id),
             "parent_header": {},
             "metadata": {},
             "content": {
-                "code": setup_code,
+                "code": code,
                 "silent": True,
                 "store_history": False,
                 "user_expressions": {},
@@ -238,22 +306,82 @@ class ColabKernel(BaseKernel):
         }
         await self._ws.send_json(execute_msg)
 
-        # Wait for execute_reply (with timeout)
-        deadline = asyncio.get_event_loop().time() + 10.0
+        deadline = asyncio.get_event_loop().time() + timeout
         while True:
-            if asyncio.get_event_loop().time() > deadline:
-                logger.warning("Kernel initialization timed out")
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                logger.warning(f"Colab init timed out: {description}")
                 break
-            ws_msg = await self._ws.receive(timeout=10.0)
+            ws_msg = await self._ws.receive(timeout=remaining)
             if ws_msg.type == aiohttp.WSMsgType.TEXT:
                 data = json.loads(ws_msg.data)
                 parent_id = data.get("parent_header", {}).get("msg_id")
-                if parent_id == msg_id and data.get("header", {}).get("msg_type") == "execute_reply":
-                    logger.info("Kernel initialized (matplotlib inline backend enabled)")
+                if parent_id != msg_id:
+                    continue
+                msg_type = data.get("header", {}).get("msg_type", "")
+                if msg_type == "stream":
+                    text = data.get("content", {}).get("text", "")
+                    if text.strip():
+                        logger.info(f"Colab init [{description}]: {text.strip()[:200]}")
+                elif msg_type == "error":
+                    content = data.get("content", {})
+                    logger.warning(
+                        f"Colab init [{description}] error: "
+                        f"{content.get('ename')}: {content.get('evalue')}"
+                    )
+                elif msg_type == "execute_reply":
+                    logger.info(f"Colab init complete: {description}")
                     break
             elif ws_msg.type in self._WS_CLOSE_TYPES:
-                logger.warning("WebSocket closed during kernel initialization")
+                logger.warning(f"WebSocket closed during init: {description}")
                 break
+
+    async def _initialize_kernel(self) -> None:
+        """Run setup code on kernel: matplotlib, dialoghelper install, proxy setup.
+
+        Each step runs as a separate execute_request with logging and timeout.
+        Progress is exposed via self._init_status for UI display.
+        """
+        if not self._ws:
+            return
+
+        init_steps = [
+            ("Setting up matplotlib", "%matplotlib inline", 30.0),
+            ("Installing dialoghelper", DIALOGHELPER_INSTALL, 120.0),
+            ("Configuring dialoghelper proxy", DIALOGHELPER_PROXY_SETUP, 30.0),
+        ]
+        for description, code, timeout in init_steps:
+            self._init_status = description
+            logger.info(f"Colab init: {description}")
+            await self._run_init_code(code, description, timeout=timeout)
+
+        self._init_status = ""
+        logger.info("Colab kernel initialization complete")
+
+    async def _handle_dh_proxy(self, prompt: str) -> str:
+        """Handle a dialoghelper proxy request from Colab kernel.
+
+        Parses request from input prompt, makes local HTTP call to Dialeng,
+        returns response formatted for the Colab-side proxy shim.
+        """
+        try:
+            request = json.loads(prompt[len(DH_PROXY_PREFIX):])
+            path = request["path"]
+            data = request.get("data", {})
+            headers = request.get("headers", {})
+            url = f"http://localhost:{self._dialeng_port}/{path}"
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, data=data, headers=headers) as resp:
+                    body = await resp.text()
+                    content_type = resp.headers.get("Content-Type", "text/plain")
+                    return DH_PROXY_RESP_PREFIX + json.dumps({
+                        "status": resp.status, "body": body,
+                        "content_type": content_type,
+                    })
+        except Exception as e:
+            logger.error(f"DialogHelper proxy error: {e}")
+            return DH_PROXY_ERR_PREFIX + json.dumps({"error": str(e)})
 
     async def execute_streaming(
         self,
@@ -274,6 +402,18 @@ class ColabKernel(BaseKernel):
         if not self._ws or self._ws.closed or self._connection_state != "connected":
             await self.assign_and_connect()
 
+        # Inject dialoghelper magic variables into the remote kernel namespace.
+        # The subprocess kernel does this via shell.user_ns, but for Colab we
+        # prepend silent assignment code so dialoghelper's find_var() can
+        # locate __dialog_name and __msg_id in the call stack.
+        if notebook_id or cell_id:
+            preamble_parts = []
+            if notebook_id:
+                preamble_parts.append(f"__dialog_name = {notebook_id!r}")
+            if cell_id:
+                preamble_parts.append(f"__msg_id = {cell_id!r}")
+            code = "\n".join(preamble_parts) + "\n" + code
+
         msg_id = uuid.uuid4().hex
         self._current_msg_id = msg_id
         self._is_busy = True
@@ -288,7 +428,7 @@ class ColabKernel(BaseKernel):
                 "silent": False,
                 "store_history": True,
                 "user_expressions": {},
-                "allow_stdin": False,
+                "allow_stdin": True,   # Needed for dialoghelper stdin proxy
                 "stop_on_error": True,
             },
             "channel": "shell",
@@ -396,6 +536,24 @@ class ColabKernel(BaseKernel):
                         if execution_state == "idle":
                             # Last IOPub message — all outputs delivered
                             break
+
+                    elif msg_type == "input_request":
+                        # Handle stdin — used by dialoghelper proxy and input()
+                        prompt = content.get("prompt", "")
+                        if prompt.startswith(DH_PROXY_PREFIX):
+                            reply_value = await self._handle_dh_proxy(prompt)
+                        else:
+                            # Non-proxy input() — not supported on remote
+                            reply_value = ""
+
+                        input_reply = {
+                            "header": self._make_header("input_reply"),
+                            "parent_header": data.get("header", {}),
+                            "metadata": {},
+                            "content": {"value": reply_value, "status": "ok"},
+                            "channel": "stdin",
+                        }
+                        await self._ws.send_json(input_reply)
 
                 elif ws_msg.type in self._WS_CLOSE_TYPES:
                     logger.warning(f"WebSocket close frame received: type={ws_msg.type}")
@@ -541,13 +699,17 @@ class ColabKernel(BaseKernel):
         )
 
     def get_status(self) -> KernelStatus:
+        # Show init progress in connection_state when initializing
+        conn_state = self._connection_state
+        if self._init_status:
+            conn_state = f"initializing: {self._init_status}"
         return KernelStatus(
             is_alive=self.is_alive,
             is_busy=self._is_busy,
             execution_count=self._execution_count,
             kernel_type="colab",
             runtime_id=self._assignment.endpoint if self._assignment else None,
-            connection_state=self._connection_state,
+            connection_state=conn_state,
         )
 
     def get_info(self) -> KernelInfo:

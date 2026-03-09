@@ -228,6 +228,10 @@ sequenceDiagram
     RT-->>CK: kernel_info_reply (kernel ready)
 
     CK->>RT: execute_request (%matplotlib inline)
+    RT-->>CK: execute_reply
+    CK->>RT: execute_request (%pip install dialoghelper)
+    RT-->>CK: execute_reply
+    CK->>RT: execute_request (dialoghelper proxy setup)
     RT-->>CK: execute_reply (init done)
 
     Note over CK: Start keep-alive + token refresh tasks
@@ -241,7 +245,7 @@ sequenceDiagram
 3. **Create Jupyter session** — POST to the runtime proxy's Jupyter API to start a Python 3 kernel. Returns a `kernel_id`.
 4. **Connect WebSocket** — Open `wss://<proxy>/api/kernels/<kernel_id>/channels?session_id=<session>` with proxy token in headers.
 5. **Kernel readiness handshake** — Send `kernel_info_request`, wait for `kernel_info_reply` (30s timeout).
-6. **Initialize kernel** — Execute `%matplotlib inline` silently to configure the inline backend for plot rendering.
+6. **Initialize kernel** — Multi-step silent init: `%matplotlib inline`, `pip install dialoghelper`, and dialoghelper proxy setup. See [DialogHelper Proxy for Colab](./13_colab_dialoghelper_proxy.md).
 7. **Start background tasks** — Keep-alive pings (5 min) and proxy token refresh (before expiry).
 
 ### Two API Backends
@@ -287,6 +291,8 @@ Every WebSocket message is JSON with this structure:
 | `shell` | Client → Kernel | `execute_request`, `kernel_info_request` |
 | `shell` | Kernel → Client | `execute_reply`, `kernel_info_reply` |
 | `iopub` | Kernel → Client | `stream`, `display_data`, `execute_result`, `error`, `status` |
+| `stdin` | Kernel → Client | `input_request` (from `input()` calls, including dialoghelper proxy) |
+| `stdin` | Client → Kernel | `input_reply` (response to input_request) |
 | `control` | Client → Kernel | `interrupt_request` |
 
 ### Message Correlation
@@ -373,15 +379,17 @@ The MIME bundle is converted to HTML using this priority:
 8. `application/json` → pretty-printed JSON
 9. `text/plain` → escaped plain text fallback
 
-### Kernel Initialization for Plots
+### Kernel Initialization
 
-When connecting via raw WebSocket (bypassing Colab's frontend), the matplotlib inline backend is not automatically activated. During `_initialize_kernel()`, we execute `%matplotlib inline` which:
+When connecting via raw WebSocket (bypassing Colab's frontend), several setup steps run during `_initialize_kernel()`:
 
-1. Sets matplotlib to use the `module://matplotlib_inline.backend_inline` renderer
-2. Registers `flush_figures` as a `post_execute` hook on the IPython shell
-3. Registers PNG format handlers on `IPython.display_formatter`
+1. **`%matplotlib inline`** — Sets matplotlib to use the `module://matplotlib_inline.backend_inline` renderer, registers `flush_figures` as a `post_execute` hook, and registers PNG format handlers. This ensures `plt.show()` produces `display_data` messages with `image/png` content.
+2. **`%pip install -q dialoghelper`** — Auto-installs the dialoghelper package on the Colab VM (120s timeout).
+3. **DialogHelper proxy setup** — Injects a monkey-patch that redirects dialoghelper's HTTP calls through Jupyter's stdin channel back to the local Dialeng server.
 
-This ensures `plt.show()` and implicit figure display produce `display_data` messages with `image/png` content.
+Each step runs as a separate `execute_request` with its own timeout and logging. Progress is exposed via `get_status().connection_state` (e.g., `"initializing: Installing dialoghelper"`).
+
+For full details on the dialoghelper proxy mechanism, see [DialogHelper Proxy for Colab](./13_colab_dialoghelper_proxy.md).
 
 ## Multiplexed WebSocket Subtlety
 
@@ -508,3 +516,9 @@ Follow the same pattern as `ColabKernel`:
 2. Implement `BaseKernel` with `execute_streaming()`, `interrupt()`, etc.
 3. Create a session manager (like `ColabSessionManager`)
 4. Register with `KernelService`
+
+## See Also
+
+- [DialogHelper Proxy for Colab](./13_colab_dialoghelper_proxy.md) — How dialoghelper functions are proxied through stdin on Colab
+- [DialogHelper Integration](./05_dialoghelper_integration.md) — General dialoghelper integration (endpoints, magic variables, JavaScript injection)
+- [Kernel Execution](./04_kernel_execution.md) — Local subprocess kernel and execution queue

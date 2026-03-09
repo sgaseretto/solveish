@@ -26,7 +26,10 @@ For headless interaction with Dialeng (e.g., a remote Jupyter notebook calling D
 **`app.py` endpoints** - HTTP API for dialoghelper library:
 - Information: `/curr_dialog_`, `/msg_idx_`, `/find_msgs_`, `/read_msg_`
 - Modification: `/add_relative_`, `/rm_msg_`, `/update_msg_`, `/add_runq_`
-- Content editing: `/msg_insert_line_`, `/msg_str_replace_`, `/msg_strs_replace_`, `/msg_replace_lines_`
+- Content editing: `/msg_insert_line_`, `/msg_str_replace_`, `/msg_strs_replace_`, `/msg_replace_lines_`, `/msg_del_lines_`, `/msg_pyrun_`
+- Clipboard: `/msg_clipboard_`, `/msg_paste_`
+- UI toggles: `/toggle_header_collapse_`, `/bookmark_`, `/toggle_comment_`
+- Dialog management: `/create_dialog_`, `/stop_kernel_`, `/rm_dialog_`
 - Utility: `/add_html_`, `/push_data_blocking_`, `/pop_data_blocking_`
 
 **`services/kernel/kernel_worker.py`** - Magic variable injection:
@@ -181,18 +184,31 @@ The `services/dialoghelper_service.py` module provides core functions used by bo
 | `cell_to_dict(cell)` | Convert cell for JSON | Endpoints |
 | `build_context_messages(notebook, cell_id)` | Build LLM context | LLM Service |
 | `cell_to_messages(cell)` | Convert to LLM format | LLM Service |
+| `format_msgs_as_xml(results, ...)` | Format search results as XML | find_msgs endpoint |
+| `format_msgs_as_json(results, ...)` | Format search results as JSON | find_msgs endpoint |
+| `clipboard_copy(notebook, nb_id, ids, cut)` | Copy/cut cells to clipboard | msg_clipboard endpoint |
+| `clipboard_paste(notebook, nb_id, ref_id, after)` | Paste cells from clipboard | msg_paste endpoint |
+| `log_change(nb_id, action, cell_id, details)` | Log cell changes for audit | update_msg, rm_msg |
 
 ### find_msgs() Parameters
 
 ```python
 find_msgs(
-    notebook,           # Notebook object
-    re_pattern="",      # Regex to match source
-    msg_type="",        # Filter by cell type
-    pinned_only=False,  # Only pinned cells
-    skipped=None,       # None=all, True=skipped, False=non-skipped
-    limit=100,          # Max results
-    before_idx=None     # Only cells before this index
+    notebook,             # Notebook object
+    re_pattern="",        # Regex/literal pattern to match source
+    msg_type="",          # Filter by cell type (code, note, prompt, raw)
+    pinned_only=False,    # Only pinned cells
+    skipped=None,         # None=all, True=skipped, False=non-skipped
+    limit=100,            # Max results
+    before_idx=None,      # Only cells before this index
+    # New parameters (dialoghelper v2)
+    use_case=False,       # Case-sensitive search
+    use_regex=True,       # Regex vs literal matching
+    only_err=False,       # Only cells with error outputs
+    only_exp=False,       # Only exported cells
+    only_chg=False,       # Only changed cells (version > 0)
+    ids="",               # Comma-separated cell IDs to filter by
+    include_output=True,  # Also search in output text
 )
 ```
 
@@ -206,30 +222,55 @@ All endpoints receive `dlg_name` parameter (the notebook ID).
 |----------|---------|------------|
 | `POST /curr_dialog_` | Get dialog info | `with_messages: bool` |
 | `POST /msg_idx_` | Get cell index | `id_: str` |
-| `POST /find_msgs_` | Search cells | `re_pattern, msg_type, limit` |
+| `POST /find_msgs_` | Search cells (XML/JSON) | `re_pattern, msg_type, limit, use_case, use_regex, only_err, only_exp, only_chg, ids, include_output, include_meta, as_xml, nums, trunc_out, trunc_in, headers_only, header_section` |
 | `POST /read_msg_` | Read cell content | `n, relative, id_, view_range, nums` |
 
 ### Modification Endpoints
 
 | Endpoint | Purpose | Parameters |
 |----------|---------|------------|
-| `POST /add_relative_` | Add new cell | `content, placement, id_, msg_type, ...` |
-| `POST /rm_msg_` | Remove cell | `msid: str` |
-| `POST /update_msg_` | Update properties | `id_, **kwargs` |
-| `POST /add_runq_` | Queue for execution | `id_, api` |
+| `POST /add_relative_` | Add new cell | `content, placement (add_after/add_before/at_start/at_end), id_, msg_type, run_mode, ...` |
+| `POST /rm_msg_` | Remove cell | `msid, log_changed` |
+| `POST /update_msg_` | Update properties | `id_, log_changed, content, msg_type, output, pinned, skipped, ...` |
+| `POST /add_runq_` | Queue for execution | `ids, api` |
 
 ### Content Editing Endpoints
 
 | Endpoint | Purpose | Parameters |
 |----------|---------|------------|
 | `POST /msg_insert_line_` | Insert line | `id_, insert_line, new_str` |
-| `POST /msg_str_replace_` | Replace string | `id_, old_str, new_str` |
+| `POST /msg_str_replace_` | Replace string | `id_, old_str, new_str, start_line, end_line, n_matches, re_filter, invert_filter` |
 | `POST /msg_strs_replace_` | Replace multiple | `id_, old_strs, new_strs` (JSON arrays) |
 | `POST /msg_replace_lines_` | Replace line range | `id_, start_line, end_line, new_content` |
+| `POST /msg_del_lines_` | Delete line range | `id_, start_line, end_line, re_filter, invert_filter` |
+| `POST /msg_pyrun_` | Execute Python against text | `id_, code` (cell source available as `text`) |
 
 > **Note:** The server endpoints use `id_` (with underscore) as the parameter name due to FastHTML conventions, but the dialoghelper library uses `id=` in its function calls and handles the mapping internally.
 
 > **Note:** Line-based functions (`msg_insert_line`, `msg_replace_lines`, `msg_del_lines`) use **1-based line indexing** in the dialoghelper library.
+
+### Clipboard Endpoints
+
+| Endpoint | Purpose | Parameters |
+|----------|---------|------------|
+| `POST /msg_clipboard_` | Copy/cut cells | `ids, id_, cmd` (copy/cut) |
+| `POST /msg_paste_` | Paste cells from clipboard | `id_, after` |
+
+### UI Toggle Endpoints
+
+| Endpoint | Purpose | Parameters |
+|----------|---------|------------|
+| `POST /toggle_header_collapse_` | Toggle header collapse | `id_` |
+| `POST /bookmark_` | Toggle bookmark (1-9) | `id_, n` |
+| `POST /toggle_comment_` | Toggle line comments | `ids, id_` |
+
+### Dialog Management Endpoints
+
+| Endpoint | Purpose | Parameters |
+|----------|---------|------------|
+| `POST /create_dialog_` | Create/load notebook | `name` |
+| `POST /stop_kernel_` | Stop execution queue | `name` |
+| `POST /rm_dialog_` | Delete notebook from memory | `name` |
 
 ### Utility Endpoints
 
@@ -389,6 +430,27 @@ iife("""
     setTimeout(() => notif.remove(), 3000);
 """)
 ```
+
+## The `pushData()` Global Function
+
+Dialeng provides a global JavaScript function `pushData(idx, data)` (defined in `static/js/app.js`) that simplifies pushing data from browser JavaScript back to Python. It properly URL-encodes all parameters (critical for binary data like base64 images) and posts to `/push_data_blocking_`:
+
+```javascript
+// Defined globally in static/js/app.js
+async function pushData(idx, data) {
+    const params = new URLSearchParams();
+    params.append('dlg_name', window.NOTEBOOK_ID);
+    params.append('data_id', String(idx));
+    params.append('data', JSON.stringify(data));
+    await fetch('/push_data_blocking_', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: params.toString()
+    });
+}
+```
+
+This function is used by dialoghelper's `screenshot.js` for screen capture, and can be used by any injected JavaScript handler that needs to send data back to Python. Using `URLSearchParams` ensures proper encoding of special characters (e.g., `+`, `/`, `=` in base64 data).
 
 ## Bidirectional Data Transfer
 
@@ -816,9 +878,316 @@ All endpoints return JSON. For complex responses, use `cell_to_dict()` to ensure
 
 Endpoints return `{"error": "message"}` on failure, otherwise `{"status": "ok"}` or the requested data.
 
+## Screen Capture
+
+DialogHelper provides a `capture` module that enables taking screenshots from Python notebook code. Dialeng supports this functionality through its bidirectional data transfer infrastructure.
+
+### How It Works
+
+```mermaid
+sequenceDiagram
+    participant Python as Python Notebook
+    participant Server as Dialeng Server
+    participant Browser as Browser JS
+
+    Note over Python: setup_share()
+    Python->>Server: iife(screenshot.js)
+    Server->>Browser: WebSocket: inject script
+    Browser->>Browser: Register shareScreen + captureScreen listeners
+
+    Note over Python: start_share()
+    Python->>Server: trigger_now('shareScreen')
+    Server->>Browser: WebSocket: htmx.trigger
+    Browser->>Browser: navigator.mediaDevices.getDisplayMedia()
+    Note over Browser: User picks a window/screen
+
+    Note over Python: capture_screen()
+    Python->>Server: fire_event_a('captureScreen', {idx: uuid})
+    Server->>Browser: WebSocket: htmx.trigger
+    Browser->>Browser: ImageCapture.grabFrame()
+    Browser->>Browser: Canvas resize + toDataURL()
+    Browser->>Server: pushData(idx, {img_data: dataURL})
+    Server->>Server: asyncio.Queue.put(data)
+    Python->>Server: pop_data_a(idx)
+    Server->>Python: {img_data: "data:image/png;base64,..."}
+    Python->>Python: base64 decode → PIL.Image
+```
+
+### Functions
+
+| Function | Purpose |
+|----------|---------|
+| `setup_share()` | Injects `screenshot.js` into the browser via `iife()`. Registers `shareScreen` and `captureScreen` event listeners. Call once per session. |
+| `start_share()` | Fires `shareScreen` event via `trigger_now()`. Browser shows the screen/window picker dialog. User must select a screen to share. |
+| `capture_screen(timeout=15)` | Async. Fires `captureScreen` event, waits for the JS handler to grab a frame and send it back via `pushData()`. Returns a PIL Image. |
+| `capture_tool(timeout=15)` | Async. LLM-friendly wrapper (`@llmtool` decorated). Returns PIL Image on success, error string on failure. |
+
+### Usage
+
+```python
+from dialoghelper.capture import setup_share, start_share, capture_screen
+
+# 1. Inject screenshot.js (once per session)
+setup_share()
+
+# 2. Prompt user to select a screen/window
+start_share()
+
+# 3. Capture screenshots (as many times as needed)
+img = await capture_screen()
+img.thumbnail((800, 600))
+img  # Displays inline thanks to rich result promotion
+```
+
+### Key Infrastructure
+
+- **`pushData()` global function** (`static/js/app.js`) — URL-encodes and posts data to `/push_data_blocking_`. Critical for base64 image data which contains `+`, `/`, `=` characters that break raw form encoding.
+- **Rich result promotion** (`kernel_worker.py`) — PIL Images returned as the last expression are automatically promoted from `execute_result` to `display_data` with a `image/png` MIME type, so they render inline.
+- **`window.NOTEBOOK_ID`** (`ui/layout.py`) — Set on page load, used by `pushData()` to identify which notebook's data queue to push to.
+
+## Tracetools (Function Tracing)
+
+DialogHelper provides a `tracetools` module for LLM-accessible function execution tracing using Python 3.12's `sys.monitoring`.
+
+### Functions
+
+| Function | Purpose |
+|----------|---------|
+| `tracetool(sym, args, kwargs, target_func)` | Trace execution of a callable. Returns list of `(stack_str, trace_dict)` tuples with per-line variable snapshots. Decorated with `@llmtool` for LLM tool calling. |
+| `fmt_trace(traces)` | Format raw trace output as markdown tables with Source, Hits, and Variables columns. |
+
+### Usage
+
+```python
+from dialoghelper.tracetools import tracetool, fmt_trace
+from IPython.display import Markdown
+
+# Define a function
+def demo(n, m='x'):
+    total = 0
+    for i in range(n): total += i
+    return m * total
+
+# Trace it
+r = tracetool(sym='demo', args=[5], kwargs={'m': 'y'})
+
+# Display formatted (renders as HTML table via markdown-it-py)
+Markdown(fmt_trace(r))
+```
+
+### Trace Output Semantics
+
+- Each call to `target_func` (including recursion) produces a separate trace entry
+- `trace_dict` maps source snippets to `(hit_count, variables)`
+- Unchanged variables → `('type', 'repr')` tuple; changed variables → `[('type', 'repr'), ...]` list
+- Comprehensions are monitored with per-iteration snapshots
+- Snapshots are recorded after each line finishes
+
+### Key Infrastructure
+
+- **`tracefunc` package** — Core tracing engine using `sys.monitoring` (Python 3.12+). Dev dependency of dialoghelper, must be installed explicitly.
+- **`toolslm.inspecttools.resolve()`** — Resolves dotted symbol paths (e.g., `'textwrap.TextWrapper._wrap_chunks'`) to Python callables.
+- **Markdown rendering pipeline** — `Markdown(fmt_trace(r))` flows through two paths depending on how it's used:
+  1. **Last expression** → `_repr_markdown_()` rich result promotion in `kernel_worker.py` converts to HTML via `markdown-it-py`
+  2. **`display()` call** → IPython's `StreamingDisplayPublisher` produces a `text/markdown` MIME bundle → `render_mime_bundle()` in `app.py` converts to HTML
+- **Table styling** (`static/css/components.css`) — `.mime-markdown` CSS provides themed borders, header styling (blue accent, secondary background), alternating row shading, hover highlights, and monospace font. All colors use CSS variables for dark/light theme compatibility.
+
+## Tmux Tools (Terminal Buffer Viewing)
+
+DialogHelper provides a `tmux` module for capturing and inspecting content from tmux sessions, windows, and panes. All capture functions are `@llmtool` decorated for use as AI assistant tools.
+
+### Functions
+
+| Function | Purpose |
+|----------|---------|
+| `shell_ret(cmd, host, ip, user, keyfile)` | Run shell commands locally or over SSH. Returns stdout/stderr. |
+| `pane(n, pane, session, window)` | Capture scrollback history from a specific tmux pane. |
+| `list_panes(session, window)` | List panes with dimensions, history size, and active status. |
+| `panes(session, window, n)` | Capture all panes in a window as a `{pane_num: content}` dict. |
+| `list_windows(session)` | List windows with names, pane counts, and active markers. |
+| `windows(session, n)` | Capture all windows and panes as a nested dict. |
+| `list_sessions()` | List all active tmux sessions. |
+| `sessions(n)` | Capture entire tmux state as a nested dict (sessions > windows > panes). |
+| `flatten_dict(d, sep)` | Flatten nested dicts into `(path, value)` tuples for searching. |
+| `set_default_history(n)` | Set default scrollback line count (default: 500). |
+
+### Function Hierarchy
+
+```
+sessions()                              # All sessions → nested dict
+  └─ windows(session=...)               # All windows in a session
+       └─ panes(session=..., window=...)  # All panes in a window
+            └─ pane(session=..., window=..., pane=...)  # Single pane content
+
+list_sessions() / list_windows() / list_panes()  # Metadata only (no content)
+
+flatten_dict(sessions())  # Flat list of (path, content) for keyword search
+```
+
+### Usage
+
+```python
+from dialoghelper.tmux import pane, sessions, flatten_dict
+
+# Capture a specific pane
+content = pane(n=50, session='dev', window=0)
+
+# Search across all tmux content
+flat = flatten_dict(sessions(n=20))
+matches = [(path, c) for path, c in flat if 'Error' in c]
+for path, c in matches:
+    lines = [l for l in c.split('\n') if 'Error' in l]
+    print(f'{path}: {lines}')
+```
+
+### SSH Support
+
+All functions accept SSH parameters for remote tmux access:
+
+```python
+# Via SSH host alias
+pane(n=50, host='myserver')
+
+# Via IP/user/keyfile
+pane(n=50, ip='192.168.1.100', user='ubuntu', keyfile='~/.ssh/id_rsa')
+```
+
+### Requirements
+
+- tmux installed (`brew install tmux` on macOS)
+- No additional Python dependencies (uses `subprocess` from stdlib)
+
+## Exhash (Hash-Addressed Line Editor)
+
+DialogHelper provides an `exhash` module for verified line-addressed text editing. Each line is identified by a `lineno|hash|` address where the hash is a 4-char hex digest of the line content. This prevents stale edits — if the content has changed since viewing, the hash won't match and the edit is rejected.
+
+### Functions
+
+| Function | Source | Purpose |
+|----------|--------|---------|
+| `lnhashview(text)` | `exhash` | Show all lines with `lineno\|hash\|  content` addresses |
+| `exhash(text, cmds)` | `exhash` | Apply hash-addressed edit commands. Returns dict with `lines`, `hashes`, `modified`, `deleted` |
+| `lnhash(lineno, line)` | `exhash` | Get hash address `lineno\|hash\|` for a specific line |
+| `line_hash(line)` | `exhash` | Get just the 4-char hex hash for a line |
+| `exhash_result(results)` | `exhash` | Format only modified lines from result dicts |
+| `msg_lnhashview(id)` | `dialoghelper.exhash` | Show hash-addressed lines of a notebook cell |
+| `msg_exhash(id, cmds)` | `dialoghelper.exhash` | Apply exhash commands to a cell's content |
+| `file_lnhashview(path)` | `dialoghelper.exhash` | Show hash-addressed lines of a file |
+| `file_exhash(path, cmds)` | `dialoghelper.exhash` | Apply exhash commands to a file |
+
+### Commands
+
+Commands use lnhash addresses: `lineno|hash|cmd`
+
+| Command | Description |
+|---------|-------------|
+| `s/pat/rep/[flags]` | Substitute (regex). Flags: `g`=all, `i`=case-insensitive |
+| `d` | Delete line(s) |
+| `a` | Append text after line (text block follows after newline) |
+| `i` | Insert text before line |
+| `c` | Change/replace line(s) |
+| `j` | Join with next line; with range, joins all |
+| `>` / `<` | Indent / dedent (4 spaces per level) |
+| `m dest` | Move line(s) after dest address |
+| `t dest` | Copy line(s) after dest address |
+| `sort` | Sort lines alphabetically |
+| `g/pat/cmd` | Global: run cmd on matching lines |
+
+### Usage
+
+```python
+from exhash import lnhashview, exhash, line_hash
+
+text = """def hello():
+print('world')
+return True"""
+
+# View with hash addresses
+for line in lnhashview(text): print(line)
+# 1|a1b2|  def hello():
+# 2|c3d4|  print('world')
+# 3|e5f6|  return True
+
+# Indent lines 2-3 (range address)
+result = exhash(text, ['2|c3d4|,3|e5f6|>'])
+```
+
+### Why Hash Addresses?
+
+Hash verification prevents **stale edit** errors — if line content changes between viewing and editing, the hash won't match and the edit is rejected. This is critical for LLM tool calling where the model may reference line numbers from an earlier `lnhashview` call.
+
+## Markdown Rendering Pipeline
+
+Any cell that returns or displays an IPython `Markdown` object (e.g., `Markdown(fmt_trace(r))`) is rendered as styled HTML via the following pipeline:
+
+```mermaid
+flowchart TB
+    subgraph "Cell Code"
+        EXPR["Markdown(text)<br/>(last expression)"]
+        DISP["display(Markdown(text))"]
+    end
+
+    subgraph "kernel_worker.py"
+        REPR["_repr_markdown_()"]
+        MDIT1["markdown-it-py<br/>.enable('table').render()"]
+        HTML1["text/html in MIME bundle"]
+    end
+
+    subgraph "IPython Display"
+        PUB["StreamingDisplayPublisher"]
+        MIME["text/markdown MIME bundle"]
+    end
+
+    subgraph "app.py"
+        RMB["render_mime_bundle()"]
+        MDIT2["markdown-it-py<br/>.enable('table').render()"]
+        HTML2["&lt;div class='mime-markdown'&gt;...&lt;/div&gt;"]
+    end
+
+    subgraph "Browser"
+        CSS[".mime-markdown CSS<br/>borders, headers, alternating rows"]
+        RENDER["Styled table output"]
+    end
+
+    EXPR --> REPR
+    REPR --> MDIT1
+    MDIT1 --> HTML1
+    HTML1 --> CSS
+
+    DISP --> PUB
+    PUB --> MIME
+    MIME --> RMB
+    RMB --> MDIT2
+    MDIT2 --> HTML2
+    HTML2 --> CSS
+    CSS --> RENDER
+```
+
+### Rich Result Promotion Order
+
+The kernel worker checks display representations in this order (`kernel_worker.py`):
+
+1. `_repr_png_()` → `image/png` (PIL Images)
+2. `_repr_html_()` → `text/html` (DataFrames, HTML objects)
+3. `_repr_markdown_()` → converted to `text/html` via `markdown-it-py` (Markdown display objects)
+
+### CSS Styling
+
+Markdown tables rendered inside `.mime-markdown` divs are styled via `static/css/components.css`:
+
+| CSS Rule | Effect |
+|----------|--------|
+| `.mime-markdown table` | Collapsed borders, monospace font, auto width |
+| `.mime-markdown th` | Secondary background, blue accent color, bold |
+| `.mime-markdown td` | Themed borders, padding, word-wrap |
+| `tr:nth-child(even) td` | Alternating row shading |
+| `tr:hover td` | Blue tint on hover |
+
+All colors use CSS custom properties (`--border`, `--bg-secondary`, `--accent-blue`, etc.) for automatic dark/light theme support.
+
 ## Test Notebooks
 
-Two comprehensive test notebooks are available:
+Six test notebooks are available:
 
 ### Basic Tests: `notebooks/test_dialoghelper.ipynb`
 
@@ -862,9 +1231,56 @@ Tests advanced dialoghelper functions:
   - Backup before modification
   - Find/replace across all cells
 
-Run both notebooks to verify all dialoghelper features are working correctly.
+### Capture Tests: `notebooks/test_capture.ipynb`
+
+Tests the screen capture functionality:
+
+- `setup_share()` - Inject `screenshot.js` event listeners into the browser
+- `start_share()` - Trigger browser screen/window picker dialog
+- `capture_screen()` - Capture current frame as PIL Image (async)
+- `capture_tool()` - LLM-friendly wrapper (async, returns Image or error string)
+- Multiple sequential captures with delay
+- Save screenshot to file
+
+### Tracetools Tests: `notebooks/test_tracetools.ipynb`
+
+Tests the function tracing functionality:
+
+- `tracetool()` - Trace a simple function with variable snapshots
+- `fmt_trace()` - Format trace output as markdown tables
+- `Markdown(fmt_trace(r))` - Render formatted traces inline
+- `target_func` parameter - Trace internal/stdlib functions
+- Recursive function tracing - One trace entry per call
+
+### Tmux Tests: `notebooks/test_tmux.ipynb`
+
+Tests tmux terminal buffer viewing:
+
+- `shell_ret()` - Run shell commands and capture output
+- `list_sessions()` / `list_windows()` / `list_panes()` - Enumerate tmux hierarchy
+- `pane()` - Capture scrollback history from a specific pane
+- `panes()` / `windows()` / `sessions()` - Capture content as nested dicts
+- `flatten_dict()` - Flatten nested dicts for searching across all panes
+- `set_default_history()` - Configure default scrollback line count
+- Cross-pane keyword search example
+
+### Exhash Tests: `notebooks/test_exhash.ipynb`
+
+Tests the hash-addressed line editor:
+
+- `lnhashview()` - Display lines with hash addresses
+- `lnhash()` / `line_hash()` - Get hash addresses for specific lines
+- `exhash()` - All edit commands: substitute, delete, insert, append, change, indent, global
+- `exhash_result()` - Format only modified lines from results
+- Hash verification - Wrong hashes are rejected
+- Multiple commands in one call
+- File editing with exhash
+
+Run all six notebooks to verify all dialoghelper features are working correctly.
 
 ## See Also
 
+- [DialogHelper Proxy for Colab](./13_colab_dialoghelper_proxy.md) - How dialoghelper works on remote Colab kernels (stdin proxy, auto-install, monkey-patching)
+- [Google Colab Kernel](./12_colab_kernel.md) - Colab kernel architecture and Jupyter wire protocol
 - [LLM Integration](./06_llm_integration.md) - How the LLM service uses context building
 - [Cell Types](./02_cell_types.md) - Details on cell types and their properties

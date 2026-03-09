@@ -891,7 +891,9 @@ If working correctly:
 ```python
 # tests/test_models.py
 import pytest
-from app import Cell, Notebook, split_prompt_content, join_prompt_content
+from document.cell import Cell
+from document.prompt_utils import split_prompt_content, join_prompt_content
+from app import Notebook
 
 def test_split_prompt_content():
     combined = """What is Python?

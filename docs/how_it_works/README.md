@@ -19,6 +19,7 @@ Read the documents in numerical order for the best understanding of the system:
 | 10 | [10_tool_calling.md](10_tool_calling.md) | Tool calling - LLM tool usage and integration |
 | 11 | [11_shell_integration.md](11_shell_integration.md) | Shell commands - pshnb magic, shell cells, Safe Mode with safecmd |
 | 12 | [12_colab_kernel.md](12_colab_kernel.md) | Google Colab kernel - remote execution via Jupyter wire protocol over WebSocket |
+| 13 | [13_colab_dialoghelper_proxy.md](13_colab_dialoghelper_proxy.md) | DialogHelper proxy for Colab - auto-install, stdin proxy, monkey-patching |
 
 ## Purpose
 
@@ -48,6 +49,8 @@ These documents are intended for developers who want to:
 | Colab kernel internals | [12_colab_kernel.md](12_colab_kernel.md) |
 | Add remote kernel backend | [12_colab_kernel.md](12_colab_kernel.md) |
 | Colab OAuth & auth | [12_colab_kernel.md](12_colab_kernel.md) |
+| DialogHelper on Colab | [13_colab_dialoghelper_proxy.md](13_colab_dialoghelper_proxy.md) |
+| Colab stdin proxy | [13_colab_dialoghelper_proxy.md](13_colab_dialoghelper_proxy.md) |
 | Set up own Colab OAuth | [Colab OAuth Setup Guide](../guides/colab_oauth_setup.md) |
 | Remote notebook API | [05_dialoghelper_integration.md](05_dialoghelper_integration.md) |
 | LLM integration | [06_llm_integration.md](06_llm_integration.md) |

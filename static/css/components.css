@@ -207,6 +207,54 @@
     white-space: pre-wrap;
 }
 .cell-output .mime-html { /* Allow full HTML rendering - trusted user code */ }
+
+/* Markdown rendered output (tables, formatted text from markdown-it-py) */
+.cell-output .mime-markdown {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: var(--text-primary);
+}
+.cell-output .mime-markdown table {
+    border-collapse: collapse;
+    width: auto;
+    margin: 4px 0;
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    font-size: 0.8rem;
+}
+.cell-output .mime-markdown th,
+.cell-output .mime-markdown td {
+    border: 1px solid var(--border);
+    padding: 6px 10px;
+    text-align: left;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.cell-output .mime-markdown th {
+    background: var(--bg-secondary);
+    font-weight: 600;
+    color: var(--accent-blue);
+}
+.cell-output .mime-markdown tr:nth-child(even) td {
+    background: rgba(128, 128, 128, 0.06);
+}
+.cell-output .mime-markdown tr:hover td {
+    background: rgba(88, 166, 255, 0.08);
+}
+.cell-output .mime-markdown code {
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    font-size: 0.8rem;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: var(--bg-secondary);
+}
+.cell-output .mime-markdown p { margin: 4px 0; }
+.cell-output .mime-markdown h1,
+.cell-output .mime-markdown h2,
+.cell-output .mime-markdown h3 {
+    margin: 8px 0 4px;
+    color: var(--text-primary);
+}
 /* tqdm progress bars from Jupyter/Colab */
 .cell-output .mime-html .tqdm-bar,
 .cell-output .mime-html progress { width: 100%; }

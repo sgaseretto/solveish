@@ -25,7 +25,8 @@ class ColabSessionManager:
         self._api = ColabAPIClient(auth_service)
         self._kernels: Dict[str, ColabKernel] = {}
 
-    def get_kernel(self, notebook_id: str, runtime_type: str = "cpu") -> ColabKernel:
+    def get_kernel(self, notebook_id: str, runtime_type: str = "cpu",
+                   dialeng_port: int = 8000) -> ColabKernel:
         """Get or create a ColabKernel for a notebook.
 
         The kernel is created but NOT connected. Connection happens
@@ -34,9 +35,13 @@ class ColabSessionManager:
         Args:
             notebook_id: Notebook identifier
             runtime_type: "cpu", "gpu", or "tpu"
+            dialeng_port: Port of the Dialeng server for dialoghelper proxy
         """
         if notebook_id not in self._kernels:
-            self._kernels[notebook_id] = ColabKernel(self._api, runtime_type=runtime_type)
+            self._kernels[notebook_id] = ColabKernel(
+                self._api, runtime_type=runtime_type,
+                dialeng_port=dialeng_port
+            )
             logger.info(f"Created ColabKernel for notebook {notebook_id} (runtime={runtime_type})")
         return self._kernels[notebook_id]
 

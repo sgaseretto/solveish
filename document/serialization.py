@@ -69,6 +69,8 @@ def _cell_to_jupyter(cell: Cell) -> dict:
                 'collapsed': cell.collapsed,
                 'input_collapse': cell.input_collapse.value,
                 'output_collapse': cell.output_collapse.value,
+                'heading_collapsed': cell.heading_collapsed,
+                'bookmark': cell.bookmark,
             },
             'outputs': outputs,
             'execution_count': cell.execution_count
@@ -104,6 +106,16 @@ def _cell_to_jupyter(cell: Cell) -> dict:
             }
         }
 
+    elif cell.cell_type == CellType.RAW:
+        return {
+            'cell_type': 'raw',
+            'source': cell.source,
+            'metadata': {
+                'id': cell.id,
+                'collapsed': cell.collapsed,
+            }
+        }
+
     # Fallback
     return {
         'cell_type': 'code',
@@ -129,7 +141,9 @@ def _jupyter_to_cell(jcell: dict, index: int = 0) -> Cell:
         source = ''.join(source)
 
     # Determine cell type
-    if cell_type_str == 'code':
+    if cell_type_str == 'raw':
+        cell_type = CellType.RAW
+    elif cell_type_str == 'code':
         cell_type = CellType.CODE
     elif metadata.get('solveit_ai'):
         cell_type = CellType.PROMPT
@@ -200,7 +214,7 @@ def _jupyter_to_cell(jcell: dict, index: int = 0) -> Cell:
 
     # Create cell
     cell = Cell(
-        id=metadata.get('id', f"_{uuid.uuid4().hex[:8]}"),
+        id=metadata.get('id', uuid.uuid4().hex[:8]),
         cell_type=cell_type,
         source=source,
         outputs=outputs,
@@ -212,6 +226,8 @@ def _jupyter_to_cell(jcell: dict, index: int = 0) -> Cell:
         collapsed=metadata.get('collapsed', False),
         input_collapse=CollapseLevel(metadata.get('input_collapse', 0)),
         output_collapse=CollapseLevel(metadata.get('output_collapse', 0)),
+        heading_collapsed=metadata.get('heading_collapsed', False),
+        bookmark=metadata.get('bookmark', 0),
     )
 
     return cell
