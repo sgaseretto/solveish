@@ -11,7 +11,7 @@ from .dialoghelper_service import (
     MAX_CONTEXT_CELLS,
 )
 
-from .llm_service import LLMService, llm_service, SYSTEM_PROMPTS
+from .llm import LLMService, llm_service, SYSTEM_PROMPTS
 
 __all__ = [
     # dialoghelper_service

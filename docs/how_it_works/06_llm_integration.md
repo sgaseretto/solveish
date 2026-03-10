@@ -341,40 +341,122 @@ User: Hello! My name is Mark
 Assistant: Hello John! Nice to meet you!  ← This stale data is gone
 ```
 
-## LLM Service
+## LLM Service Architecture
 
-The `services/llm_service.py` module provides a unified interface to both providers:
+The LLM service uses a **provider-based architecture** where each LLM backend is encapsulated in its own provider class. A slim coordinator (`LLMService`) routes requests to the appropriate provider.
+
+### Package Structure
+
+```
+services/
+  llm/
+    __init__.py                    # Re-exports: LLMService, llm_service, SYSTEM_PROMPTS
+    base_provider.py               # ABC + dataclasses (ProviderInfo, LLMResult)
+    constants.py                   # SYSTEM_PROMPTS, _CONTEXT_PREAMBLE
+    utils.py                       # Shared functions (build_prompt_with_context, execute_tool, etc.)
+    llm_service.py                 # Coordinator (routing, prompt parsing, tool registry)
+    providers/
+      __init__.py                  # Re-exports all providers
+      claudette_provider.py        # Claudette API/Bedrock provider
+      claudette_agent_provider.py  # claudette-agent wrapper provider
+      claude_agent_sdk_provider.py # claude-agent-sdk direct provider
+  llm_service.py                   # Compatibility shim → imports from services.llm
+```
+
+### Architecture Diagram
+
+```mermaid
+flowchart TD
+    A["Prompt Cell Executed"] --> B["LLMService (Coordinator)"]
+    B --> C{Provider?}
+    C -->|claudette| D["ClaudetteProvider"]
+    C -->|claudette_agent| E["ClaudetteAgentProvider"]
+    C -->|claude_agent_sdk| F["ClaudeAgentSdkProvider"]
+
+    D --> G["stream() / stream_with_tools()"]
+    E --> G
+    F --> G
+
+    G --> H["Yield event dicts"]
+    H --> I["WebSocket broadcast"]
+
+    subgraph "BaseLLMProvider ABC"
+        G
+        J["initialize()"]
+        K["get_info()"]
+        L["check_thinking_support()"]
+    end
+```
+
+### Coordinator (`LLMService`)
+
+The coordinator owns:
+- **Provider selection** based on credential detection and `use_sdk_directly` config flag
+- **Mode → system prompt** mapping (learning, concise, standard)
+- **Model name mapping** via `config.get_api_model_name()`
+- **Prompt parsing** (`parse_prompt`, `substitute_variables`) and tool registry interaction
+- **Error wrapping** around provider streaming
+- **Usage/cost delegation** via `provider.last_result`
 
 ```python
-class LLMService:
-    async def stream_response(
-        self,
-        prompt: str,
-        context_messages: List[Dict],
-        mode: str,
-        model: str = "claude-sonnet-4-5",
-        use_thinking: bool = False
-    ) -> AsyncIterator[Dict]:
-        """
-        Args:
-            prompt: The user's prompt/question
-            context_messages: Previous conversation context
-            mode: One of "learning", "concise", "standard"
-            model: Claude model to use (e.g., "claude-sonnet-4-5", "claude-haiku-4-5")
-            use_thinking: Whether to enable thinking mode
+from services.llm import LLMService, llm_service, SYSTEM_PROMPTS
 
-        Yields:
-        - {"type": "thinking_start"}
-        - {"type": "thinking", "content": "..."}
-        - {"type": "thinking_end"}
-        - {"type": "chunk", "content": "..."}
-        - {"type": "error", "content": "..."}
-        """
+# Stream a response
+async for item in llm_service.stream_response(prompt, context, "standard"):
+    if item["type"] == "chunk":
+        print(item["content"], end="")
+
+# Stream with tool calling
+async for item in llm_service.stream_response_with_tools(
+    prompt, context, "standard", kernel=kernel, notebook_id=nb_id
+):
+    ...
 ```
+
+### Base Provider (`BaseLLMProvider`)
+
+All providers implement this abstract base class:
+
+```python
+class BaseLLMProvider(ABC):
+    @abstractmethod
+    async def initialize(self) -> None: ...
+
+    @abstractmethod
+    async def stream(self, prompt, context_messages, system_prompt,
+                     model, use_thinking, config) -> AsyncIterator[Dict]: ...
+
+    async def stream_with_tools(self, prompt, context_messages, system_prompt,
+                                model, use_thinking, config, tools, kernel,
+                                notebook_id, registry, max_steps) -> AsyncIterator[Dict]:
+        raise NotImplementedError(...)
+
+    @abstractmethod
+    def check_thinking_support(self, model: str) -> bool: ...
+
+    @abstractmethod
+    def get_info(self) -> ProviderInfo: ...
+```
+
+### Event Dict Protocol
+
+All providers yield dicts with a `type` key:
+
+| Event Type | Fields | Description |
+|-----------|--------|-------------|
+| `chunk` | `content` | Text response fragment |
+| `thinking_start` | — | Extended thinking begins |
+| `thinking` | `content` | Thinking content |
+| `thinking_end` | — | Extended thinking complete |
+| `error` | `content` | Error occurred |
+| `tool_call` | `id`, `name`, `input` | Tool invoked |
+| `tool_result` | `id`, `name`, `result` | Tool result |
+| `var_substituted` | `name`, `value` | Variable substituted (coordinator-level) |
+| `tool_available` | `name`, `description` | Tool registered (coordinator-level) |
 
 ### Provider-Specific Implementation
 
-The two providers have different APIs:
+The three providers have different streaming mechanics:
 
 #### claudette (Anthropic API / AWS Bedrock)
 
@@ -581,7 +663,7 @@ claudette-agent tracks token usage and estimated costs. After each streaming res
 ### Accessing Usage Data
 
 ```python
-from services.llm_service import llm_service
+from services.llm import llm_service
 
 # After streaming completes
 usage = llm_service.last_usage  # Usage object with token counts
@@ -1035,6 +1117,172 @@ When tool calling is used, the response includes an "LLM Steps" collapsible sect
 - Reasoning steps between tool calls
 
 This is handled by `_format_tool_steps_markdown()` in `app.py`. See [Tool Calling](./10_tool_calling.md) for details.
+
+## How to Add a New LLM Provider
+
+Follow these steps to add support for a new LLM library, SDK, or API:
+
+### Step 1: Create the Provider File
+
+Create `services/llm/providers/your_provider.py`:
+
+```python
+"""Your provider - brief description."""
+from typing import AsyncIterator, Dict, List, Any
+import logging
+
+from ..base_provider import BaseLLMProvider, ProviderInfo
+from .. import utils
+
+logger = logging.getLogger(__name__)
+
+
+class YourProvider(BaseLLMProvider):
+    """LLM provider using your-library."""
+
+    async def initialize(self) -> None:
+        """Import and validate your library is available."""
+        try:
+            import your_library
+            self._client_class = your_library.Client
+            logger.info("YourProvider initialized")
+        except ImportError as e:
+            raise ImportError("your-library is not installed.") from e
+
+    def get_info(self) -> ProviderInfo:
+        return ProviderInfo(
+            provider_name="your_provider",
+            display_name="Your Provider",
+            supports_native_tools=False,  # Set True if it has native tool calling
+            supports_mcp_tools=False,     # Set True if it supports MCP tools
+        )
+
+    def check_thinking_support(self, model: str) -> bool:
+        """Return True if the model supports extended thinking."""
+        return False  # Adjust based on your library
+
+    async def stream(
+        self, prompt, context_messages, system_prompt,
+        model, use_thinking, config,
+    ) -> AsyncIterator[Dict]:
+        """Stream a response. Yield event dicts."""
+        # Build your prompt (use utils.build_prompt_with_context if needed)
+        full_prompt = utils.build_prompt_with_context(prompt, context_messages)
+
+        try:
+            # Your streaming logic here
+            async for token in your_streaming_call(full_prompt, model):
+                yield {"type": "chunk", "content": token}
+        except Exception as e:
+            logger.exception(f"Streaming error: {e}")
+            yield {"type": "error", "content": f"Streaming error: {str(e)}"}
+
+    # Optionally override stream_with_tools() if your library supports tool calling
+```
+
+### Step 2: Register the Provider
+
+Add the import to `services/llm/providers/__init__.py`:
+
+```python
+from .your_provider import YourProvider
+
+__all__ = [..., 'YourProvider']
+```
+
+### Step 3: Add Provider Selection Logic
+
+In `services/llm/llm_service.py`, update `_ensure_initialized()` to create your provider when the right credentials are detected:
+
+```python
+elif self._provider_name == "your_provider":
+    from .providers import YourProvider
+    self._provider = YourProvider()
+    await self._provider.initialize()
+    self._initialized = True
+```
+
+### Step 4: Add Credential Detection (if needed)
+
+If your provider uses different credentials, update `services/credential_service.py`:
+
+```python
+# In detect_credentials():
+# Check for your provider's credentials
+if os.environ.get("YOUR_API_KEY"):
+    return CredentialStatus(
+        available=True,
+        provider="your_provider",
+        backend="your_backend",
+        source="env:YOUR_API_KEY",
+        details="Your provider configured"
+    )
+```
+
+### Step 5: Add Model Mappings (if needed)
+
+If your provider uses different model names, add a mapping in `dialeng_config.json`:
+
+```json
+{
+  "models": {
+    "your_provider_map": {
+      "claude-sonnet-4-5": "your-model-id",
+      "comment": "Model IDs for your provider"
+    }
+  }
+}
+```
+
+And update `services/dialeng_config.py` to use the new mapping.
+
+### Provider Architecture Summary
+
+```mermaid
+classDiagram
+    class BaseLLMProvider {
+        <<abstract>>
+        +initialize()
+        +stream()
+        +stream_with_tools()
+        +check_thinking_support()
+        +get_info()
+        +last_result
+    }
+
+    class ClaudetteProvider {
+        -backend: str
+        -_create_client()
+    }
+
+    class ClaudetteAgentProvider {
+        -_AsyncChat
+    }
+
+    class ClaudeAgentSdkProvider {
+        +stream_with_tools()
+    }
+
+    class YourProvider {
+        +stream()
+    }
+
+    BaseLLMProvider <|-- ClaudetteProvider
+    BaseLLMProvider <|-- ClaudetteAgentProvider
+    BaseLLMProvider <|-- ClaudeAgentSdkProvider
+    BaseLLMProvider <|-- YourProvider
+
+    class LLMService {
+        -_provider: BaseLLMProvider
+        +stream_response()
+        +stream_response_with_tools()
+        +get_provider()
+        +last_usage
+        +last_cost
+    }
+
+    LLMService --> BaseLLMProvider : delegates to
+```
 
 ## See Also
 
