@@ -471,6 +471,22 @@ document.addEventListener('keydown', e => {
         }
     }
     
+    // ===== h/p/e - Toggle cell state shortcuts =====
+    if (!inInput && !inAce && !mod) {
+        if (e.key === 'h' && currentCellId) {
+            e.preventDefault();
+            toggleCellState(currentCellId, 'skipped');
+        }
+        if (e.key === 'p' && currentCellId) {
+            e.preventDefault();
+            toggleCellState(currentCellId, 'pinned');
+        }
+        if (e.key === 'e' && currentCellId) {
+            e.preventDefault();
+            toggleCellState(currentCellId, 'is_exported');
+        }
+    }
+
     // ===== Add cell shortcuts (not in input) =====
     if (!inInput && !inAce) {
         if (mod && e.shiftKey && e.key === 'C') {
@@ -487,6 +503,15 @@ document.addEventListener('keydown', e => {
         }
     }
 });
+
+// Toggle cell state (skipped, pinned, is_exported) via server endpoint
+function toggleCellState(cellId, property) {
+    const nbPath = window.location.pathname;
+    fetch(`${nbPath}/cell/${cellId}/toggle/${property}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'}
+    });
+}
 
 // Sync prompt content before running
 function syncPromptContent(cellId) {
@@ -1959,11 +1984,15 @@ function processOOBSwap(html) {
         // Check if this is a cell update
         if (targetId.startsWith('cell-')) {
             const cellId = targetId.replace('cell-', '');
-            const isEditing = target.contains(document.activeElement);
+            const activeEl = document.activeElement;
+            const isEditingText = target.contains(activeEl) && activeEl && (
+                activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'INPUT' ||
+                activeEl.isContentEditable || activeEl.closest('.ace_editor')
+            );
             const isStreaming = target.classList.contains('streaming');
 
-            // Skip update if user is editing this cell or it's streaming
-            if (isEditing || isStreaming) {
+            // Skip update only if user is editing text in this cell or it's streaming
+            if (isEditingText || isStreaming) {
                 console.log('[WS] Skipping OOB swap for cell being edited/streamed:', cellId);
                 continue;
             }

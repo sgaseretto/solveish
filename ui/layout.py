@@ -10,6 +10,7 @@ from .cells import CellView
 from .controls import AddButtons
 from .settings import SettingsSidebar, SettingsOverlay
 from .outline import OutlineSidebar, OutlineToggleButton
+from .icons import sprites as icon_sprites
 from services.dialeng_config import DialengConfig
 
 
@@ -112,6 +113,8 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
 
     return Titled(
         f"{nb.title} - Dialeng",
+        # Lucide icon sprite sheet (must be in DOM before any <use href="#..."> references)
+        icon_sprites,
         # Main layout wrapper - flex container for outline sidebar + content
         Div(
             # Outline sidebar (push style - on left)

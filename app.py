@@ -919,11 +919,11 @@ app, rt = fast_app(
 # Static file serving
 @rt("/static/{path:path}")
 async def get(path: str):
-    """Serve static files from the static/ directory."""
+    """Serve static files from the static/ directory with no-cache headers for dev."""
     from starlette.responses import FileResponse
     file_path = Path("static") / path
     if file_path.exists() and file_path.is_file():
-        return FileResponse(file_path)
+        return FileResponse(file_path, headers={"Cache-Control": "no-cache"})
     return "Not found", 404
 
 
@@ -2232,6 +2232,21 @@ async def post(dlg_name: str, id_: str):
     cell.heading_collapsed = not cell.heading_collapsed
     await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
     return {"status": "ok", "heading_collapsed": cell.heading_collapsed}
+
+@rt("/notebook/{nb_id}/cell/{cell_id}/toggle/{prop}")
+async def post(nb_id: str, cell_id: str, prop: str):
+    """Toggle a boolean cell property (skipped, pinned, is_exported)."""
+    allowed = {'skipped', 'pinned', 'is_exported'}
+    if prop not in allowed:
+        return {"error": f"Cannot toggle '{prop}'"}
+    nb = get_notebook(nb_id)
+    idx = get_msg_idx(nb, cell_id)
+    if idx < 0:
+        return {"error": f"Cell {cell_id} not found"}
+    cell = nb.cells[idx]
+    setattr(cell, prop, not getattr(cell, prop))
+    await broadcast_to_notebook(nb_id, CellViewOOB(cell, nb_id))
+    return {"status": "ok", prop: getattr(cell, prop)}
 
 @rt("/bookmark_")
 async def post(dlg_name: str, id_: str, n: int):

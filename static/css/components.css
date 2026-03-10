@@ -131,6 +131,24 @@
     cursor: not-allowed;
 }
 
+/* Cell state indicators */
+.cell.skipped { opacity: 0.5; border-left: 3px solid var(--accent-red); }
+.cell.pinned { border-left: 3px solid var(--accent-blue); }
+.cell.exported { border-left: 3px solid var(--accent-green); }
+
+.state-indicator {
+    font-size: 0.6rem; font-weight: 600; margin-left: 4px;
+    padding: 1px 4px; border-radius: 3px;
+}
+.skipped-indicator { color: var(--accent-red); background: rgba(248, 81, 73, 0.1); }
+.pinned-indicator { color: var(--accent-blue); background: rgba(88, 166, 255, 0.1); }
+.exported-indicator { color: var(--accent-green); background: rgba(63, 185, 80, 0.1); }
+
+.state-toggle { opacity: 0.4; padding: 2px 4px; }
+.state-toggle:hover { opacity: 0.8; }
+.state-toggle.active { opacity: 1.0; }
+.state-toggle .lucide-icon { vertical-align: middle; }
+
 /* Cell header */
 .cell-header {
     display: flex; justify-content: space-between; align-items: center;
