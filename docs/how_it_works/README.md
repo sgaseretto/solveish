@@ -35,6 +35,7 @@ These documents are intended for developers who want to:
 
 | Goal | Start with |
 |------|------------|
+| Learn the interface / UI | [GUI Overview](../guides/gui_overview.md) |
 | Understand the data model | [01_state_management.md](01_state_management.md) |
 | Add a new cell type | [08_extension_system.md](08_extension_system.md) → [07_code_organization.md](07_code_organization.md) |
 | Create a custom callback | [08_extension_system.md](08_extension_system.md) |
@@ -62,6 +63,7 @@ These documents are intended for developers who want to:
 ## Related Documentation
 
 - [../../README.md](../../README.md) - Project overview and quick start
+- [../guides/gui_overview.md](../guides/gui_overview.md) - Visual guide to every section of the interface
 - [../../DEVELOPERS.md](../../DEVELOPERS.md) - General developer guide
 - [../../ROADMAP.md](../../ROADMAP.md) - Planned features
 - [../../CHANGELOG.md](../../CHANGELOG.md) - Version history

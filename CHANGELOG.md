@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+#### LLM Service Provider-Based Architecture Refactor
+- **Modularized `services/llm_service.py`** — Refactored the ~1540-line monolithic LLM service into a provider-based architecture under `services/llm/` package. Each LLM backend (claudette, claudette-agent, claude-agent-sdk) is now a separate provider class implementing `BaseLLMProvider` ABC.
+- **`BaseLLMProvider` ABC** (`services/llm/base_provider.py`) — Abstract base class with `ProviderInfo`/`LLMResult` dataclasses, following the existing `BaseKernel` pattern. Defines the contract for `stream()`, `stream_with_tools()`, `check_thinking_support()`, `get_info()`, and `initialize()`.
+- **Three provider implementations** — `ClaudetteProvider` (API/Bedrock), `ClaudetteAgentProvider` (Claude Code subscription wrapper), `ClaudeAgentSdkProvider` (direct SDK with MCP tool support and real-time `StreamEvent` streaming).
+- **Slim coordinator** (`services/llm/llm_service.py`) — `LLMService` class with the same public API (`stream_response`, `stream_response_with_tools`, `get_provider`, `last_usage`, `last_cost`). Owns provider selection, mode/model resolution, prompt parsing, and tool registry orchestration.
+- **Shared utilities** (`services/llm/utils.py`) — Extracted stateless helper functions: `build_prompt_with_context`, `execute_tool`, `format_tool_result_for_llm`, `save_debug_log`, `chunk_text`, `build_text_tool_definitions`, `parse_text_tool_calls`, `build_tool_results_prompt`.
+- **Compatibility shim** — `services/llm_service.py` remains as a thin re-export so existing `from services.llm_service import ...` imports continue to work.
+- **Replaced `print()` debug statements** — Provider implementations use `logger.debug()` instead of `print()` for debug output.
+- **Updated documentation** — `docs/how_it_works/06_llm_integration.md` updated with provider architecture diagrams, `BaseLLMProvider` ABC docs, event dict protocol, and a step-by-step "How to Add a New LLM Provider" guide.
+
+#### Image Handling in LLM Context
+- **Multimodal context messages** (`core/dispatch.py`) — Code cell outputs with images (screenshots, plots) now produce Anthropic-format image content blocks instead of raw base64 HTML. `_extract_image_blocks()` extracts from both structured `display_data` outputs and post-finalization HTML `<img>` tags. `_resize_base64_image()` resizes to max 1024px and re-encodes as JPEG to keep prompts within token limits.
+- **Image-aware providers** (`claudette_provider.py`, `claudette_agent_provider.py`) — Both providers use `_split_context_images()` to separate image blocks from context messages and attach them to the current prompt (user turn only), respecting the Anthropic API constraint that images cannot appear in assistant turns.
+- **claudette-agent non-streaming fallback** — When images are present, the provider uses `chat()` (non-streaming) instead of `chat.stream()`, because `chat.stream()` flattens all messages to text via `_build_conversation_prompt()`. `chat()` routes to `_call_with_images()` which sends structured content via stdin transport, avoiding the "Argument list too long" OS limit from CLI arguments.
+- **Base64 stripping in text output** — `_get_text_output()` and `_strip_base64_images()` ensure base64 `<img>` tags are removed from text context, preventing prompt bloat after `finalize_cell_execution` flattens structured outputs into HTML.
+- **Vision test notebook** (`notebooks/test_capture.ipynb`) — Added vision test cells: capture screen with `capture_tool()`, then prompt the LLM to describe what was captured.
+- **Updated documentation** — `docs/how_it_works/06_llm_integration.md` updated with image handling architecture, SDK limitations, and future improvement notes.
+
 ### Added
 
 #### DialogHelper v2 Compatibility Update

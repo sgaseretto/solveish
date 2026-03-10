@@ -341,40 +341,195 @@ User: Hello! My name is Mark
 Assistant: Hello John! Nice to meet you!  ← This stale data is gone
 ```
 
-## LLM Service
+## Image Handling in LLM Context
 
-The `services/llm_service.py` module provides a unified interface to both providers:
+Cell outputs (screenshots from `capture_tool()`, matplotlib plots, PIL images) produce `display_data` outputs with base64 image data. Getting these images to the LLM requires special handling due to several constraints.
+
+### The Pipeline Problem
+
+After `finalize_cell_execution()` in `app.py`, all structured cell outputs are flattened into a single HTML string via `render_mime_bundle()`. This replaces the structured `cell.outputs` list with a single `stream` CellOutput containing HTML — including full base64 `<img>` tags. By the time `cell_to_llm_messages()` runs, the original `display_data` outputs are gone.
+
+```mermaid
+flowchart LR
+    A["Cell executes<br/>(display_data with<br/>image/png bytes)"] --> B["finalize_cell_execution()<br/>render_mime_bundle()"]
+    B --> C["cell.output = HTML string<br/>with &lt;img base64&gt; tags"]
+    C --> D["cell_to_llm_messages()<br/>_extract_image_blocks()"]
+    D --> E["Anthropic image<br/>content blocks"]
+```
+
+### Image Extraction (`core/dispatch.py`)
+
+`_extract_image_blocks(cell)` extracts images from two sources (since finalization destroys structured outputs):
+
+1. **Structured `display_data` outputs** — if still available before finalization (has `image/png` bytes in a dict)
+2. **HTML `<img>` tags** — parsed from `cell.output` string after finalization (`<img src="data:image/png;base64,...">`)
+
+Images are resized and re-encoded to keep prompt size manageable:
+- `_resize_base64_image()` — resizes to max 1024px on longest side, re-encodes as JPEG (quality 80)
+- A full-res PNG screenshot (~2-5MB base64) becomes ~50-150KB JPEG
+
+Text output is cleaned separately:
+- `_get_text_output()` reads from `cell.outputs` (stream/execute_result types)
+- `_strip_base64_images()` replaces `<img>` tags with `[Image output]` to prevent bloating the text context
+
+### Provider Image Handling
+
+Both `claudette_provider.py` and `claudette_agent_provider.py` use `_split_context_images()`:
+
+```mermaid
+flowchart TD
+    A["context_messages<br/>(may include images)"] --> B["_split_context_images()"]
+    B --> C["text_messages<br/>(images stripped)"]
+    B --> D["image_blocks<br/>(extracted)"]
+    C --> E["chat.h<br/>(text-only history)"]
+    D --> F["Attach to prompt<br/>(user turn)"]
+    E --> G["LLM call"]
+    F --> G
+```
+
+**Why images must be in the prompt (last message), not in history:**
+- **Anthropic API**: Images can only appear in user turns, never assistant turns. Context may include assistant messages from prior prompt cell outputs.
+- **claudette**: `_append_pr` auto-resolves consecutive user messages by calling `self()`, which can reorder messages and place images in assistant turns.
+- **claudette-agent**: `chat.stream()` uses `_build_conversation_prompt()` which flattens ALL history messages to plain text, losing image data. Only `chat()` (non-streaming) routes to `_call_with_images()` when images are detected.
+- **claude-agent-sdk**: `query()` passes prompts as CLI arguments. Base64 images cause `[Errno 7] Argument list too long` (OS limit ~256KB on macOS). `_call_with_images()` avoids this by using `ClaudeSDKClient` with stdin transport.
+
+### Current Limitations and Future Improvements
+
+These are workarounds for current SDK limitations. When they improve:
+
+| Limitation | Current Workaround | Future |
+|---|---|---|
+| `query()` passes prompt as CLI arg | Images in last message only, sent via stdin by `_call_with_images()` | When `query()` uses stdin transport, images can stay in context |
+| `chat.stream()` flattens to text | Fall back to non-streaming `chat()` for images | When `chat.stream()` supports images, streaming + vision works |
+| `finalize_cell_execution` destroys structured outputs | Two-source extraction (structured + HTML parsing) | Preserve structured outputs alongside HTML |
+| `display()` mid-cell not captured | Use last-expression pattern for images | Hook into IPython's `DisplayPublisher` registration |
+
+### Key Files
+
+| File | Image-related functions |
+|---|---|
+| `core/dispatch.py` | `_extract_image_blocks()`, `_resize_base64_image()`, `_get_text_output()`, `_strip_base64_images()` |
+| `services/llm/providers/claudette_provider.py` | `_split_context_images()` |
+| `services/llm/providers/claudette_agent_provider.py` | `_split_context_images()` |
+| `services/llm/utils.py` | `_extract_text_from_content()`, `build_prompt_with_context()` |
+| `app.py` | `finalize_cell_execution()`, `render_mime_bundle()` |
+
+## LLM Service Architecture
+
+The LLM service uses a **provider-based architecture** where each LLM backend is encapsulated in its own provider class. A slim coordinator (`LLMService`) routes requests to the appropriate provider.
+
+### Package Structure
+
+```
+services/
+  llm/
+    __init__.py                    # Re-exports: LLMService, llm_service, SYSTEM_PROMPTS
+    base_provider.py               # ABC + dataclasses (ProviderInfo, LLMResult)
+    constants.py                   # SYSTEM_PROMPTS, _CONTEXT_PREAMBLE
+    utils.py                       # Shared functions (build_prompt_with_context, execute_tool, etc.)
+    llm_service.py                 # Coordinator (routing, prompt parsing, tool registry)
+    providers/
+      __init__.py                  # Re-exports all providers
+      claudette_provider.py        # Claudette API/Bedrock provider
+      claudette_agent_provider.py  # claudette-agent wrapper provider
+      claude_agent_sdk_provider.py # claude-agent-sdk direct provider
+  llm_service.py                   # Compatibility shim → imports from services.llm
+```
+
+### Architecture Diagram
+
+```mermaid
+flowchart TD
+    A["Prompt Cell Executed"] --> B["LLMService (Coordinator)"]
+    B --> C{Provider?}
+    C -->|claudette| D["ClaudetteProvider"]
+    C -->|claudette_agent| E["ClaudetteAgentProvider"]
+    C -->|claude_agent_sdk| F["ClaudeAgentSdkProvider"]
+
+    D --> G["stream() / stream_with_tools()"]
+    E --> G
+    F --> G
+
+    G --> H["Yield event dicts"]
+    H --> I["WebSocket broadcast"]
+
+    subgraph "BaseLLMProvider ABC"
+        G
+        J["initialize()"]
+        K["get_info()"]
+        L["check_thinking_support()"]
+    end
+```
+
+### Coordinator (`LLMService`)
+
+The coordinator owns:
+- **Provider selection** based on credential detection and `use_sdk_directly` config flag
+- **Mode → system prompt** mapping (learning, concise, standard)
+- **Model name mapping** via `config.get_api_model_name()`
+- **Prompt parsing** (`parse_prompt`, `substitute_variables`) and tool registry interaction
+- **Error wrapping** around provider streaming
+- **Usage/cost delegation** via `provider.last_result`
 
 ```python
-class LLMService:
-    async def stream_response(
-        self,
-        prompt: str,
-        context_messages: List[Dict],
-        mode: str,
-        model: str = "claude-sonnet-4-5",
-        use_thinking: bool = False
-    ) -> AsyncIterator[Dict]:
-        """
-        Args:
-            prompt: The user's prompt/question
-            context_messages: Previous conversation context
-            mode: One of "learning", "concise", "standard"
-            model: Claude model to use (e.g., "claude-sonnet-4-5", "claude-haiku-4-5")
-            use_thinking: Whether to enable thinking mode
+from services.llm import LLMService, llm_service, SYSTEM_PROMPTS
 
-        Yields:
-        - {"type": "thinking_start"}
-        - {"type": "thinking", "content": "..."}
-        - {"type": "thinking_end"}
-        - {"type": "chunk", "content": "..."}
-        - {"type": "error", "content": "..."}
-        """
+# Stream a response
+async for item in llm_service.stream_response(prompt, context, "standard"):
+    if item["type"] == "chunk":
+        print(item["content"], end="")
+
+# Stream with tool calling
+async for item in llm_service.stream_response_with_tools(
+    prompt, context, "standard", kernel=kernel, notebook_id=nb_id
+):
+    ...
 ```
+
+### Base Provider (`BaseLLMProvider`)
+
+All providers implement this abstract base class:
+
+```python
+class BaseLLMProvider(ABC):
+    @abstractmethod
+    async def initialize(self) -> None: ...
+
+    @abstractmethod
+    async def stream(self, prompt, context_messages, system_prompt,
+                     model, use_thinking, config) -> AsyncIterator[Dict]: ...
+
+    async def stream_with_tools(self, prompt, context_messages, system_prompt,
+                                model, use_thinking, config, tools, kernel,
+                                notebook_id, registry, max_steps) -> AsyncIterator[Dict]:
+        raise NotImplementedError(...)
+
+    @abstractmethod
+    def check_thinking_support(self, model: str) -> bool: ...
+
+    @abstractmethod
+    def get_info(self) -> ProviderInfo: ...
+```
+
+### Event Dict Protocol
+
+All providers yield dicts with a `type` key:
+
+| Event Type | Fields | Description |
+|-----------|--------|-------------|
+| `chunk` | `content` | Text response fragment |
+| `thinking_start` | — | Extended thinking begins |
+| `thinking` | `content` | Thinking content |
+| `thinking_end` | — | Extended thinking complete |
+| `error` | `content` | Error occurred |
+| `tool_call` | `id`, `name`, `input` | Tool invoked |
+| `tool_result` | `id`, `name`, `result` | Tool result |
+| `var_substituted` | `name`, `value` | Variable substituted (coordinator-level) |
+| `tool_available` | `name`, `description` | Tool registered (coordinator-level) |
 
 ### Provider-Specific Implementation
 
-The two providers have different APIs:
+The three providers have different streaming mechanics:
 
 #### claudette (Anthropic API / AWS Bedrock)
 
@@ -413,55 +568,56 @@ Model name mappings are defined in `dialeng_config.json` (see [Configuration](#c
 
 #### claudette-agent (Claude Code Subscription)
 
-[claudette-agent](https://github.com/sgaseretto/claudette-agent) uses AsyncChat with a `.stream()` method for **truly stateless queries**:
+[claudette-agent](https://github.com/sgaseretto/claudette-agent) wraps the Claude Agent SDK with a Claudette-compatible API. It now supports **character-level streaming** via `StreamEvent` and **native tool calling** via MCP servers:
 
 ```python
-from claudette_agent import AsyncChat
+from claudette_agent import Chat, contents, tool
 
-# Create chat with fully stateless configuration:
-# - setting_sources=[] prevents loading settings files
-# - cwd=None allows SDK to create fresh session each time
-# - extra_args={'no-session-persistence': None} prevents saving new sessions
-# Note: claudette-agent's _build_options() also sets continue_conversation=False
-# and resume=None to ensure no session continuation or resumption.
-chat = AsyncChat(
-    model="claude-sonnet-4-5",
+# Create chat - stateless by default (setting_sources=[])
+# Uses Chat (not AsyncChat) because Chat.stream() correctly handles
+# prompt appending, while AsyncChat's async _append_pr is not awaited.
+chat = Chat(
+    model="claude-sonnet-4-5-20250929",
     sp="You are helpful",
-    setting_sources=[],  # Don't load settings files
-    cwd=None,  # No cwd - SDK creates fresh session each time
-    extra_args={"no-session-persistence": None}  # Don't save new sessions
+    setting_sources=[],  # Default - stateless
 )
 
 # Add context to history
-chat.h.append({"role": "user", "content": full_prompt})
+for msg in context_messages:
+    chat.h.append(msg)
 
-# Stream response with extended thinking
-async for block in chat.stream(None, maxthinktok=10000):
-    if hasattr(block, 'type') and block.type == 'thinking':
-        print(f"Thinking: {block.thinking}")
-    elif hasattr(block, 'text'):
-        print(block.text, end='')
+# Stream response - yields text strings (character-level via StreamEvent)
+async for text_chunk in chat.stream(prompt):
+    print(text_chunk, end='', flush=True)
 
-# Access usage and cost after streaming
+# Extended thinking (incompatible with streaming per SDK docs)
+response = await chat(prompt, maxthinktok=10000)
+print(contents(response))
+
+# Native tool calling
+@tool
+def calculate(expression: str) -> str:
+    """Evaluate a math expression."""
+    return str(eval(expression))
+
+chat_with_tools = Chat(model="claude-sonnet-4-5-20250929", tools=[calculate])
+response = await chat_with_tools("What is 15 * 23?")
+print(contents(response))
+
+# Access usage and cost after any call
 print(f"Tokens used: {chat.use}")
 print(f"Cost: ${chat.cost:.6f}")
 ```
 
 Key features:
-- **Truly stateless queries** via four mechanisms:
-  - `setting_sources=[]` prevents Claude from loading settings files
-  - `cwd=None` allows SDK to create fresh session each time (no per-project sessions loaded)
-  - `extra_args={'no-session-persistence': None}` passes `--no-session-persistence` to the
-    Claude CLI, which prevents new sessions from being saved to disk
-  - claudette-agent's `_build_options()` explicitly sets `continue_conversation=False` and
-    `resume=None` to prevent session continuation or resumption
+- **Stateless by default** - `setting_sources=[]` prevents loading settings files; `_build_options()` sets `continue_conversation=False` and `resume=None`
+- **Character-level streaming** - `chat.stream(prompt)` yields text strings via `StreamEvent` with `include_partial_messages=True`
+- **Streaming + thinking are incompatible** - Use `chat(prompt, maxthinktok=N)` (non-streaming) for thinking; use `chat.stream(prompt)` for streaming
+- **Native tool calling** - `Chat(tools=[...])` auto-creates MCP servers; `chat.toolloop()` for automatic tool follow-up
 - **Notebook as source of truth** - Edits to cells are immediately reflected in subsequent queries
-- Model names without date suffix: `"claude-sonnet-4-5"`
-- Streaming via: `chat.stream(prompt, maxthinktok=N)`
-- Extended thinking via `maxthinktok` parameter
 - Usage tracking: `chat.use` and `chat.cost` properties
-- Model capability checks: `can_use_extended_thinking(model)`
-- Async by default
+- Model capability checks: `can_use_extended_thinking(model)`, `can_stream()`
+- New SDK features: `effort`, `max_budget_usd`, `fallback_model`, `can_use_tool`
 
 #### claude-agent-sdk Direct Mode (Maximum Isolation)
 
@@ -581,7 +737,7 @@ claudette-agent tracks token usage and estimated costs. After each streaming res
 ### Accessing Usage Data
 
 ```python
-from services.llm_service import llm_service
+from services.llm import llm_service
 
 # After streaming completes
 usage = llm_service.last_usage  # Usage object with token counts
@@ -1035,6 +1191,172 @@ When tool calling is used, the response includes an "LLM Steps" collapsible sect
 - Reasoning steps between tool calls
 
 This is handled by `_format_tool_steps_markdown()` in `app.py`. See [Tool Calling](./10_tool_calling.md) for details.
+
+## How to Add a New LLM Provider
+
+Follow these steps to add support for a new LLM library, SDK, or API:
+
+### Step 1: Create the Provider File
+
+Create `services/llm/providers/your_provider.py`:
+
+```python
+"""Your provider - brief description."""
+from typing import AsyncIterator, Dict, List, Any
+import logging
+
+from ..base_provider import BaseLLMProvider, ProviderInfo
+from .. import utils
+
+logger = logging.getLogger(__name__)
+
+
+class YourProvider(BaseLLMProvider):
+    """LLM provider using your-library."""
+
+    async def initialize(self) -> None:
+        """Import and validate your library is available."""
+        try:
+            import your_library
+            self._client_class = your_library.Client
+            logger.info("YourProvider initialized")
+        except ImportError as e:
+            raise ImportError("your-library is not installed.") from e
+
+    def get_info(self) -> ProviderInfo:
+        return ProviderInfo(
+            provider_name="your_provider",
+            display_name="Your Provider",
+            supports_native_tools=False,  # Set True if it has native tool calling
+            supports_mcp_tools=False,     # Set True if it supports MCP tools
+        )
+
+    def check_thinking_support(self, model: str) -> bool:
+        """Return True if the model supports extended thinking."""
+        return False  # Adjust based on your library
+
+    async def stream(
+        self, prompt, context_messages, system_prompt,
+        model, use_thinking, config,
+    ) -> AsyncIterator[Dict]:
+        """Stream a response. Yield event dicts."""
+        # Build your prompt (use utils.build_prompt_with_context if needed)
+        full_prompt = utils.build_prompt_with_context(prompt, context_messages)
+
+        try:
+            # Your streaming logic here
+            async for token in your_streaming_call(full_prompt, model):
+                yield {"type": "chunk", "content": token}
+        except Exception as e:
+            logger.exception(f"Streaming error: {e}")
+            yield {"type": "error", "content": f"Streaming error: {str(e)}"}
+
+    # Optionally override stream_with_tools() if your library supports tool calling
+```
+
+### Step 2: Register the Provider
+
+Add the import to `services/llm/providers/__init__.py`:
+
+```python
+from .your_provider import YourProvider
+
+__all__ = [..., 'YourProvider']
+```
+
+### Step 3: Add Provider Selection Logic
+
+In `services/llm/llm_service.py`, update `_ensure_initialized()` to create your provider when the right credentials are detected:
+
+```python
+elif self._provider_name == "your_provider":
+    from .providers import YourProvider
+    self._provider = YourProvider()
+    await self._provider.initialize()
+    self._initialized = True
+```
+
+### Step 4: Add Credential Detection (if needed)
+
+If your provider uses different credentials, update `services/credential_service.py`:
+
+```python
+# In detect_credentials():
+# Check for your provider's credentials
+if os.environ.get("YOUR_API_KEY"):
+    return CredentialStatus(
+        available=True,
+        provider="your_provider",
+        backend="your_backend",
+        source="env:YOUR_API_KEY",
+        details="Your provider configured"
+    )
+```
+
+### Step 5: Add Model Mappings (if needed)
+
+If your provider uses different model names, add a mapping in `dialeng_config.json`:
+
+```json
+{
+  "models": {
+    "your_provider_map": {
+      "claude-sonnet-4-5": "your-model-id",
+      "comment": "Model IDs for your provider"
+    }
+  }
+}
+```
+
+And update `services/dialeng_config.py` to use the new mapping.
+
+### Provider Architecture Summary
+
+```mermaid
+classDiagram
+    class BaseLLMProvider {
+        <<abstract>>
+        +initialize()
+        +stream()
+        +stream_with_tools()
+        +check_thinking_support()
+        +get_info()
+        +last_result
+    }
+
+    class ClaudetteProvider {
+        -backend: str
+        -_create_client()
+    }
+
+    class ClaudetteAgentProvider {
+        -_AsyncChat
+    }
+
+    class ClaudeAgentSdkProvider {
+        +stream_with_tools()
+    }
+
+    class YourProvider {
+        +stream()
+    }
+
+    BaseLLMProvider <|-- ClaudetteProvider
+    BaseLLMProvider <|-- ClaudetteAgentProvider
+    BaseLLMProvider <|-- ClaudeAgentSdkProvider
+    BaseLLMProvider <|-- YourProvider
+
+    class LLMService {
+        -_provider: BaseLLMProvider
+        +stream_response()
+        +stream_response_with_tools()
+        +get_provider()
+        +last_usage
+        +last_cost
+    }
+
+    LLMService --> BaseLLMProvider : delegates to
+```
 
 ## See Also
 

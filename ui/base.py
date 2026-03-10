@@ -21,3 +21,13 @@ def get_collapse_class(level: int) -> str:
     if level == 2:
         return "collapse-summary"
     return ""
+
+
+def get_cell_state_classes(cell) -> str:
+    """Build CSS class string reflecting cell metadata states."""
+    classes = ["cell"]
+    if cell.collapsed: classes.append("collapsed")
+    if cell.skipped: classes.append("skipped")
+    if cell.pinned: classes.append("pinned")
+    if cell.is_exported: classes.append("exported")
+    return " ".join(classes)

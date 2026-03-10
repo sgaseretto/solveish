@@ -5,7 +5,7 @@ Renders code cells with Ace editor and output display.
 """
 
 from fasthtml.common import *
-from ..base import get_collapse_class
+from ..base import get_collapse_class, get_cell_state_classes
 from .base import CellHeader
 
 
@@ -48,5 +48,4 @@ def CodeCellView(cell, notebook_id: str):
         cls="cell-body"
     )
 
-    collapsed_cls = " collapsed" if cell.collapsed else ""
-    return Div(header, body, id=f"cell-{cell.id}", cls=f"cell{collapsed_cls}", data_type=cell.cell_type)
+    return Div(header, body, id=f"cell-{cell.id}", cls=get_cell_state_classes(cell), data_type=cell.cell_type)

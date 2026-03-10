@@ -6,8 +6,9 @@ Shell cells execute bash commands via pshnb with optional safecmd validation.
 """
 
 from fasthtml.common import *
-from ..base import get_collapse_class
+from ..base import get_collapse_class, get_cell_state_classes
 from ..controls import TypeSelect, CollapseBtn
+from ..icons import sprites as ss
 
 
 def ShellCellHeader(cell, notebook_id: str, safe_mode: bool = False):
@@ -60,16 +61,38 @@ def ShellCellHeader(cell, notebook_id: str, safe_mode: bool = False):
         style="display: none;"
     )
 
+    # State indicators (visible badges when state is active)
+    state_indicators = []
+    if cell.skipped:
+        state_indicators.append(Span("HIDDEN", cls="state-indicator skipped-indicator"))
+    if cell.pinned:
+        state_indicators.append(Span("PINNED", cls="state-indicator pinned-indicator"))
+    if cell.is_exported:
+        state_indicators.append(Span("EXPORT", cls="state-indicator exported-indicator"))
+
     return Div(
         Div(
             Button("V", cls="collapse-btn",
                    onclick=f"toggleCollapse('{cell.id}')",
                    title="Collapse/Expand (full)"),
             Span("SHELL", cls="cell-badge shell"),
+            *state_indicators,
             Span(*meta_info, cls="cell-meta") if meta_info else None,
             Div(*collapse_controls, cls="collapse-controls") if collapse_controls else None,
         ),
         Div(
+            Button(ss('eye-closed' if cell.skipped else 'eye'),
+                   cls=f"btn btn-sm btn-icon state-toggle{' active' if cell.skipped else ''}",
+                   onclick=f"toggleCellState('{cell.id}', 'skipped')",
+                   title="Toggle AI visibility (h)"),
+            Button(ss('pin' if cell.pinned else 'pin-off'),
+                   cls=f"btn btn-sm btn-icon state-toggle{' active' if cell.pinned else ''}",
+                   onclick=f"toggleCellState('{cell.id}', 'pinned')",
+                   title="Toggle pin (p)"),
+            Button(ss('bookmark-check' if cell.is_exported else 'bookmark'),
+                   cls=f"btn btn-sm btn-icon state-toggle{' active' if cell.is_exported else ''}",
+                   onclick=f"toggleCellState('{cell.id}', 'is_exported')",
+                   title="Toggle export (e)"),
             TypeSelect(cell.id, cell.cell_type, notebook_id),
             run_button,
             cancel_button,
@@ -130,5 +153,4 @@ def ShellCellView(cell, notebook_id: str, safe_mode: bool = False):
         cls="cell-body"
     )
 
-    collapsed_cls = " collapsed" if cell.collapsed else ""
-    return Div(header, body, id=f"cell-{cell.id}", cls=f"cell{collapsed_cls}", data_type="shell")
+    return Div(header, body, id=f"cell-{cell.id}", cls=get_cell_state_classes(cell), data_type="shell")
