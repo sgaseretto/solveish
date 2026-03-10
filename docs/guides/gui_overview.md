@@ -6,7 +6,7 @@ This guide walks through every section of the Dialeng notebook interface, explai
 
 - [Page Layout](#page-layout)
 - [Header & Toolbar](#header--toolbar)
-- [File List](#file-list)
+- [File Explorer](#file-explorer)
 - [Cell Area](#cell-area)
 - [Cell Types](#cell-types)
   - [Code Cell](#code-cell)
@@ -19,6 +19,7 @@ This guide walks through every section of the Dialeng notebook interface, explai
   - [Collapse Controls](#collapse-controls)
   - [Action Buttons](#action-buttons)
 - [Add Cell Buttons](#add-cell-buttons)
+- [Kernel Status Bar & Modal](#kernel-status-bar--modal)
 - [Outline Sidebar](#outline-sidebar)
 - [Settings Sidebar](#settings-sidebar)
 - [Keyboard Shortcuts](#keyboard-shortcuts)
@@ -28,37 +29,34 @@ This guide walks through every section of the Dialeng notebook interface, explai
 
 ## Page Layout
 
-The interface is split into three main areas arranged horizontally:
+The interface is split into several areas arranged horizontally:
 
 ```
 ┌──────────────────────────────────────────────────────────┐
 │                        Header & Toolbar                   │
-├──────────┬───────────────────────────────────────────────┤
-│          │  File List (notebook tabs)                     │
-│ Outline  ├───────────────────────────────────────────────┤
-│ Sidebar  │                                               │
-│ (toggle) │  Cell Area                                    │
-│          │  ┌─────────────────────────────────────────┐  │
-│          │  │ [+ Code] [+ Note] [+ Prompt] [+ Shell] │  │
-│          │  ├─────────────────────────────────────────┤  │
-│          │  │ Cell 1                                  │  │
-│          │  ├─────────────────────────────────────────┤  │
-│          │  │ [+ Code] [+ Note] [+ Prompt] [+ Shell] │  │
-│          │  ├─────────────────────────────────────────┤  │
-│          │  │ Cell 2                                  │  │
-│          │  ├─────────────────────────────────────────┤  │
-│          │  │ ...                                     │  │
-│          │  └─────────────────────────────────────────┘  │
-├──────────┴──────────────────────────────────┬────────────┤
-│                                             │  Settings  │
-│                                             │  Sidebar   │
-│                                             │  (toggle)  │
-└─────────────────────────────────────────────┴────────────┘
+├─────────┬──────────┬─────────────────────────────────────┤
+│  File   │          │                                      │
+│Explorer │ Outline  │  Cell Area                           │
+│(toggle) │ Sidebar  │  ┌──────────────────────────────┐   │
+│         │ (toggle) │  │ Cell 1                       │   │
+│ Home >  │          │  ├──────────────────────────────┤   │
+│ folder  │ Headings │  │ [+ Code] [+ Note] [+ ...]   │   │
+│         │ Vars     │  ├──────────────────────────────┤   │
+│ 📓 nb1  │ Funcs    │  │ Cell 2                       │   │
+│ 📓 nb2  │          │  └──────────────────────────────┘   │
+│ 📁 sub/ │          ├─────────────────────────────────────┤
+│         │          │  🏠 Local Python                     │
+├─────────┴──────────┴──────────────────────┬──────────────┤
+│                                            │  Settings   │
+│                                            │  Sidebar    │
+└────────────────────────────────────────────┴─────────────┘
 ```
 
-- **Outline Sidebar** (left): Push-style sidebar showing headings, variables, and functions. Toggle with the outline button or `Ctrl+Shift+O`.
-- **Main Content** (center): Header, file list, and all notebook cells.
-- **Settings Sidebar** (right): Overlay-style panel for configuration. Toggle with the `⚙️` button.
+- **File Explorer** (left): Push-style sidebar showing folders and notebooks with breadcrumb navigation. Toggle with the files button or `Ctrl+Shift+E`.
+- **Outline Sidebar** (left, next to file explorer): Push-style sidebar showing headings, variables, and functions. Toggle with the outline button or `Ctrl+Shift+O`.
+- **Main Content** (center): Header, cells, and kernel status bar at the bottom.
+- **Kernel Status Bar** (bottom): Shows current kernel type and connection state. Click to open the kernel selection modal.
+- **Settings Sidebar** (right): Overlay-style panel for configuration. Toggle with the gear button.
 
 ---
 
@@ -68,32 +66,72 @@ The header bar sits at the top of the page and contains the notebook title and a
 
 ### Title Bar
 
-Displays the notebook icon (📓) and title on the left side.
+Displays the notebook icon and title on the left side, along with a **kernel status dot** — a small colored circle indicating the kernel's connection state:
+
+| Dot Color | Meaning |
+|-----------|---------|
+| **Grey** | No kernel connected yet |
+| **Green** | Kernel is alive and idle |
+| **Yellow** | Cells running/queued, or kernel restarting |
+| **Red** | Execution error (flashes briefly, then returns to green) |
+
+The dot updates in real-time via WebSocket and is initialized server-side, so returning to a notebook with an active kernel immediately shows green.
 
 ### Toolbar Controls (left to right)
 
 | Control | Description |
 |---------|-------------|
-| **Outline toggle** | Opens/closes the outline sidebar. Keyboard: `Ctrl+Shift+O` |
-| **Theme toggle** (☀️/🌙) | Switches between dark and light themes. Preference is saved to your browser. |
+| **File Explorer toggle** | Opens/closes the file explorer sidebar. Keyboard: `Ctrl+Shift+E` / `Cmd+Shift+E` |
+| **Outline toggle** | Opens/closes the outline sidebar. Keyboard: `Ctrl+Shift+O` / `Cmd+Shift+O` |
+| **Theme toggle** (sun/moon icon) | Switches between dark and light themes. Preference is saved to your browser. |
 | **Dialog Mode** selector | Dropdown to choose the AI conversation mode: **Mock** (no LLM calls), **Learning**, **Concise**, **Standard**. |
 | **Model** selector | Dropdown to pick which Claude model to use. Hidden when mode is "Mock". |
-| **Kernel Type** selector | Choose **Local Python** or **Google Colab**. Only visible if Colab integration is enabled. |
-| **Colab status dot** | Green = connected, gray = disconnected. Only visible in Colab mode. |
-| **Colab Runtime** selector | Choose CPU, GPU (T4), or TPU. Only visible when Colab is selected AND authenticated. |
-| **Colab Auth** button | "Connect Colab" (opens Google sign-in popup) or "Disconnect". |
-| **Safe Mode** checkbox | When checked, shell commands are validated against an allowlist before execution. Requires `shfmt` to be installed. |
+| **Safe Mode** button | Shield icon toggle. When active (green), shell commands are validated against an allowlist before execution. Requires `shfmt`. |
+| **Kernel** button | Shows current kernel type. Click to open kernel selection modal. |
 | **Restart** button | Restarts the Python/Colab kernel. All variables in memory are lost. |
-| **Cancel All** button (⏹) | Cancels the currently running cell and clears the execution queue. Only visible when cells are running. Keyboard: `Esc Esc` (double press). |
-| **Save** button (💾) | Saves the notebook to disk. Keyboard: `Ctrl+S` / `Cmd+S`. |
-| **Export** button (📥) | Downloads the notebook as an `.ipynb` file (Jupyter-compatible). |
-| **Settings** button (⚙️) | Opens the settings sidebar on the right. |
+| **Cancel All** button | Cancels the currently running cell and clears the execution queue. Only visible when cells are running. Keyboard: `Esc Esc` (double press). |
+| **Save** button | Saves the notebook to disk. Keyboard: `Ctrl+S` / `Cmd+S`. |
+| **Export** button | Downloads the notebook as an `.ipynb` file (Jupyter-compatible). |
+| **Settings** button | Opens the settings sidebar on the right. |
 
 ---
 
-## File List
+## File Explorer
 
-Below the header, a horizontal tab bar shows all notebooks in the workspace. The currently open notebook is highlighted. Click any name to switch notebooks. A **"+ New"** link at the end creates a new notebook.
+The file explorer is a collapsible sidebar on the left side of the page. It replaces the old flat file list with a directory-aware browser.
+
+### Breadcrumb Navigation
+
+At the top of the file list, breadcrumbs show your current path relative to the notebooks root. Click any segment to navigate to that directory. "Home" returns to the root.
+
+### Folders and Notebooks
+
+- **Folders** are shown with a folder icon. Click to navigate into the folder.
+- **Notebooks** are shown with a notebook icon. The currently open notebook is highlighted with a different icon and accent color.
+- **Kernel indicator**: Notebooks with a running kernel show a green notebook icon, making it easy to see which notebooks have active kernels.
+- Click any notebook to open it.
+
+### Creating New Items
+
+Click the **+** button in the file explorer header to open the new item modal:
+1. Enter a **name** for the new item
+2. Select the **type**: Dialog (notebook) or Folder
+3. Click **Create**
+
+If a `TEMPLATE.ipynb` exists in the directory (or any parent), its cells are used as initial content for new notebooks.
+
+### Deleting Files
+
+Hover over a notebook to reveal a trash icon on the right. Click it to open a confirmation modal before deleting.
+
+### Refreshing
+
+Click the **refresh** button (rotate icon) in the file explorer header to reload the file list. This picks up files created outside the UI (e.g., from the terminal).
+
+### Toggle
+
+- **Button**: Click the panel icon in the toolbar or the collapse button in the file explorer header.
+- **Keyboard**: `Ctrl+Shift+E` / `Cmd+Shift+E`
 
 ---
 
@@ -291,6 +329,32 @@ You can also add cells at the end of the notebook with keyboard shortcuts:
 
 ---
 
+## Kernel Status Bar & Modal
+
+### Status Bar
+
+At the bottom of the notebook, a compact status bar shows the current kernel type and connection state:
+
+- **Before first execution**: Shows the kernel type name (e.g., "Local Python") with a neutral icon.
+- **After first execution**: Shows a green dot, language name and version (e.g., "Python 3.11").
+- **Colab**: Shows the Colab label plus a runtime badge (CPU/GPU/TPU).
+
+Click the status bar to open the kernel selection modal.
+
+### Kernel Selection Modal
+
+The modal lists all registered kernel types (Local Python, Google Colab, and any custom kernels from extensions). Each option shows:
+
+- Icon and label
+- Description
+- Check mark for the currently active kernel
+- Auth status (for kernels requiring authentication, like Colab)
+- Runtime options (CPU/GPU/TPU) for the active kernel if applicable
+
+Selecting a different kernel switches the kernel type (with restart). A "Restart Kernel" button at the bottom restarts the current kernel without switching.
+
+---
+
 ## Outline Sidebar
 
 The outline sidebar is a left-side panel that provides a table-of-contents view of your notebook. Toggle it with the outline button in the toolbar or `Ctrl+Shift+O`.
@@ -315,9 +379,15 @@ The outline auto-refreshes when cells are executed or modified.
 
 ## Settings Sidebar
 
-Click the **⚙️** button in the toolbar to open the settings panel. It slides in from the right with a semi-transparent overlay behind it (click the overlay to close).
+Click the **settings** button (gear icon) in the toolbar to open the settings panel. It slides in from the right with a semi-transparent overlay behind it (click the overlay to close).
 
 Settings are organized in collapsible groups:
+
+### Dialeng Display Settings
+- **Notebook Width (px)**: Max width of the notebook container (600-3000px, default 1400).
+- **Button Size**: Compact / Normal / Large — scales all buttons, dropdowns, and icon buttons across the entire UI.
+- **Font Size (px)**: Base font size for the UI (10-24px, default 15).
+- **Reasoning Text Limit**: Max characters of AI reasoning/thinking text to display (0 = no limit).
 
 ### AWS Settings
 - **Region**: Select the AWS region for Bedrock API calls (e.g., us-east-1, us-west-2).
@@ -332,9 +402,6 @@ Settings are organized in collapsible groups:
 - **Require Confirmation**: Whether to ask before executing tool calls.
 - **Enable Built-in Tools**: Toggle built-in tool definitions on/off.
 
-### Display Settings
-- **Reasoning Text Limit**: Max characters of AI reasoning/thinking text to display (0-10000).
-
 ### Shell Settings
 - **Enable Shell Cells**: Toggle shell cell type availability. Requires app restart.
 
@@ -347,7 +414,7 @@ Settings are organized in collapsible groups:
 - **Debug Mode**: Enable verbose logging.
 - **Debug Log Directory**: Path where debug logs are written.
 
-Click **Save Settings** at the bottom to apply changes.
+Click **Save Settings** at the bottom to apply changes. Display settings (width, button size, font size) take effect on the next page load.
 
 ---
 
@@ -378,6 +445,7 @@ Click **Save Settings** at the bottom to apply changes.
 | `Ctrl+Shift+C` | Add code cell at end |
 | `Ctrl+Shift+N` | Add note cell at end |
 | `Ctrl+Shift+P` | Add prompt cell at end |
+| `Ctrl+Shift+E` | Toggle file explorer sidebar |
 
 ### Inside the Ace editor
 
@@ -393,7 +461,7 @@ Click **Save Settings** at the bottom to apply changes.
 
 ## Theme
 
-Dialeng supports dark and light themes. Click the theme toggle button (☀️ in dark mode, 🌙 in light mode) in the toolbar to switch.
+Dialeng supports dark and light themes. Click the theme toggle button (sun icon in dark mode, moon icon in light mode) in the toolbar to switch.
 
 - **Dark theme**: Dark background with Monokai syntax highlighting in editors.
 - **Light theme**: Light background with Chrome syntax highlighting in editors.

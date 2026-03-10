@@ -15,6 +15,20 @@ _ICON_NAMES = [
     'pin', 'pin-off',
     'eye', 'eye-closed',
     'bookmark', 'bookmark-check',
+    # Kernel selection
+    'house-plug', 'microchip', 'cpu', 'monitor', 'zap', 'circle', 'check',
+    # File explorer
+    'notebook', 'notebook-text', 'folder', 'folder-open',
+    'file-plus', 'folder-plus', 'panel-left-close', 'panel-left-open',
+    'chevron-right', 'trash', 'refresh-cw',
+    # Toolbar actions
+    'sun', 'moon', 'save', 'download', 'settings', 'rotate-ccw',
+    # Cell actions
+    'play', 'square', 'arrow-up', 'arrow-down', 'trash-2', 'plus', 'chevron-down',
+    # Safe mode
+    'shield-check', 'shield-off',
+    # Settings
+    'triangle-alert',
 ]
 for _name in _ICON_NAMES:
     sprites(_name)

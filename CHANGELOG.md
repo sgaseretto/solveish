@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+#### GUI Aesthetic Overhaul & Display Settings
+
+**Display Settings**
+- **Dialeng Display Settings** group added to settings sidebar (positioned at the top for easy access):
+  - **Notebook Width (px)**: Configurable container max-width (600-3000px, default 1400)
+  - **Button Size**: Compact / Normal / Large — scales all buttons across toolbar, cells, file explorer, and dropdowns via CSS custom properties (`--btn-padding`, `--btn-sm-padding`, `--btn-font-size`)
+  - **Font Size (px)**: Base UI font size (10-24px, default 15)
+  - **Reasoning Text Limit**: Max characters for LLM reasoning display
+- All display settings persist in `dialeng_config.json` under the `display` section
+- CSS uses `var()` references so new buttons automatically inherit sizing — `button, select { font-size: var(--btn-font-size, inherit); }` base rule
+
+**Kernel Status Dot**
+- Green dot next to notebook title in toolbar indicating kernel connection state:
+  - **Grey** (default): No kernel connected
+  - **Green**: Kernel alive and idle
+  - **Yellow**: Cells running/queued, or kernel restarting
+  - **Red**: Execution error (flashes for 3s, then returns to green)
+- Status is set server-side on page load (checks `kernel_service.kernel_is_alive()`), so returning to a notebook with a running kernel shows green immediately
+- Real-time updates via existing WebSocket messages (`queue_update`, `kernel_connected`, `kernel_restarting`, `code_stream_end`)
+- New `broadcast_kernel_status()` helper in `app.py` for kernel lifecycle events
+
+**File Explorer Kernel Indicators**
+- Notebook icons in the file explorer turn green when that notebook has a running kernel
+- Uses `.has-kernel` CSS class with `stroke: var(--accent-green)` on the SVG icon
+- All file list routes (`/files`, `/files/new-folder`, `/files/delete`) query `kernel_service` for alive kernels
+
+**File Explorer Enhancements**
+- **Refresh button**: Refresh icon in file explorer header to reload the file list
+- **Delete button**: Per-file trash icon (appears on hover) with confirmation modal
+- **New Item Modal redesign**: Name input + type toggle (Dialog / Folder) replacing the old two-button approach
+- File explorer width increased to 320px (matching outline sidebar)
+
+**Settings UI Improvements**
+- Setting rows now have separator borders and more padding for readability
+- Toggle rows use CSS Grid layout: label+badge on left, toggle on right, help text spanning full width below
+- Restart badge restyled as a compact pill
+- Group content has increased top padding
+
+**CSS Architecture**
+- Sidebar borders only appear when open (no visible line when collapsed)
+- Toolbar is a rounded card container with sticky positioning and backdrop blur
+- Theme toggle SVG uses `stroke: var(--text-primary)` for visibility in both themes
+- All keyboard shortcuts use `e.ctrlKey || e.metaKey` for macOS Cmd key compatibility
+
+#### Extensibility & Packaging (Phases 1-8)
+
+**Phase 1: Package Structure (uv project)**
+- **`pyproject.toml`** — Project is now a proper `uv` project with hatchling build backend. All dependencies moved from `requirements.txt`. Entry point: `uv run dialeng` or `uv run python -m dialeng`.
+- **`__main__.py`** — Enables `python -m dialeng` execution.
+- **Configurable paths** — `DIALENG_NOTEBOOKS_DIR` and `DIALENG_CONFIG_PATH` environment variables for customizing notebook/config directories.
+- **Removed `requirements.txt`** — Replaced by `pyproject.toml` dependencies.
+
+**Phase 2: Registry Extensions (Kernel + Provider + Toolbar + Settings)**
+- **Kernel registry** (`core/registry.py`) — `KernelRegistration` dataclass with `register_kernel_type()` method and `@register_kernel` decorator. Local and Colab kernels self-register on import.
+- **LLM provider registry** — `ProviderRegistration` dataclass with priority-based selection. Claudette, ClaudetteAgent, and ClaudeAgentSdk providers self-register.
+- **Toolbar extension point** — `ToolbarItemRegistration` with `position` and `order` fields. Extensions can add toolbar buttons via `@register_toolbar_item`.
+- **Settings extension point** — `SettingsSectionRegistration` rendered after built-in settings groups. Extensions can add settings sections via `@register_settings_section`.
+- **Registry-based kernel switching** — `KernelService.get_kernel()` uses registry lookup instead of hardcoded if/elif.
+- **Registry-based provider selection** — `LLMService._ensure_initialized()` uses registry lookup.
+
+**Phase 3: TEMPLATE.ipynb Support**
+- **`services/template_service.py`** — `find_templates()` walks up directory tree collecting `TEMPLATE.ipynb` files (parent-first). `load_template_cells()` loads cells with fresh UUIDs.
+- **New notebook creation** — `/notebook/new?dir=` uses template cells when available.
+
+**Phase 4: CRAFT.ipynb Support**
+- **`services/craft_service.py`** — `find_craft_files()` walks up directory tree. `get_craft_context()` extracts note/prompt cells as LLM messages. `get_craft_code_cells()` extracts code cells for kernel execution.
+- **Context prepending** — CRAFT context is prepended to LLM messages in `build_context_messages()`.
+- **Auto-execute** — CRAFT code cells auto-execute in background on notebook open.
+
+**Phase 5: nbdev Export Integration**
+- **`#| export` sync** — `Cell.sync_export_directive()` keeps `#| export` in sync with `is_exported` flag.
+- **Load detection** — Loading notebooks with `#| export` in source auto-sets `is_exported=True`.
+- **`default_export_module` property** — `Notebook.default_export_module` parses `#| default_exp` directive.
+- **Extension extraction** — `extract_extension()` now uses `#| export` as default marker.
+
+**Phase 6: AUTORUN Folder Support**
+- **`services/autorun_service.py`** — Two-phase startup: extract `#| export` cells from AUTORUN notebooks to `.autorun_modules/`, load `.py` extensions, then run notebooks in background kernels.
+- **Startup integration** — `@app.on_event("startup")` calls `process_autorun()`.
+- **`.autorun_modules/`** added to `.gitignore`.
+
+**Phase 7: Kernel Selection Redesign**
+- **`ui/kernel_modal.py`** — `KernelStatusBar` (bottom of page, shows kernel type and connection state) and `KernelModal` (overlay with all registered kernels, runtime options, auth status).
+- **New routes** — `GET /notebook/{nb_id}/kernel/info` (status bar refresh), `GET /notebook/{nb_id}/kernel/modal` (modal content).
+- **Removed old toolbar dropdown** — Kernel type/runtime select removed from toolbar in favor of status bar + modal.
+- **kernel-connected event** — WebSocket broadcasts `kernel_connected` after first successful execution; client refreshes status bar.
+
+**Phase 8: File Explorer**
+- **`ui/file_explorer.py`** — `FileExplorerSidebar` with directory navigation, breadcrumbs, folder/notebook items with lucide icons. `NewItemModal` for creating notebooks/folders.
+- **New routes** — `GET /files?path=` (directory listing), `POST /files/new-folder` (create folder).
+- **Keyboard shortcut** — `Ctrl+Shift+E` toggles file explorer.
+- **Replaced flat file list** — Old `Div.file-list` replaced by collapsible sidebar with breadcrumb navigation.
+- **Lucide icons** — Added `house-plug`, `microchip`, `cpu`, `monitor`, `zap`, `notebook`, `notebook-text`, `folder`, `folder-open`, `file-plus`, `folder-plus`, `panel-left-close`, `panel-left-open`, `chevron-right`, `circle`, `check`.
+
 ### Changed
 
 #### LLM Service Provider-Based Architecture Refactor

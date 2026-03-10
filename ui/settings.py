@@ -6,7 +6,14 @@ Settings sidebar for viewing and editing dialeng_config.json settings.
 
 from fasthtml.common import *
 from typing import List, Tuple, Optional, Any, Dict
+from .icons import sprites as ss
 from services.dialeng_config import DialengConfig
+
+
+def _get_extension_settings_sections():
+    """Get registered extension settings sections (lazy import to avoid circular deps)."""
+    from core.registry import registry
+    return list(registry.settings_sections.values())
 
 
 def SettingsGroup(title: str, *children, open: bool = False):
@@ -70,7 +77,7 @@ def SettingToggle(label: str, name: str, current: bool, requires_restart: bool =
     Returns:
         Div containing toggle switch
     """
-    restart_badge = Span("⚠️ restart", cls="restart-badge") if requires_restart else None
+    restart_badge = Span(ss('triangle-alert', sz=12), " restart", cls="restart-badge") if requires_restart else None
     return Div(
         Div(
             Label(label, fr=name, cls="setting-label"),
@@ -199,7 +206,7 @@ def SettingsSidebar(config: DialengConfig):
     return Aside(
         # Header with close button
         Div(
-            Span("⚙️ Settings", cls="settings-title"),
+            Span(ss('settings', sz=16), " Settings", cls="settings-title"),
             Button("✕", cls="settings-close-btn", onclick="toggleSettings()",
                    title="Close settings"),
             cls="settings-header"
@@ -208,6 +215,25 @@ def SettingsSidebar(config: DialengConfig):
         # Scrollable content
         Div(
             Form(
+                # Dialeng Display Settings (top of list for easy access)
+                SettingsGroup(
+                    "Dialeng Display Settings",
+                    SettingNumber("Notebook Width (px)", "display.notebook_width",
+                                  config.display_notebook_width, 600, 3000, 50,
+                                  "Max width of the notebook container"),
+                    SettingSelect("Button Size", "display.button_size",
+                                  [("compact", "Compact"), ("normal", "Normal"), ("large", "Large")],
+                                  config.display_button_size,
+                                  "Size of all buttons (toolbar, cells, file explorer)"),
+                    SettingNumber("Font Size (px)", "display.font_size",
+                                  config.display_font_size, 10, 24, 1,
+                                  "Base font size for the UI"),
+                    SettingNumber("Reasoning Text Limit", "display.reasoning_truncate_chars",
+                                  config.reasoning_truncate_chars, 0, 10000, 100,
+                                  "Max characters for LLM reasoning (0 = no limit)"),
+                    open=False
+                ),
+
                 # AWS Settings
                 SettingsGroup(
                     "AWS Settings",
@@ -242,15 +268,6 @@ def SettingsSidebar(config: DialengConfig):
                     SettingToggle("Enable Built-in Tools", "tool_settings.builtin_tools_enabled",
                                   config.tool_builtin_enabled,
                                   help_text="Enable file tools (view, rg, create, etc.)"),
-                    open=False
-                ),
-
-                # Display Settings
-                SettingsGroup(
-                    "Display Settings",
-                    SettingNumber("Reasoning Text Limit", "display.reasoning_truncate_chars",
-                                  config.reasoning_truncate_chars, 0, 10000, 100,
-                                  "Max characters for LLM reasoning (0 = no limit)"),
                     open=False
                 ),
 
@@ -289,6 +306,13 @@ def SettingsSidebar(config: DialengConfig):
                                 "Directory for debug log files"),
                     open=False
                 ),
+
+                # Extension settings sections
+                *[reg.renderer(config)
+                  for reg in sorted(
+                      _get_extension_settings_sections(),
+                      key=lambda r: r.order
+                  )],
 
                 id="settings-form",
                 hx_post="/settings",
