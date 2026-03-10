@@ -205,6 +205,12 @@ class LLMService:
             # Also parse context_messages for $`var` and &`func` syntax
             for msg in context_messages:
                 content = msg.get('content', '')
+                # content may be a list of blocks (multimodal) — extract text only
+                if isinstance(content, list):
+                    content = ' '.join(
+                        b.get('text', '') for b in content
+                        if isinstance(b, dict) and b.get('type') == 'text'
+                    )
                 if content:
                     ctx_vars, ctx_funcs = parse_prompt(content)
                     for v in ctx_vars:
@@ -268,16 +274,8 @@ class LLMService:
             # Resolve model/prompt for tool calling
             system_prompt, api_model, config = self._resolve_model_and_prompt(mode, model)
 
-            # For claudette_agent provider with tool calls, use SDK provider for MCP tools
-            provider_for_tools = self._provider
-            if self._provider_name == "claudette_agent":
-                # claudette-agent doesn't support tools; use SDK provider instead
-                from .providers import ClaudeAgentSdkProvider
-                provider_for_tools = ClaudeAgentSdkProvider()
-                await provider_for_tools.initialize()
-
             # Delegate to provider's stream_with_tools
-            async for item in provider_for_tools.stream_with_tools(
+            async for item in self._provider.stream_with_tools(
                 prompt=processed_prompt,
                 context_messages=context_messages,
                 system_prompt=system_prompt,

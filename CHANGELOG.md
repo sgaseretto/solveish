@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Replaced `print()` debug statements** — Provider implementations use `logger.debug()` instead of `print()` for debug output.
 - **Updated documentation** — `docs/how_it_works/06_llm_integration.md` updated with provider architecture diagrams, `BaseLLMProvider` ABC docs, event dict protocol, and a step-by-step "How to Add a New LLM Provider" guide.
 
+#### Image Handling in LLM Context
+- **Multimodal context messages** (`core/dispatch.py`) — Code cell outputs with images (screenshots, plots) now produce Anthropic-format image content blocks instead of raw base64 HTML. `_extract_image_blocks()` extracts from both structured `display_data` outputs and post-finalization HTML `<img>` tags. `_resize_base64_image()` resizes to max 1024px and re-encodes as JPEG to keep prompts within token limits.
+- **Image-aware providers** (`claudette_provider.py`, `claudette_agent_provider.py`) — Both providers use `_split_context_images()` to separate image blocks from context messages and attach them to the current prompt (user turn only), respecting the Anthropic API constraint that images cannot appear in assistant turns.
+- **claudette-agent non-streaming fallback** — When images are present, the provider uses `chat()` (non-streaming) instead of `chat.stream()`, because `chat.stream()` flattens all messages to text via `_build_conversation_prompt()`. `chat()` routes to `_call_with_images()` which sends structured content via stdin transport, avoiding the "Argument list too long" OS limit from CLI arguments.
+- **Base64 stripping in text output** — `_get_text_output()` and `_strip_base64_images()` ensure base64 `<img>` tags are removed from text context, preventing prompt bloat after `finalize_cell_execution` flattens structured outputs into HTML.
+- **Vision test notebook** (`notebooks/test_capture.ipynb`) — Added vision test cells: capture screen with `capture_tool()`, then prompt the LLM to describe what was captured.
+- **Updated documentation** — `docs/how_it_works/06_llm_integration.md` updated with image handling architecture, SDK limitations, and future improvement notes.
+
 ### Added
 
 #### DialogHelper v2 Compatibility Update

@@ -22,6 +22,42 @@ class ClaudetteProvider(BaseLLMProvider):
         self._Chat = None
         self._Client = None
 
+    @staticmethod
+    def _split_context_images(context_messages: List[Dict]):
+        """Separate image blocks from context messages.
+
+        Why this is needed (Anthropic API constraints):
+        - Images can only appear in user turns, not assistant turns.
+        - Context messages include prior prompt cell outputs (assistant role) which
+          may contain image blocks after cell_to_llm_messages processing.
+        - claudette's _append_pr auto-resolves consecutive user messages by calling
+          self(), which can reorder messages and place images in assistant turns.
+
+        By stripping images from context and attaching them to the current prompt
+        (always a user turn), we guarantee correct API message structure.
+
+        Future: If finalize_cell_execution preserves structured outputs alongside
+        HTML, the two-source extraction in _extract_image_blocks could be simplified.
+        """
+        text_messages = []
+        image_blocks = []
+
+        for msg in context_messages:
+            content = msg.get('content', '')
+            if isinstance(content, list):
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get('type') == 'image':
+                        image_blocks.append(block)
+                    else:
+                        text_parts.append(block)
+                if text_parts:
+                    text_messages.append({"role": msg["role"], "content": text_parts})
+            else:
+                text_messages.append(msg)
+
+        return text_messages, image_blocks
+
     async def initialize(self) -> None:
         try:
             from claudette import Chat, Client
@@ -72,26 +108,31 @@ class ClaudetteProvider(BaseLLMProvider):
         config: Any,
     ) -> AsyncIterator[Dict]:
         logger.info(f"claudette: Using model {model}")
-        logger.info(f"claudette: PROMPT = {prompt[:100]}..." if len(prompt) > 100 else f"claudette: PROMPT = {prompt}")
         logger.info(f"claudette: Context has {len(context_messages)} messages")
-        for i, msg in enumerate(context_messages):
-            role = msg.get('role', '?')
-            content = msg.get('content', '')
-            content_preview = content[:80] + "..." if len(content) > 80 else content
-            logger.info(f"claudette: Context[{i}] {role}: {content_preview}")
+
+        # Separate images from context — attach to prompt (user turn only)
+        text_messages, image_blocks = self._split_context_images(context_messages)
+        if image_blocks:
+            logger.info(f"claudette: {len(image_blocks)} image(s) extracted, attaching to prompt")
 
         client = self._create_client(model)
         chat = self._Chat(cli=client, sp=system_prompt)
 
-        for msg in context_messages:
+        for msg in text_messages:
             chat.h.append(msg)
+
+        # Build prompt: multimodal if images, plain text otherwise
+        if image_blocks:
+            actual_prompt = [{"type": "text", "text": prompt}] + image_blocks
+        else:
+            actual_prompt = prompt
 
         if use_thinking:
             yield {"type": "thinking_start"}
             yield {"type": "thinking_end"}
 
         try:
-            for chunk in chat(prompt, stream=True):
+            for chunk in chat(actual_prompt, stream=True):
                 if chunk:
                     content = str(chunk) if not isinstance(chunk, str) else chunk
                     if content:
@@ -125,6 +166,11 @@ class ClaudetteProvider(BaseLLMProvider):
 
         logger.debug(f"claudette-tools: UI model={model}, backend={self._backend}")
 
+        # Separate images from context — attach to prompt (user turn only)
+        text_messages, image_blocks = self._split_context_images(context_messages)
+        if image_blocks:
+            logger.info(f"claudette-tools: {len(image_blocks)} image(s) extracted, attaching to prompt")
+
         client = self._create_client(model)
 
         logger.debug(f"claudette-tools: {len(tools)} tools passed")
@@ -134,7 +180,7 @@ class ClaudetteProvider(BaseLLMProvider):
 
         chat = self._Chat(cli=client, sp=system_prompt, tools=tools)
 
-        for msg in context_messages:
+        for msg in text_messages:
             chat.h.append(msg)
 
         if use_thinking:
@@ -142,7 +188,11 @@ class ClaudetteProvider(BaseLLMProvider):
             yield {"type": "thinking_end"}
 
         steps = 0
-        current_prompt = prompt
+        # First iteration: attach images to prompt if present
+        if image_blocks:
+            current_prompt = [{"type": "text", "text": prompt}] + image_blocks
+        else:
+            current_prompt = prompt
 
         while steps < max_steps:
             steps += 1

@@ -242,10 +242,18 @@ def cell_to_llm_messages(cell: 'Cell') -> List[Dict]:
 
     # Default converters for built-in types
     if cell_type == "code":
-        content = f"```python\n{cell.source}\n```"
-        if cell.output:
-            content += f"\nOutput:\n```\n{cell.output}\n```"
-        return [{"role": "user", "content": content}]
+        # Build multimodal content blocks: text (source + output) + images.
+        # Images are extracted separately so providers can place them in user
+        # turns only (Anthropic API requirement). Text output has base64 <img>
+        # tags stripped to avoid bloating the prompt.
+        # See: docs/how_it_works/06_llm_integration.md "Image Handling in LLM Context"
+        content_blocks = [{"type": "text", "text": f"```python\n{cell.source}\n```"}]
+        text_output = _get_text_output(cell)
+        if text_output.strip():
+            content_blocks.append({"type": "text", "text": f"\nOutput:\n```\n{text_output}\n```"})
+        image_blocks = _extract_image_blocks(cell)
+        content_blocks.extend(image_blocks)
+        return [{"role": "user", "content": content_blocks}]
 
     elif cell_type == "note":
         return [{"role": "user", "content": cell.source}]
@@ -253,9 +261,8 @@ def cell_to_llm_messages(cell: 'Cell') -> List[Dict]:
     elif cell_type == "prompt":
         msgs = [{"role": "user", "content": cell.source}]
         if cell.output:
-            # Strip LLM Steps HTML from output before including in context
-            # This prevents the LLM from seeing/reproducing our formatting HTML
-            clean_output = _strip_llm_steps_html(cell.output)
+            # Strip LLM Steps HTML and base64 images from output
+            clean_output = _strip_base64_images(_strip_llm_steps_html(cell.output))
             if clean_output.strip():
                 msgs.append({"role": "assistant", "content": clean_output})
         return msgs
@@ -268,6 +275,140 @@ def cell_to_llm_messages(cell: 'Cell') -> List[Dict]:
 # ============================================================================
 # Helpers
 # ============================================================================
+
+def _get_text_output(cell) -> str:
+    """Get text-only output from cell.outputs (excludes images).
+
+    After finalize_cell_execution, cell.outputs is a single 'stream' output
+    containing HTML (including base64 <img> tags). We strip those to avoid
+    bloating the context.
+    """
+    parts = []
+    for out in getattr(cell, 'outputs', []):
+        if out.output_type == 'stream':
+            text = str(out.content)
+            # Strip base64 images that may be embedded in HTML output
+            text = _strip_base64_images(text)
+            parts.append(text)
+        elif out.output_type == 'execute_result':
+            text = str(out.content)
+            text = _strip_base64_images(text)
+            parts.append(text)
+        elif out.output_type == 'error':
+            if out.traceback:
+                parts.extend(out.traceback)
+            else:
+                parts.append(f"{out.ename}: {out.evalue}")
+        # display_data is skipped — images handled separately by _extract_image_blocks
+    return ''.join(parts)
+
+
+def _extract_image_blocks(cell) -> list:
+    """Extract image content blocks from cell outputs for multimodal LLM messages.
+
+    Checks two sources (finalize_cell_execution replaces structured outputs):
+    1. Structured cell.outputs (display_data with MIME dict) — available during execution
+    2. HTML cell.output string (<img src="data:image/...;base64,..."> tags) — after finalization
+
+    Images are resized to max 1024px on the longest side and re-encoded as JPEG
+    to keep the prompt within token limits.
+
+    Returns list of Anthropic-format image content blocks.
+    """
+    import re as _re
+    import base64 as b64_mod
+
+    blocks = []
+
+    # Source 1: structured display_data outputs
+    for out in getattr(cell, 'outputs', []):
+        if out.output_type != 'display_data':
+            continue
+        data = out.content if isinstance(out.content, dict) else {}
+        for mime_type in ('image/png', 'image/jpeg', 'image/gif', 'image/webp'):
+            if mime_type in data:
+                raw = data[mime_type]
+                if isinstance(raw, bytes):
+                    b64 = b64_mod.b64encode(raw).decode('utf-8')
+                else:
+                    b64 = raw.replace('\n', '').replace('\r', '')
+                resized = _resize_base64_image(b64, mime_type)
+                if resized:
+                    blocks.append(resized)
+                break
+
+    # Source 2: parse <img> tags from HTML output string (after finalization)
+    if not blocks:
+        output_str = getattr(cell, 'output', '')
+        if isinstance(output_str, str) and 'data:image/' in output_str:
+            pattern = r'<img[^>]*src="data:(image/(?:png|jpeg|gif|webp));base64,([^"]*)"[^>]*/?\s*>'
+            for match in _re.finditer(pattern, output_str, _re.IGNORECASE):
+                mime_type = match.group(1)
+                b64 = match.group(2)
+                resized = _resize_base64_image(b64, mime_type)
+                if resized:
+                    blocks.append(resized)
+
+    return blocks
+
+
+def _resize_base64_image(b64_data: str, mime_type: str, max_size: int = 1024) -> dict:
+    """Decode a base64 image, resize if needed, and return an Anthropic image block.
+
+    Resizes to fit within max_size x max_size and re-encodes as JPEG (much smaller
+    than PNG for photos/screenshots). Returns None on failure.
+    """
+    import base64 as b64_mod
+    try:
+        from PIL import Image
+        import io
+
+        img_bytes = b64_mod.b64decode(b64_data)
+        img = Image.open(io.BytesIO(img_bytes))
+
+        # Resize if larger than max_size on any side
+        if max(img.size) > max_size:
+            img.thumbnail((max_size, max_size), Image.LANCZOS)
+
+        # Re-encode as JPEG for smaller size (convert RGBA→RGB if needed)
+        if img.mode in ('RGBA', 'P'):
+            img = img.convert('RGB')
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=80)
+        resized_b64 = b64_mod.b64encode(buf.getvalue()).decode('utf-8')
+
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": resized_b64
+            }
+        }
+    except Exception as e:
+        logger.warning(f"Failed to resize image: {e}")
+        return None
+
+
+def _strip_base64_images(output: str) -> str:
+    """Replace inline base64 image data with a placeholder.
+
+    Cell outputs rendered via render_mime_bundle() embed full base64 images
+    in <img src="data:image/..."> tags. Including these in LLM context makes
+    the prompt far too large. Replace them with a short placeholder so the
+    LLM knows an image was present without the raw data.
+    """
+    import re
+    if not output or 'data:image/' not in output:
+        return output
+    # Replace <img src="data:image/...;base64,..."> tags
+    cleaned = re.sub(
+        r'<img\s[^>]*src="data:image/[^"]*"[^>]*/?>',
+        '[Image output]',
+        output, flags=re.IGNORECASE
+    )
+    return cleaned
+
 
 def _strip_llm_steps_html(output: str) -> str:
     """

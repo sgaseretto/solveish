@@ -13,6 +13,22 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
+def _extract_text_from_content(content) -> str:
+    """Extract text from message content (string or list of content blocks)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get('type') == 'text':
+                    parts.append(block.get('text', ''))
+                elif block.get('type') == 'image':
+                    parts.append('[Image]')
+        return ' '.join(parts)
+    return str(content)
+
+
 def build_prompt_with_context(prompt: str, context_messages: List[Dict]) -> str:
     """Build a single prompt string that includes conversation context.
 
@@ -21,6 +37,8 @@ def build_prompt_with_context(prompt: str, context_messages: List[Dict]) -> str:
     single prompt that clearly presents the context and the current question.
 
     This ensures the SDK sees ONE clear user message to respond to.
+    Image content blocks are replaced with [Image] placeholders since
+    the SDK text-only path cannot handle them.
     """
     if not context_messages:
         return prompt
@@ -28,7 +46,7 @@ def build_prompt_with_context(prompt: str, context_messages: List[Dict]) -> str:
     context_parts = []
     for msg in context_messages:
         role = msg.get('role', 'user')
-        content = msg.get('content', '')
+        content = _extract_text_from_content(msg.get('content', ''))
         if role == 'user':
             context_parts.append(f"User: {content}")
         elif role == 'assistant':
