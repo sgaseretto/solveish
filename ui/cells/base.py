@@ -59,7 +59,7 @@ def CellHeader(cell, notebook_id: str, collapse_controls: list = None):
 
     return Div(
         Div(
-            Button("▼", cls="collapse-btn",
+            Button(ss('chevron-down', sz=14), cls="collapse-btn",
                    onclick=f"toggleCollapse('{cell.id}')",
                    title="Collapse/Expand (full)"),
             Span(cell.cell_type.upper(), cls=f"cell-badge {cell.cell_type}"),
@@ -83,13 +83,13 @@ def CellHeader(cell, notebook_id: str, collapse_controls: list = None):
             TypeSelect(cell.id, cell.cell_type, notebook_id),
             _run_button(cell, notebook_id),
             _cancel_button(cell, notebook_id),
-            Button("↑", cls="btn btn-sm btn-icon",
+            Button(ss('arrow-up', sz=14), cls="btn btn-sm btn-icon",
                    hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/move/up",
                    hx_target="#cells", hx_swap="outerHTML", title="Move up"),
-            Button("↓", cls="btn btn-sm btn-icon",
+            Button(ss('arrow-down', sz=14), cls="btn btn-sm btn-icon",
                    hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/move/down",
                    hx_target="#cells", hx_swap="outerHTML", title="Move down"),
-            Button("×", cls="btn btn-sm btn-icon",
+            Button(ss('trash-2', sz=14), cls="btn btn-sm btn-icon btn-delete",
                    hx_delete=f"/notebook/{notebook_id}/cell/{cell.id}",
                    hx_target="#cells",
                    hx_swap="outerHTML", title="Delete (D D)"),
@@ -111,7 +111,7 @@ def _run_button(cell, notebook_id: str):
     else:
         onclick = f"syncAceToTextarea('{cell.id}'); prepareCodeRun('{cell.id}');"
 
-    return Button("▶", cls="btn btn-sm btn-run",
+    return Button(ss('play', sz=14), cls="btn btn-sm btn-run",
                   hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/run",
                   hx_target=f"#cell-{cell.id}",
                   hx_swap="none" if cell.cell_type == "code" else "outerHTML",
@@ -133,7 +133,7 @@ def _cancel_button(cell, notebook_id: str):
         onclick = f"interruptCodeCell('{notebook_id}', '{cell.id}')"
         title = "Interrupt execution (Ctrl+C)"
 
-    return Button("⏹", cls="btn btn-sm btn-cancel",
+    return Button(ss('square', sz=14), cls="btn btn-sm btn-cancel",
                   onclick=onclick,
                   title=title,
                   style="display: none;")

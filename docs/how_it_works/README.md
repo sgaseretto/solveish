@@ -20,6 +20,9 @@ Read the documents in numerical order for the best understanding of the system:
 | 11 | [11_shell_integration.md](11_shell_integration.md) | Shell commands - pshnb magic, shell cells, Safe Mode with safecmd |
 | 12 | [12_colab_kernel.md](12_colab_kernel.md) | Google Colab kernel - remote execution via Jupyter wire protocol over WebSocket |
 | 13 | [13_colab_dialoghelper_proxy.md](13_colab_dialoghelper_proxy.md) | DialogHelper proxy for Colab - auto-install, stdin proxy, monkey-patching |
+| 14 | [14_package_structure.md](14_package_structure.md) | uv project setup - pyproject.toml, entry points, configurable paths |
+| 15 | [15_extension_registries.md](15_extension_registries.md) | Kernel, provider, toolbar, and settings registries |
+| 16 | [16_craft_template_autorun.md](16_craft_template_autorun.md) | CRAFT, TEMPLATE, and AUTORUN folder support |
 
 ## Purpose
 
@@ -48,7 +51,7 @@ These documents are intended for developers who want to:
 | Add streaming outputs | [04_kernel_execution.md](04_kernel_execution.md) |
 | Implement cell queue | [04_kernel_execution.md](04_kernel_execution.md) |
 | Colab kernel internals | [12_colab_kernel.md](12_colab_kernel.md) |
-| Add remote kernel backend | [12_colab_kernel.md](12_colab_kernel.md) |
+| Add remote kernel backend | [12_colab_kernel.md](12_colab_kernel.md) → [15_extension_registries.md](15_extension_registries.md) |
 | Colab OAuth & auth | [12_colab_kernel.md](12_colab_kernel.md) |
 | DialogHelper on Colab | [13_colab_dialoghelper_proxy.md](13_colab_dialoghelper_proxy.md) |
 | Colab stdin proxy | [13_colab_dialoghelper_proxy.md](13_colab_dialoghelper_proxy.md) |
@@ -59,6 +62,13 @@ These documents are intended for developers who want to:
 | Run shell commands | [11_shell_integration.md](11_shell_integration.md) |
 | Add shell cell type | [11_shell_integration.md](11_shell_integration.md) |
 | Safe Mode validation | [11_shell_integration.md](11_shell_integration.md) |
+| Install as uv project | [14_package_structure.md](14_package_structure.md) |
+| Add custom kernel type | [15_extension_registries.md](15_extension_registries.md) |
+| Add LLM provider | [15_extension_registries.md](15_extension_registries.md) |
+| Add toolbar/settings extension | [15_extension_registries.md](15_extension_registries.md) |
+| CRAFT context injection | [16_craft_template_autorun.md](16_craft_template_autorun.md) |
+| TEMPLATE notebooks | [16_craft_template_autorun.md](16_craft_template_autorun.md) |
+| AUTORUN extensions | [16_craft_template_autorun.md](16_craft_template_autorun.md) |
 
 ## Related Documentation
 

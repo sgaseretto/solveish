@@ -172,6 +172,28 @@ class Cell:
         """Append a new output (for streaming)."""
         self.outputs.append(output)
 
+    def sync_export_directive(self):
+        """Sync the #| export directive in source with the is_exported flag.
+
+        - If is_exported is True and source doesn't start with #| export, prepend it
+        - If is_exported is False and source starts with #| export, remove the line
+        Only applies to code cells.
+        """
+        cell_type = self.cell_type
+        if hasattr(cell_type, 'value'):
+            cell_type = cell_type.value
+        if cell_type != "code":
+            return
+
+        has_directive = self.source.startswith("#| export")
+        if self.is_exported and not has_directive:
+            self.source = "#| export\n" + self.source
+        elif not self.is_exported and has_directive:
+            lines = self.source.split('\n')
+            # Remove the first line if it's the export directive
+            if lines and lines[0].strip().startswith("#| export"):
+                self.source = '\n'.join(lines[1:])
+
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
         return {

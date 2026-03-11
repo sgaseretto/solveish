@@ -463,3 +463,15 @@ async def execute_code(code: str) -> list[CellOutput]:
         return outputs
     finally:
         kernel.shutdown()
+
+
+# Register as a kernel backend
+def _register_local_kernel():
+    from core.registry import registry, KernelRegistration
+    registry.register_kernel_type(KernelRegistration(
+        name="local", label="Local Python", icon="house-plug",
+        factory=lambda **kw: SubprocessKernel(start_immediately=kw.get("start_immediately", True)),
+        description="Local Python subprocess with persistent namespace"
+    ))
+
+_register_local_kernel()

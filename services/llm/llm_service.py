@@ -57,32 +57,30 @@ class LLMService:
         cred_status = self._detect_credentials()
         logger.info(f"LLM Service initializing with provider: {self._provider_name}, backend: {self._backend}")
 
-        if self._provider_name == "claudette":
-            from .providers import ClaudetteProvider
-            self._provider = ClaudetteProvider(backend=self._backend or "anthropic_api")
-            await self._provider.initialize()
-            self._initialized = True
-            logger.info(f"Initialized with ClaudetteProvider ({self._backend})")
+        from core.registry import registry as ext_registry
 
-        elif self._provider_name == "claudette_agent":
-            # Check if we should use SDK directly or claudette-agent wrapper
+        # Resolve effective provider name (claudette_agent may map to SDK)
+        effective_provider = self._provider_name
+        if self._provider_name == "claudette_agent":
             from services.dialeng_config import get_config
             config = get_config()
-            use_sdk_directly = getattr(config, 'use_sdk_directly', False)
+            if getattr(config, 'use_sdk_directly', False):
+                effective_provider = "claude_agent_sdk"
 
-            if use_sdk_directly:
-                from .providers import ClaudeAgentSdkProvider
-                self._provider = ClaudeAgentSdkProvider()
-                await self._provider.initialize()
-                self._initialized = True
-                logger.info("Initialized with ClaudeAgentSdkProvider (use_sdk_directly=True)")
+        # Try registry-based lookup
+        reg = ext_registry.providers.get(effective_provider)
+        if reg:
+            # Construct provider — pass backend kwarg for claudette
+            if effective_provider == "claudette":
+                self._provider = reg.factory(backend=self._backend or "anthropic_api")
             else:
-                from .providers import ClaudetteAgentProvider
-                self._provider = ClaudetteAgentProvider()
-                await self._provider.initialize()
-                self._initialized = True
-                logger.info("Initialized with ClaudetteAgentProvider (use_sdk_directly=False)")
-
+                self._provider = reg.factory()
+            await self._provider.initialize()
+            self._initialized = True
+            logger.info(f"Initialized with {type(self._provider).__name__} via registry")
+        elif self._provider_name and self._provider_name != "mock_only":
+            logger.warning(f"Provider '{self._provider_name}' not found in registry, falling back to mock")
+            self._initialized = True
         else:
             self._initialized = True
             logger.warning("LLM Service initialized in mock-only mode (no credentials)")

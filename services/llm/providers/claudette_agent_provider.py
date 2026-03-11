@@ -316,3 +316,16 @@ class ClaudetteAgentProvider(BaseLLMProvider):
         except Exception as e:
             logger.exception(f"claudette-agent-tools error: {e}")
             yield {"type": "error", "content": f"Tool loop error: {str(e)}"}
+
+
+
+# Register as an LLM provider
+def _register_claudette_agent_provider():
+    from core.registry import registry, ProviderRegistration
+    registry.register_provider(ProviderRegistration(
+        name="claudette_agent", label="Claude Code (claudette-agent)",
+        factory=ClaudetteAgentProvider,
+        priority=5
+    ))
+
+_register_claudette_agent_provider()

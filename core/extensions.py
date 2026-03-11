@@ -181,25 +181,25 @@ def reload_extension(name: str, extensions_dir: Optional[Path] = None) -> bool:
 def extract_extension(
     notebook_path: Path,
     output_path: Path,
-    marker: str = "# @extension"
+    marker: str = "#| export"
 ) -> int:
     """
     Extract extension code from a notebook.
 
-    Cells containing the marker comment are extracted and combined
-    into a standalone Python file.
+    Cells containing the marker directive (or with is_exported=True) are
+    extracted and combined into a standalone Python file.
 
     Args:
         notebook_path: Path to the notebook (.ipynb)
         output_path: Path for the output Python file
-        marker: Comment marker to identify extension cells
+        marker: Comment marker to identify extension cells (default: "#| export")
 
     Returns:
         Number of cells extracted.
 
     Example notebook cell:
         ```python
-        # @extension
+        #| export
         from core.registry import register_cell_type
 
         class MyCell(Cell):
@@ -220,8 +220,8 @@ def extract_extension(
         if cell_type != "code":
             continue
 
-        # Check for marker
-        if marker in cell.source:
+        # Check for marker in source or is_exported metadata flag
+        if marker in cell.source or cell.is_exported:
             # Remove the marker line itself
             lines = cell.source.split('\n')
             lines = [line for line in lines if marker not in line]

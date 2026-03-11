@@ -5,6 +5,7 @@ Button, select, and interactive control components.
 """
 
 from fasthtml.common import *
+from .icons import sprites as ss
 from services.dialeng_config import get_config
 
 
@@ -82,19 +83,19 @@ def AddButtons(pos: int, nb_id: str):
     """
     shell_enabled = _shell_cells_enabled()
     buttons = [
-        Button("+ Code", cls="btn btn-sm",
+        Button(ss('plus', sz=12), " Code", cls="btn btn-sm btn-add",
                hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=code",
                hx_target="#cells", hx_swap="outerHTML"),
-        Button("+ Note", cls="btn btn-sm",
+        Button(ss('plus', sz=12), " Note", cls="btn btn-sm btn-add",
                hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=note",
                hx_target="#cells", hx_swap="outerHTML"),
-        Button("+ Prompt", cls="btn btn-sm",
+        Button(ss('plus', sz=12), " Prompt", cls="btn btn-sm btn-add",
                hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=prompt",
                hx_target="#cells", hx_swap="outerHTML"),
     ]
     if shell_enabled:
         buttons.append(
-            Button("+ Shell", cls="btn btn-sm",
+            Button(ss('plus', sz=12), " Shell", cls="btn btn-sm btn-add",
                    hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=shell",
                    hx_target="#cells", hx_swap="outerHTML")
         )
