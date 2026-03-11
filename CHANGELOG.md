@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+#### Package Restructuring
+
+- **Moved all source code into `dialeng/` package directory** — proper Python package layout with a single top-level package instead of multiple loose packages (`core`, `document`, `services`, `ui`, `extensions`) at the repo root
+- **Moved test files into `tests/` directory** — `test_integration.py`, `test_kernel.py`, `test_stateless_dialoghelper.py`
+- **Simplified `pyproject.toml`** — entry point is now `dialeng.app:main`, build config is `packages = ["dialeng"]` (no more `include` hacks)
+- **Updated all imports** — cross-package imports now use `from dialeng.X import ...` (e.g., `from dialeng.core.registry import registry`)
+- **Static file serving** — now resolves paths relative to the package directory via `Path(__file__).parent`
+
+#### Breaking Changes
+
+- **User-authored extensions** in `AUTORUN/` or `extensions/` that import from the project must update their imports: `from core.registry import ...` becomes `from dialeng.core.registry import ...`. The same applies to all modules (`services`, `document`, `ui`, `extensions`, `app`, `state`).
+
 ### Added
 
 #### GUI Aesthetic Overhaul & Display Settings

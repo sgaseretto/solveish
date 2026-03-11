@@ -379,7 +379,7 @@ kernel = PythonKernel()
 result = kernel.execute(cell.source)
 
 # New approach (streaming)
-from services.kernel import KernelService
+from dialeng.services.kernel import KernelService
 
 kernel_service = KernelService()
 

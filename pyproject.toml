@@ -51,7 +51,7 @@ dependencies = [
 ]
 
 [project.scripts]
-dialeng = "app:main"
+dialeng = "dialeng.app:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -61,21 +61,13 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["core", "document", "services", "ui", "extensions"]
-# Include app.py and state.py at the root
-include = [
-    "app.py",
-    "state.py",
-    "core/**",
-    "document/**",
-    "services/**",
-    "ui/**",
-    "extensions/**",
-    "static/**",
-]
+packages = ["dialeng"]
 
 [dependency-groups]
 dev = [
     "pytest",
     "ruff",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

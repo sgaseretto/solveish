@@ -216,7 +216,7 @@ ui/
 
 ```python
 # In app.py or routes
-from ui import (
+from dialeng.ui import (
     CellView, NotebookPage, AllCells, AllCellsOOB,
     AddButtons, TypeSelect, CollapseBtn
 )
@@ -283,8 +283,8 @@ def CellView(cell, notebook_id: str):
 ```python
 # Imports
 from fasthtml.common import *
-from ui import CellView, NotebookPage, ...
-from services import ...
+from dialeng.ui import CellView, NotebookPage, ...
+from dialeng.services import ...
 
 # Constants
 SOLVEIT_VER = 2
@@ -717,7 +717,7 @@ Services **consume** core infrastructure - they don't define it:
 ```python
 # services/dialoghelper_service.py
 def cell_to_messages(cell) -> List[Dict]:
-    from core.dispatch import cell_to_llm_messages  # Uses core infrastructure
+    from dialeng.core.dispatch import cell_to_llm_messages  # Uses core infrastructure
     return cell_to_llm_messages(cell)
 ```
 

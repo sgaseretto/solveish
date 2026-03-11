@@ -432,27 +432,28 @@ See **[docs/how_it_works/05_dialoghelper_integration.md](docs/how_it_works/05_di
 
 ```
 dialeng/
-├── app.py                  # Main application (FastHTML)
-├── services/               # Service layer
-│   ├── kernel/            # Python kernel (subprocess, streaming)
-│   ├── shell_service.py   # Shell execution (pshnb + safecmd)
-│   ├── llm_service.py     # LLM integration (multi-provider)
-│   └── dialoghelper_service.py  # DialogHelper shared logic
-├── extensions/             # Extension modules
-│   └── shell_cell.py      # Shell cell type and callbacks
-├── ui/                     # UI components
-│   └── cells/             # Cell renderers (code, note, prompt, shell)
+├── dialeng/                # Source package
+│   ├── app.py              # Main application (FastHTML)
+│   ├── core/               # Extension infrastructure
+│   ├── document/           # Data models
+│   ├── services/           # Service layer
+│   │   ├── kernel/         # Python kernel (subprocess, streaming)
+│   │   ├── shell_service.py # Shell execution (pshnb + safecmd)
+│   │   ├── llm_service.py  # LLM integration (multi-provider)
+│   │   └── dialoghelper_service.py  # DialogHelper shared logic
+│   ├── extensions/         # Extension modules
+│   │   └── shell_cell.py   # Shell cell type and callbacks
+│   ├── ui/                 # UI components
+│   │   └── cells/          # Cell renderers (code, note, prompt, shell)
+│   └── static/             # CSS, JS assets
+├── tests/                  # Test files
 ├── notebooks/              # Saved notebooks
-│   ├── pshnb_guide.ipynb  # Shell command guide
-│   ├── safecmd_guide.ipynb # Safe Mode guide
-│   └── shell_integration.ipynb # Complete shell integration guide
 ├── docs/                   # Documentation
-│   └── how_it_works/      # Technical deep dives
-├── requirements.txt        # Dependencies
-├── README.md              # This file
-├── DEVELOPERS.md          # Developer guide
-├── ROADMAP.md             # Feature roadmap
-└── CHANGELOG.md           # Version history
+├── pyproject.toml          # Package config
+├── README.md
+├── DEVELOPERS.md
+├── ROADMAP.md
+└── CHANGELOG.md
 ```
 
 ---
