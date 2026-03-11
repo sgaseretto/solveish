@@ -82,25 +82,22 @@ def AddButtons(pos: int, nb_id: str):
         Div containing add cell buttons
     """
     shell_enabled = _shell_cells_enabled()
-    # hx_swap="none" discards the server response (AllCells HTML).
-    # The server broadcasts a cell_add WS message which the client handles
-    # by inserting just the new cell — no editor destruction, no flicker.
+    # Use onclick with addCellAtRow() instead of hx_post to compute the
+    # position dynamically from the DOM. With hx_swap="none", add-row buttons
+    # are never re-rendered, so hardcoded pos values become stale after
+    # any cell add/delete/move operation.
     buttons = [
         Button(ss('plus', sz=12), " Code", cls="btn btn-sm btn-add",
-               hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=code",
-               hx_swap="none"),
+               onclick=f"addCellAtRow(this, '{nb_id}', 'code')"),
         Button(ss('plus', sz=12), " Note", cls="btn btn-sm btn-add",
-               hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=note",
-               hx_swap="none"),
+               onclick=f"addCellAtRow(this, '{nb_id}', 'note')"),
         Button(ss('plus', sz=12), " Prompt", cls="btn btn-sm btn-add",
-               hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=prompt",
-               hx_swap="none"),
+               onclick=f"addCellAtRow(this, '{nb_id}', 'prompt')"),
     ]
     if shell_enabled:
         buttons.append(
             Button(ss('plus', sz=12), " Shell", cls="btn btn-sm btn-add",
-                   hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=shell",
-                   hx_swap="none")
+                   onclick=f"addCellAtRow(this, '{nb_id}', 'shell')")
         )
 
     return Div(*buttons, cls="add-row")

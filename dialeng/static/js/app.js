@@ -414,6 +414,22 @@ function createNewCellAtEnd() {
     // when it sees _pendingScrollToNewCell is true.
 }
 
+function addCellAtRow(btn, nbId, cellType) {
+    // Compute position dynamically from the add-row's index in the DOM.
+    // This avoids stale hardcoded pos values when cells are added/deleted/moved.
+    const addRow = btn.closest('.add-row');
+    if (!addRow) return;
+    const allAddRows = document.querySelectorAll('#cells .add-row');
+    const pos = Array.from(allAddRows).indexOf(addRow);
+    if (pos < 0) return;
+
+    fetch(`${window.location.pathname}/cell/add?pos=${pos}&type=${cellType}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    });
+    // The WS cell_add handler will insert the cell into the DOM.
+}
+
 // ==================== Keyboard Shortcuts ====================
 document.addEventListener('keydown', e => {
     const target = e.target;
@@ -1640,6 +1656,25 @@ function connectWebSocket(notebookId) {
             // DOM structure: .add-row, #cell-A, .add-row, #cell-B, .add-row
             const cellEl = document.getElementById(`cell-${data.cell_id}`);
             if (!cellEl) return; // Already deleted (e.g., HTMX response processed first)
+
+            // Find neighbor to focus BEFORE removing the cell from DOM.
+            // Prefer the next cell below; if this was the last cell, use the one above.
+            let focusTarget = null;
+            if (focusedCellId === data.cell_id) {
+                let sibling = cellEl.nextElementSibling;
+                while (sibling) {
+                    if (sibling.classList.contains('cell')) { focusTarget = sibling.id.replace('cell-', ''); break; }
+                    sibling = sibling.nextElementSibling;
+                }
+                if (!focusTarget) {
+                    sibling = cellEl.previousElementSibling;
+                    while (sibling) {
+                        if (sibling.classList.contains('cell')) { focusTarget = sibling.id.replace('cell-', ''); break; }
+                        sibling = sibling.previousElementSibling;
+                    }
+                }
+            }
+
             const next = cellEl.nextElementSibling;
             const prev = cellEl.previousElementSibling;
             if (next && next.classList.contains('add-row')) next.remove();
@@ -1649,6 +1684,18 @@ function connectWebSocket(notebookId) {
                 delete monacoEditors[data.cell_id];
             }
             cellEl.remove();
+
+            // Focus the neighbor cell in "command mode" (selected but not editing)
+            // so the user can keep pressing DD to delete more cells.
+            if (focusTarget) {
+                setFocusedCell(focusTarget);
+                const targetCell = document.getElementById(`cell-${focusTarget}`);
+                if (targetCell) {
+                    targetCell.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    targetCell.tabIndex = -1;
+                    targetCell.focus();
+                }
+            }
 
         } else if (data.type === 'cell_move') {
             // Granular cell reorder: swap two adjacent cells in DOM.
