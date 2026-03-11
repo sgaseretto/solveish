@@ -835,6 +835,39 @@ function renderMarkdown(text) {
     }
 }
 
+// Server-side markdown rendering via mistlefoot for full-fidelity output
+// (subscript, superscript, emoji, highlighting, footnotes, task lists, etc.)
+async function renderMarkdownServer(text, targetEl) {
+    if (!text || !text.trim()) {
+        targetEl.innerHTML = '<p style="color: var(--text-muted);">Click to edit...</p>';
+        return;
+    }
+    try {
+        const resp = await fetch('/render-markdown', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: 'text=' + encodeURIComponent(text)
+        });
+        const data = await resp.json();
+        targetEl.innerHTML = data.html;
+        // Add copy buttons and syntax highlighting to code blocks
+        targetEl.querySelectorAll('pre').forEach(pre => {
+            if (!pre.querySelector('.copy-btn')) {
+                const btn = document.createElement('button');
+                btn.className = 'copy-btn';
+                btn.textContent = 'Copy';
+                btn.onclick = function() { copyCode(this); };
+                pre.appendChild(btn);
+            }
+            const code = pre.querySelector('code');
+            if (code && typeof hljs !== 'undefined') hljs.highlightElement(code);
+        });
+    } catch (e) {
+        // Fallback to client-side rendering
+        targetEl.innerHTML = renderMarkdown(text);
+    }
+}
+
 // Copy code to clipboard
 function copyCode(btn) {
     const pre = btn.closest('pre');
@@ -892,10 +925,11 @@ function switchToPreview(cellId, field) {
     const preview = document.querySelector(`[data-cell-id="${cellId}"][data-field="${field}"]`);
     const textarea = document.getElementById(`${field}-${cellId}`);
     if (preview && textarea) {
-        // Update preview content
+        // Show client-side preview immediately, then upgrade with server rendering
         preview.innerHTML = renderMarkdown(textarea.value);
         preview.style.display = 'block';
         textarea.style.display = 'none';
+        renderMarkdownServer(textarea.value, preview);
     }
 }
 
@@ -925,8 +959,9 @@ function initCell(cellId) {
     const noteSource = document.getElementById(`source-${cellId}`);
     if (notePreview && noteSource && cell.dataset.type === 'note') {
         notePreview.innerHTML = renderMarkdown(noteSource.value);
+        renderMarkdownServer(noteSource.value, notePreview);
     }
-    
+
     // Setup AI response preview for prompt cells
     const aiPreview = document.querySelector(`[data-cell-id="${cellId}"][data-field="output"]`);
     const aiTextarea = document.getElementById(`output-${cellId}`);
@@ -934,6 +969,7 @@ function initCell(cellId) {
         const content = aiTextarea.value;
         if (content && content.trim()) {
             aiPreview.innerHTML = renderMarkdown(content);
+            renderMarkdownServer(content, aiPreview);
         } else {
             aiPreview.innerHTML = '<p style="color: var(--text-muted); font-style: italic;">Click ▶ to generate response...</p>';
         }
@@ -1829,6 +1865,12 @@ function finishStreaming(cellId) {
         clearTimeout(streamingTimeoutId);
         streamingTimeoutId = null;
     }
+    // Re-render with server-side mistlefoot for full-fidelity markdown
+    const outputPreview = document.querySelector(`[data-cell-id="${cellId}"][data-field="output"]`);
+    const outputTextarea = document.getElementById(`output-${cellId}`);
+    if (outputPreview && outputTextarea && outputTextarea.value) {
+        renderMarkdownServer(outputTextarea.value, outputPreview);
+    }
 }
 
 let streamingTimeoutId = null;
@@ -2616,6 +2658,7 @@ function renderCellPreviews(cellId) {
         const textarea = document.getElementById(`source-${cellId}`);
         if (textarea) {
             notePreview.innerHTML = renderMarkdown(textarea.value);
+            renderMarkdownServer(textarea.value, notePreview);
         }
     }
 
@@ -2625,6 +2668,7 @@ function renderCellPreviews(cellId) {
         const promptTextarea = document.getElementById(`prompt-${cellId}`);
         if (promptTextarea) {
             promptPreview.innerHTML = renderMarkdown(promptTextarea.value);
+            renderMarkdownServer(promptTextarea.value, promptPreview);
         }
     }
 
@@ -2633,6 +2677,7 @@ function renderCellPreviews(cellId) {
         const outputTextarea = document.getElementById(`output-${cellId}`);
         if (outputTextarea && outputTextarea.value) {
             outputPreview.innerHTML = renderMarkdown(outputTextarea.value);
+            renderMarkdownServer(outputTextarea.value, outputPreview);
         }
     }
 }

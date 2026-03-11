@@ -7,6 +7,7 @@ This module manages:
 
 Tools are converted to Anthropic tool schema format for Claude.
 """
+import asyncio
 import inspect
 import logging
 from typing import Dict, List, Callable, Any, Optional
@@ -119,13 +120,13 @@ def function_to_tool_schema(func: Callable, name: Optional[str] = None) -> Dict[
     Convert a Python function to an Anthropic tool definition.
 
     Args:
-        func: Python function to convert
+        func: Python function or callable object to convert
         name: Optional override for function name
 
     Returns:
         Anthropic tool definition dict
     """
-    func_name = name or func.__name__
+    func_name = name or getattr(func, '__name__', None) or func.__class__.__name__
     sig = inspect.signature(func)
     docstring = inspect.getdoc(func) or f"Call the {func_name} function"
 
@@ -236,10 +237,10 @@ class ToolRegistry:
         Register a built-in tool.
 
         Args:
-            func: Function to register
+            func: Function or callable object to register
             name: Optional name override
         """
-        tool_name = name or func.__name__
+        tool_name = name or getattr(func, '__name__', None) or func.__class__.__name__
         self._builtin_tools[tool_name] = func
         self._builtin_schemas[tool_name] = function_to_tool_schema(func, tool_name)
         logger.debug(f"Registered built-in tool: {tool_name}")
@@ -279,7 +280,9 @@ class ToolRegistry:
 
         try:
             func = self._builtin_tools[name]
-            result = func(**kwargs)
+            # Support async callable objects (e.g. RunPython instances)
+            is_async = asyncio.iscoroutinefunction(func) or asyncio.iscoroutinefunction(getattr(func, '__call__', None))
+            result = await func(**kwargs) if is_async else func(**kwargs)
 
             # Format result for LLM
             if isinstance(result, str):

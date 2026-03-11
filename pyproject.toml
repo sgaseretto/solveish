@@ -46,6 +46,12 @@ dependencies = [
     "pexpect>=4.9.0",
     "safecmd",
 
+    # Safe Python sandbox for LLM tool execution
+    "safepyrun",
+
+    # Extended markdown rendering (subscript, superscript, emoji, etc.)
+    "mistlefoot",
+
     # nbdev for notebook export
     "nbdev",
 ]

@@ -400,11 +400,12 @@ def render_mime_bundle(data: dict, metadata: dict = None) -> str:
         b64 = data["image/gif"].replace('\n', '').replace('\r', '')
         return f'<img class="mime-image" src="data:image/gif;base64,{b64}" />'
 
-    # Markdown - convert to HTML for proper rendering (tables, formatting)
+    # Markdown - convert to HTML using mistlefoot for extended features
     if 'text/markdown' in data:
         try:
-            from markdown_it import MarkdownIt
-            html = MarkdownIt().enable('table').render(data['text/markdown'])
+            from mistletoe import markdown as md_render
+            from mistlefoot import ExtendedHtmlRenderer
+            html = md_render(data['text/markdown'], ExtendedHtmlRenderer)
             return f'<div class="mime-markdown">{html}</div>'
         except ImportError:
             return f'<div class="mime-markdown">{data["text/markdown"]}</div>'
@@ -2606,6 +2607,21 @@ async def post(dlg_name: str, data_id: str, timeout: int = 15):
         return data
     except asyncio.TimeoutError:
         return {"error": "timeout"}
+
+# ============================================================================
+# Markdown Rendering API
+# ============================================================================
+
+@rt("/render-markdown")
+async def post(text: str):
+    """Render markdown to HTML using mistlefoot's ExtendedHtmlRenderer."""
+    try:
+        from mistletoe import markdown as md_render
+        from mistlefoot import ExtendedHtmlRenderer
+        html = md_render(text, ExtendedHtmlRenderer)
+        return {"html": html}
+    except ImportError:
+        return {"html": text}
 
 # ============================================================================
 # WebSocket for Streaming

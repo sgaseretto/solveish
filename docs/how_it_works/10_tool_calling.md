@@ -119,6 +119,7 @@ These tools are always available (no `&` prefix needed):
 | `create(path, content)` | Create a new file | `create("test.py", "print('hi')")` |
 | `str_replace(file, old, new)` | Replace string in file | `str_replace("app.py", "old", "new")` |
 | `insert(file, line, content)` | Insert at line number | `insert("app.py", 10, "# comment")` |
+| `pyrun(code)` | Safe sandboxed Python execution | `pyrun("sum(range(100))")` |
 
 ### Built-in Tool Details
 
@@ -176,6 +177,25 @@ Insert content at a specific line number (1-indexed, inserts BEFORE the line).
 insert("app.py", 1, "# New header comment")
 insert("main.py", 10, "    # Debug line\n    print(x)")
 ```
+
+#### `pyrun(code, concise=True)`
+
+Safe sandboxed Python execution via [safepyrun](https://github.com/AnswerDotAI/safepyrun). Runs code with access to a curated subset of the standard library while blocking dangerous operations (filesystem writes, process spawning, system modification).
+
+```python
+# Examples
+pyrun("sum(range(100))")
+pyrun("import math; math.sqrt(144)")
+pyrun("[x**2 for x in range(10)]")
+```
+
+Key features:
+- **Allowlist-based**: Only permitted callables are accessible (re, json, math, pathlib, etc.)
+- **State persistence**: Variables/functions ending with `_` persist across calls
+- **Write policies**: The Dialeng instance allows writes relative to cwd via `ok_dests=['.']`
+- **Async-native**: Supports `await`, `async for`, `async with`
+
+See `notebooks/safepyrun_demo.ipynb` for a comprehensive walkthrough.
 
 ## Tool Loop
 

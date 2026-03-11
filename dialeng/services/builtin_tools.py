@@ -11,12 +11,14 @@ Tools:
 - create: Create a new file
 - str_replace: Replace exact string in file
 - insert: Insert content at line number
+- pyrun: Safe sandboxed Python execution via safepyrun
 """
 import os
 import subprocess
 from pathlib import Path
 from typing import Optional, List
 import logging
+from safepyrun import RunPython
 
 logger = logging.getLogger(__name__)
 
@@ -378,5 +380,9 @@ def _format_size(size: int) -> str:
     return f"{size:.1f}TB"
 
 
+# Safe Python sandbox — ok_dests=['.'] allows writes relative to cwd (matches Solveit)
+pyrun = RunPython(ok_dests=['.'])
+pyrun.__name__ = 'pyrun'
+
 # Export list of all built-in tools
-BUILTIN_TOOLS: List = [view, rg, create, str_replace, insert]
+BUILTIN_TOOLS: List = [view, rg, create, str_replace, insert, pyrun]

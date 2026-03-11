@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+#### safepyrun Integration
+- Added `pyrun` as a built-in LLM tool for safe sandboxed Python execution via [safepyrun](https://github.com/AnswerDotAI/safepyrun)
+- The AI can now execute Python code safely during prompt responses without the `&` prefix
+- Allowlist-based sandbox with curated stdlib access, `_` suffix variable persistence, and controlled write permissions (`ok_dests=['.']`)
+- Added async support to `execute_builtin()` in `tool_registry.py` for async callable tools
+- New demo notebook: `notebooks/safepyrun_demo.ipynb`
+- New docs: `docs/how_it_works/18_safepyrun_integration.md`
+
+#### mistlefoot Markdown Rendering
+- Replaced `markdown-it-py` with [mistlefoot](https://github.com/AnswerDotAI/mistlefoot) for extended markdown rendering
+- New markdown features: subscript (`H~2~O`), superscript (`E=mc^2^`), `==highlighting==`, `~~strikethrough~~`, emojis (`:rocket:`), footnotes, task lists, heading attributes
+- Added `/render-markdown` server endpoint for full-fidelity rendering
+- Hybrid rendering strategy: fast client-side JS preview during editing + server-side mistlefoot for final output
+- New demo notebook: `notebooks/mistlefoot_demo.ipynb`
+- New docs: `docs/how_it_works/19_mistlefoot_rendering.md`
+
 ### Changed
 
 #### GUI Smoothness Optimizations (Phase 1, 2 & 3)
