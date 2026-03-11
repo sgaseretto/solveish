@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -81,7 +82,10 @@ DEFAULT_CONFIG = {
     },
     "display": {
         "reasoning_truncate_chars": 500,
-        "comment": "Display settings. reasoning_truncate_chars: max characters for LLM reasoning text before truncation (0 = no limit)."
+        "notebook_width": 1400,
+        "button_size": "normal",
+        "font_size": 15,
+        "comment": "Display settings. reasoning_truncate_chars: max chars for reasoning (0=no limit). notebook_width: max container width in px. button_size: normal/compact/large. font_size: base font size in px."
     },
     "shell": {
         "shell_cells_enabled": False,
@@ -136,6 +140,9 @@ class DialengConfig:
 
     # Display settings
     reasoning_truncate_chars: int = 500  # Max chars for reasoning text before truncation (0 = no limit)
+    display_notebook_width: int = 1400  # Max container width in px
+    display_button_size: str = "normal"  # Button size: normal, compact, large
+    display_font_size: int = 15  # Base font size in px
 
     # Shell settings
     shell_cells_enabled: bool = False  # If true, show dedicated Shell cell type in UI
@@ -256,6 +263,9 @@ def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
     # Display settings
     display = raw.get("display", {})
     config.reasoning_truncate_chars = display.get("reasoning_truncate_chars", 500)
+    config.display_notebook_width = display.get("notebook_width", 1400)
+    config.display_button_size = display.get("button_size", "normal")
+    config.display_font_size = display.get("font_size", 15)
 
     # Shell settings
     shell = raw.get("shell", {})
@@ -296,7 +306,7 @@ def load_config(config_path: Optional[Path] = None, force_reload: bool = False) 
     global _config, _config_path
 
     if config_path is None:
-        config_path = Path.cwd() / "dialeng_config.json"
+        config_path = Path(os.environ.get("DIALENG_CONFIG_PATH", Path.cwd() / "dialeng_config.json"))
 
     # Return cached if available and path matches
     if _config is not None and not force_reload and _config_path == config_path:

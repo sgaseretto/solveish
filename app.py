@@ -15,7 +15,6 @@ Features:
 from fasthtml.common import *
 from fastcore.utils import *
 import uuid, json, os, sys, io, traceback, asyncio, re, ast
-from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from contextlib import redirect_stdout, redirect_stderr
@@ -57,6 +56,7 @@ from ui import (
 # Extension system
 from core.extensions import load_extensions
 from core.registry import registry
+from services.autorun_service import process_autorun
 
 # ============================================================================
 # Constants
@@ -115,71 +115,10 @@ from document.prompt_utils import (
 # ============================================================================
 
 # Cell, CellType, CellState, CellOutput, CollapseLevel imported from document.cell
+from document.notebook import Notebook
 
 # Default dialog mode based on credentials and config
 DEFAULT_DIALOG_MODE = DIALENG_CONFIG.default_mode if CREDENTIAL_STATUS.available else "mock"
-
-@dataclass
-class Notebook:
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
-    title: str = "Untitled Notebook"
-    cells: List[Cell] = field(default_factory=list)
-    dialog_mode: str = DEFAULT_DIALOG_MODE
-    model: str = DEFAULT_MODEL
-
-    def to_ipynb(self) -> Dict[str, Any]:
-        return {
-            "nbformat": 4, "nbformat_minor": 5,
-            "metadata": {
-                "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
-                "language_info": {"name": "python", "version": "3.11.0"},
-                "solveit_dialog_mode": self.dialog_mode,
-                "solveit_model": self.model,
-                "solveit_ver": SOLVEIT_VER
-            },
-            "cells": [cell.to_jupyter_cell() for cell in self.cells]
-        }
-    
-    @classmethod
-    def from_ipynb(cls, data: Dict[str, Any], notebook_id: str = None) -> "Notebook":
-        """Load notebook from .ipynb data.
-
-        Model Selection Behavior:
-        - Per-notebook model is saved in metadata as 'solveit_model'
-        - On load, the saved model is validated against available models
-        - If saved model is valid, it's used (per-notebook preference remembered)
-        - If saved model is invalid/missing, falls back to provider default
-
-        This allows users to:
-        - Choose different models per notebook and have it remembered
-        - Not worry if config changes - invalid models gracefully fallback
-        """
-        metadata = data.get("metadata", {})
-        cells = [Cell.from_jupyter_cell(c) for c in data.get("cells", [])]
-        # Get saved dialog mode, but override to "mock" if no credentials available
-        saved_mode = metadata.get("solveit_dialog_mode", DEFAULT_DIALOG_MODE)
-        # If no credentials available, force mock mode regardless of saved value
-        effective_mode = "mock" if not CREDENTIAL_STATUS.available else saved_mode
-        # Validate saved model - use provider default if invalid/missing
-        saved_model = metadata.get("solveit_model", "")
-        effective_model = validate_model_id(saved_model)
-        return cls(
-            id=notebook_id or uuid.uuid4().hex[:8],
-            title="Imported Notebook", cells=cells,
-            dialog_mode=effective_mode,
-            model=effective_model
-        )
-    
-    def save(self, path: str):
-        with open(path, 'w') as f: json.dump(self.to_ipynb(), f, indent=2)
-    
-    @classmethod
-    def load(cls, path: str) -> "Notebook":
-        with open(path) as f: data = json.load(f)
-        nb_id = Path(path).stem
-        nb = cls.from_ipynb(data, nb_id)
-        nb.title = Path(path).stem
-        return nb
 
 # ============================================================================
 # Python Kernel (Streaming Subprocess)
@@ -255,6 +194,15 @@ def _make_state_callback(nb_id: str):
         if state in (CellState.SUCCESS, CellState.ERROR):
             # Finalize cell output and send code_stream_end
             await finalize_cell_execution(nb_id, cell, state == CellState.ERROR)
+
+            # After first successful execution, broadcast kernel-connected so status bar updates
+            if state == CellState.SUCCESS and nb_id in ws_connections and ws_connections[nb_id]:
+                msg = json.dumps({"type": "kernel_connected"})
+                for send in list(ws_connections[nb_id]):
+                    try:
+                        await send(msg)
+                    except:
+                        pass
     return callback
 
 
@@ -334,7 +282,7 @@ This is a **demo response**. In production, connect to Claude, OpenAI, or local 
 # ============================================================================
 
 notebooks: Dict[str, Notebook] = {}
-NOTEBOOKS_DIR = Path("notebooks")
+NOTEBOOKS_DIR = Path(os.environ.get("DIALENG_NOTEBOOKS_DIR", "notebooks"))
 NOTEBOOKS_DIR.mkdir(exist_ok=True)
 
 # Track active WebSocket connections per notebook (list of send functions)
@@ -355,14 +303,29 @@ def get_data_queue(dlg_name: str, data_id: str) -> asyncio.Queue:
         data_queues[dlg_name][data_id] = asyncio.Queue()
     return data_queues[dlg_name][data_id]
 
+def _load_notebook(path: str) -> Notebook:
+    """Load a notebook with app-level credential/model validation."""
+    nb = Notebook.load(str(path),
+                       default_dialog_mode=DEFAULT_DIALOG_MODE,
+                       model_validator=validate_model_id)
+    # Override mode to mock if no credentials available
+    if not CREDENTIAL_STATUS.available:
+        nb.dialog_mode = "mock"
+    # Ensure model is always set (old notebooks may not have it saved)
+    if not nb.model:
+        nb.model = DEFAULT_MODEL
+    return nb
+
+
 def get_notebook(notebook_id: str) -> Notebook:
     """Get or create a notebook - ALWAYS requires notebook_id"""
     if notebook_id not in notebooks:
         path = NOTEBOOKS_DIR / f"{notebook_id}.ipynb"
         if path.exists():
-            notebooks[notebook_id] = Notebook.load(str(path))
+            notebooks[notebook_id] = _load_notebook(path)
         else:
-            nb = Notebook(id=notebook_id, title=notebook_id)
+            nb = Notebook(id=notebook_id, title=notebook_id,
+                         dialog_mode=DEFAULT_DIALOG_MODE, model=DEFAULT_MODEL)
             nb.cells = [
                 Cell(cell_type="note", source="# Welcome to Dialeng! 🚀\n\nAn open-source notebook with **prompt cells** for AI interaction.\n\n**Keyboard Shortcuts (Jupyter-style):**\n- `Shift+Enter` - Run cell (recommended)\n- `Ctrl/Cmd+Enter` - Run cell (alternative)\n- `Ctrl/Cmd+S` - Save notebook\n- `D D` - Delete cell (press D twice)\n- `Ctrl/Cmd+Shift+C` - Add code cell\n- `Ctrl/Cmd+Shift+N` - Add note cell\n- `Ctrl/Cmd+Shift+P` - Add prompt cell\n- `Alt+↑/↓` - Move cell up/down\n- `Escape` - Exit edit mode\n- Double-click - Edit markdown/response"),
                 Cell(cell_type="code", source="# Try running some Python (Shift+Enter)\nx = [1, 2, 3, 4, 5]\nprint(f'Sum: {sum(x)}')\nprint(f'Average: {sum(x)/len(x)}')\nx", output_collapse=1),
@@ -821,6 +784,17 @@ async def broadcast_cell_state(nb_id: str, cell_id: str, state: CellState):
                 pass
 
 
+async def broadcast_kernel_status(nb_id: str, status: str):
+    """Broadcast kernel status change (connected, busy, error, restarting) to all clients."""
+    msg = json.dumps({"type": f"kernel_{status}"})
+    if nb_id in ws_connections and ws_connections[nb_id]:
+        for send in list(ws_connections[nb_id]):
+            try:
+                await send(msg)
+            except:
+                pass
+
+
 async def broadcast_cell_output(nb_id: str, cell_id: str, output):
     """Broadcast cell output chunk to all clients."""
     if output.output_type == 'stream':
@@ -916,6 +890,11 @@ app, rt = fast_app(
     )
 )
 
+# AUTORUN processing on startup (async, needs event loop)
+@app.on_event("startup")
+async def _autorun_startup():
+    await process_autorun(kernel_service)
+
 # Static file serving
 @rt("/static/{path:path}")
 async def get(path: str):
@@ -941,27 +920,118 @@ def get():
     return RedirectResponse("/notebook/default", status_code=302)
 
 @rt("/notebook/new")
-def get():
-    new_id = uuid.uuid4().hex[:8]
-    nb = Notebook(id=new_id, title=f"notebook_{new_id}")
-    nb.cells = [Cell(cell_type="note", source="# New Notebook\n\nStart writing here...")]
+def get(dir: str = "", name: str = ""):
+    new_id = name.strip() if name.strip() else uuid.uuid4().hex[:8]
+    nb = Notebook(id=new_id, title=new_id,
+                  dialog_mode=DEFAULT_DIALOG_MODE, model=DEFAULT_MODEL)
+
+    # Try to load cells from TEMPLATE.ipynb
+    from services.template_service import find_templates, load_template_cells
+    target_dir = NOTEBOOKS_DIR / dir if dir else NOTEBOOKS_DIR
+    template_paths = find_templates(target_dir, NOTEBOOKS_DIR)
+    if template_paths:
+        template_cells = load_template_cells(template_paths)
+        nb.cells = template_cells if template_cells else [Cell(cell_type="note", source="# New Notebook\n\nStart writing here...")]
+    else:
+        nb.cells = [Cell(cell_type="note", source="# New Notebook\n\nStart writing here...")]
+
     notebooks[new_id] = nb
     save_notebook(new_id)
     return RedirectResponse(f"/notebook/{new_id}", status_code=302)
 
+# ============================================================================
+# File Explorer Routes
+# ============================================================================
+
+@rt("/files")
+def get(path: str = ""):
+    """Get file list content for HTMX swap."""
+    from ui.file_explorer import FileListContent
+    target = NOTEBOOKS_DIR / path if path else NOTEBOOKS_DIR
+    # Validate path is within NOTEBOOKS_DIR
+    if not target.resolve().is_relative_to(NOTEBOOKS_DIR.resolve()):
+        target = NOTEBOOKS_DIR
+    kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
+    return FileListContent(target, NOTEBOOKS_DIR, "", kernel_notebooks=kernel_nbs)
+
+@rt("/files/new-folder")
+def post(path: str = "", name: str = ""):
+    """Create a new folder and return updated file list."""
+    from ui.file_explorer import FileListContent
+    if not name or '/' in name or name.startswith('.'):
+        return Div("Invalid folder name", cls="status error")
+    target = NOTEBOOKS_DIR / path if path else NOTEBOOKS_DIR
+    if not target.resolve().is_relative_to(NOTEBOOKS_DIR.resolve()):
+        target = NOTEBOOKS_DIR
+    new_folder = target / name
+    new_folder.mkdir(parents=True, exist_ok=True)
+    kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
+    return FileListContent(target, NOTEBOOKS_DIR, "", kernel_notebooks=kernel_nbs)
+
+@rt("/files/delete")
+def post(path: str = ""):
+    """Delete a notebook file and return updated file list."""
+    from ui.file_explorer import FileListContent
+    if not path or '..' in path:
+        return Div("Invalid path", cls="status error")
+    target = NOTEBOOKS_DIR / f"{path}.ipynb"
+    if not target.resolve().is_relative_to(NOTEBOOKS_DIR.resolve()):
+        return Div("Invalid path", cls="status error")
+    if target.exists() and target.is_file():
+        target.unlink()
+        # Remove from in-memory notebooks if loaded
+        nb_name = Path(path).name
+        if nb_name in notebooks:
+            del notebooks[nb_name]
+    parent = target.parent
+    kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
+    return FileListContent(parent, NOTEBOOKS_DIR, "", kernel_notebooks=kernel_nbs)
+
+# ============================================================================
+# Notebook Routes
+# ============================================================================
+
 @rt("/notebook/{nb_id}")
-def get(nb_id: str):
+async def get(nb_id: str):
     # Guard against empty notebook_id (can happen with trailing slash routing)
     if not nb_id or not nb_id.strip():
         return RedirectResponse("/notebook/default", status_code=302)
     nb = get_notebook(nb_id)
+
+    # Auto-execute CRAFT code cells (non-blocking background task)
+    nb_path = NOTEBOOKS_DIR / f"{nb_id}.ipynb"
+    if nb_path.exists():
+        from services.craft_service import find_craft_files, get_craft_code_cells, _executed_craft
+        craft_paths = find_craft_files(nb_path, NOTEBOOKS_DIR)
+        if craft_paths:
+            craft_cells = get_craft_code_cells(craft_paths)
+            executed = _executed_craft.get(nb_id, set())
+            unexecuted = [(cid, src) for cid, src in craft_cells if cid not in executed]
+            if unexecuted:
+                async def _run_craft():
+                    for cid, src in unexecuted:
+                        try:
+                            cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
+                            async for _ in kernel_service.execute_cell(nb_id, cell):
+                                pass
+                            _executed_craft.setdefault(nb_id, set()).add(cid)
+                        except Exception as e:
+                            print(f"[CRAFT] Error executing cell {cid}: {e}")
+                asyncio.create_task(_run_craft())
+
     nb_list = list_notebooks() or [nb_id]
     # Pass config for settings sidebar
     config = get_config()
+    # Check kernel status for this notebook and all notebooks (for file explorer)
+    nb_kernel_alive = kernel_service.kernel_is_alive(nb_id)
+    kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
     return NotebookPage(nb, nb_list, AVAILABLE_DIALOG_MODES, AVAILABLE_MODELS, config,
                         shfmt_available=SHFMT_AVAILABLE,
                         colab_enabled=colab_auth_service is not None,
-                        colab_authenticated=colab_auth_service.is_authenticated if colab_auth_service else False)
+                        colab_authenticated=colab_auth_service.is_authenticated if colab_auth_service else False,
+                        notebooks_dir=NOTEBOOKS_DIR,
+                        kernel_alive=nb_kernel_alive,
+                        kernel_notebooks=kernel_nbs)
 
 @rt("/notebook/{nb_id}/save")
 def post(nb_id: str):
@@ -996,15 +1066,17 @@ def post(nb_id: str, safe_mode: str = "false"):
 async def post(nb_id: str, kernel_type: str):
     """Change the kernel type for a notebook."""
     nb = get_notebook(nb_id)
-    if kernel_type not in ("local", "colab"):
+    reg = registry.kernels.get(kernel_type)
+    if not reg:
         return Div("Invalid kernel type", cls="status error")
-    if kernel_type == "colab" and not colab_auth_service:
-        return Div("Colab not configured. Enable it in Settings.", cls="status error")
-    if kernel_type == "colab" and not colab_auth_service.is_authenticated:
-        return Div("Not authenticated with Google. Click 'Connect Colab' first.", cls="status error")
+    if reg.requires_auth:
+        if not colab_auth_service:
+            return Div("Colab not configured. Enable it in Settings.", cls="status error")
+        if not colab_auth_service.is_authenticated:
+            return Div("Not authenticated with Google. Click 'Connect Colab' first.", cls="status error")
 
     nb.kernel_type = kernel_type
-    runtime_type = getattr(nb, 'colab_runtime_type', 'cpu')
+    runtime_type = nb.colab_runtime_type
     await kernel_service.set_kernel_type(nb_id, kernel_type, runtime_type=runtime_type)
 
     # Broadcast kernel type change to all clients
@@ -1016,8 +1088,7 @@ async def post(nb_id: str, kernel_type: str):
             except Exception:
                 pass
 
-    label = "Google Colab" if kernel_type == "colab" else "Local Python"
-    return Div(f"Kernel: {label}", cls="status success")
+    return Div(f"Kernel: {reg.label}", cls="status success")
 
 @rt("/notebook/{nb_id}/kernel/runtime")
 async def post(nb_id: str, runtime_type: str):
@@ -1025,7 +1096,7 @@ async def post(nb_id: str, runtime_type: str):
     nb = get_notebook(nb_id)
     if runtime_type not in ("cpu", "gpu", "tpu"):
         return Div("Invalid runtime type", cls="status error")
-    if getattr(nb, 'kernel_type', 'local') != 'colab':
+    if nb.kernel_type != 'colab':
         return Div("Runtime type only applies to Colab kernels", cls="status error")
 
     nb.colab_runtime_type = runtime_type
@@ -1047,7 +1118,32 @@ def get(nb_id: str):
         status = kernel.get_status()
         return status.__dict__
     nb = get_notebook(nb_id)
-    return {"is_alive": False, "kernel_type": getattr(nb, 'kernel_type', 'local')}
+    return {"is_alive": False, "kernel_type": nb.kernel_type}
+
+@rt("/notebook/{nb_id}/kernel/info")
+def get(nb_id: str):
+    """Get kernel toolbar button with connection info (for HTMX swap)."""
+    from ui.kernel_modal import KernelToolbarButton
+    nb = get_notebook(nb_id)
+    kernel_info = None
+    if kernel_service.has_kernel(nb_id):
+        kernel = kernel_service.get_kernel(nb_id)
+        status = kernel.get_status()
+        if status.is_alive:
+            kernel_info = {
+                'language': 'Python',
+                'version': getattr(status, 'python_version', ''),
+                'display_name': getattr(status, 'display_name', 'Python'),
+            }
+    return KernelToolbarButton(nb, kernel_info)
+
+@rt("/notebook/{nb_id}/kernel/modal")
+def get(nb_id: str):
+    """Get the kernel selection modal (for HTMX swap)."""
+    from ui.kernel_modal import KernelModal
+    nb = get_notebook(nb_id)
+    colab_auth = colab_auth_service.is_authenticated if colab_auth_service else False
+    return KernelModal(nb.id, nb.kernel_type, colab_auth, nb.colab_runtime_type)
 
 # ============================================================================
 # Google OAuth Routes (for Colab integration)
@@ -1493,14 +1589,14 @@ async def post(nb_id: str, cid: str, source: str = None):
                 # Use tool-enabled streaming
                 kernel = kernel_service.get_kernel(nb_id)
                 stream_func = llm_service.stream_response_with_tools(
-                    c.source, context_messages, nb.dialog_mode, getattr(nb, 'model', None), c.use_thinking,
+                    c.source, context_messages, nb.dialog_mode, nb.model, c.use_thinking,
                     kernel=kernel, notebook_id=nb_id, max_steps=max_steps,
                     include_builtins=include_builtins
                 )
             else:
                 # Use regular streaming (no tools)
                 stream_func = llm_service.stream_response(
-                    c.source, context_messages, nb.dialog_mode, getattr(nb, 'model', None), c.use_thinking
+                    c.source, context_messages, nb.dialog_mode, nb.model, c.use_thinking
                 )
 
         # Stream via WebSocket to all connected clients
@@ -1746,6 +1842,7 @@ async def post(nb_id: str, cid: str, source: str = None):
 @rt("/notebook/{nb_id}/kernel/restart")
 async def post(nb_id: str):
     """Restart the kernel for a specific notebook."""
+    await broadcast_kernel_status(nb_id, "restarting")
     await kernel_service.restart_async(nb_id)
     return Div("✓ Kernel restarted", cls="status success")
 
@@ -2245,6 +2342,9 @@ async def post(nb_id: str, cell_id: str, prop: str):
         return {"error": f"Cell {cell_id} not found"}
     cell = nb.cells[idx]
     setattr(cell, prop, not getattr(cell, prop))
+    # Sync #| export directive with is_exported flag
+    if prop == 'is_exported':
+        cell.sync_export_directive()
     await broadcast_to_notebook(nb_id, CellViewOOB(cell, nb_id))
     return {"status": "ok", prop: getattr(cell, prop)}
 
@@ -2433,7 +2533,8 @@ async def ws(msg: str, send, nb_id: str):
 # Run
 # ============================================================================
 
-if __name__ == "__main__":
+def main():
+    """CLI entry point for dialeng."""
     print("🚀 Dialeng starting at http://localhost:8000")
     print("   Notebooks saved to: ./notebooks/")
     print("   Format: Solveit-compatible .ipynb")
@@ -2461,3 +2562,7 @@ if __name__ == "__main__":
     print("   • Escape            - Exit edit mode")
     print("   • Double-click      - Edit markdown/response")
     serve(port=8000)
+
+
+if __name__ == "__main__":
+    main()

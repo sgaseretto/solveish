@@ -17,10 +17,11 @@ body {
     background: var(--bg-primary);
     color: var(--text-primary);
     line-height: 1.6;
+    font-size: var(--base-font-size, 15px);
 }
 
 /* Main container */
-.container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+.container { max-width: var(--notebook-width, 1400px); margin: 0 auto; padding: 8px 16px; }
 
 /* Keyboard shortcut hints */
 .kbd {
@@ -34,10 +35,10 @@ body {
    ========================================================================== */
 
 @media (max-width: 768px) {
-    .container { padding: 10px; }
-    .header { flex-direction: column; gap: 12px; align-items: stretch; }
-    .title { font-size: 1.1rem; justify-content: center; }
-    .toolbar { justify-content: center; flex-wrap: wrap; }
+    .container { padding: 8px; }
+    .toolbar-container { flex-direction: column; gap: 8px; align-items: stretch; }
+    .toolbar-left { justify-content: center; }
+    .toolbar-right { justify-content: center; flex-wrap: wrap; }
     .cell-header { flex-direction: column; gap: 8px; padding: 8px; }
     .cell-actions { justify-content: center; flex-wrap: wrap; }
     .cell-badge { align-self: flex-start; }
@@ -53,10 +54,10 @@ body {
 }
 
 @media (max-width: 480px) {
-    .container { padding: 8px; }
-    .header { padding: 8px 0; margin-bottom: 12px; }
-    .title { font-size: 1rem; }
-    .toolbar { gap: 4px; }
+    .container { padding: 6px; }
+    .toolbar-container { padding: 6px 8px; border-radius: 8px; }
+    .toolbar-title { font-size: 0.8rem; }
+    .toolbar-right { gap: 4px; }
     .btn { font-size: 0.8rem; padding: 6px 8px; }
     .cell { margin-bottom: 8px; border-radius: 6px; }
     .cell-header { padding: 6px 8px; }

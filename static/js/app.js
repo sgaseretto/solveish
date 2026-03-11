@@ -909,14 +909,20 @@ function toggleTheme() {
 
     // Update toggle button
     const btn = document.getElementById('theme-toggle');
-    if (btn) btn.textContent = newTheme === 'light' ? '🌙' : '☀️';
+    if (btn) {
+        const use = btn.querySelector('use');
+        if (use) use.setAttribute('href', newTheme === 'light' ? '#moon' : '#sun');
+    }
 }
 
 function loadTheme() {
     const savedTheme = localStorage.getItem('theme') || 'dark';
     document.documentElement.setAttribute('data-theme', savedTheme);
     const btn = document.getElementById('theme-toggle');
-    if (btn) btn.textContent = savedTheme === 'light' ? '🌙' : '☀️';
+    if (btn) {
+        const use = btn.querySelector('use');
+        if (use) use.setAttribute('href', savedTheme === 'light' ? '#moon' : '#sun');
+    }
 }
 
 // ==================== Model Select Toggle ====================
@@ -926,6 +932,26 @@ function toggleModelSelect(mode) {
         // Show model dropdown only for non-mock modes
         modelSelect.style.display = mode === 'mock' ? 'none' : '';
     }
+}
+
+// ==================== Safe Mode Toggle ====================
+function toggleSafeMode(nbId) {
+    const btn = document.getElementById('safe-mode-toggle');
+    if (!btn) return;
+    const isActive = btn.classList.contains('active');
+    const newState = !isActive;
+
+    // Toggle visual state
+    btn.classList.toggle('active');
+    const use = btn.querySelector('use');
+    if (use) use.setAttribute('href', newState ? '#shield-check' : '#shield-off');
+
+    // Send to server
+    fetch(`/notebook/${nbId}/safe_mode`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: `safe_mode=${newState}`
+    });
 }
 
 // ==================== Colab Auth State Listener ====================
@@ -1060,8 +1086,12 @@ function toggleOutline() {
         const isOpening = !sidebar.classList.contains('outline-open');
         sidebar.classList.toggle('outline-open');
 
-        // If opening, refresh the outline content
+        // Close file explorer if opening outline
         if (isOpening) {
+            const fileExplorer = document.getElementById('file-explorer-sidebar');
+            if (fileExplorer && fileExplorer.classList.contains('file-explorer-open')) {
+                fileExplorer.classList.remove('file-explorer-open');
+            }
             refreshOutline();
         }
     }
@@ -1276,6 +1306,11 @@ function connectWebSocket(notebookId) {
             // Code cell execution finished
             console.log('[WS] code_stream_end received for cell:', data.cell_id, 'has_error:', data.has_error);
             finishCodeStreaming(data.cell_id, data.has_error);
+            // Flash error on kernel dot if cell had an error, then return to connected
+            if (data.has_error) {
+                updateKernelDot('error');
+                setTimeout(() => updateKernelDot('connected'), 3000);
+            }
         } else if (data.type === 'code_display_data') {
             // Rich output (image, HTML, plot, etc.)
             console.log('[WS] code_display_data received for cell:', data.cell_id);
@@ -1323,6 +1358,16 @@ function connectWebSocket(notebookId) {
             // Kernel type changed (local <-> colab)
             console.log('[WS] kernel_type_changed:', data.kernel_type);
             handleKernelTypeChanged(data.kernel_type);
+        } else if (data.type === 'kernel_connected') {
+            // Kernel connected after first execution — refresh status bar
+            document.body.dispatchEvent(new CustomEvent('kernel-connected'));
+            updateKernelDot('connected');
+        } else if (data.type === 'kernel_error') {
+            // Kernel died or disconnected
+            updateKernelDot('error');
+        } else if (data.type === 'kernel_restarting') {
+            // Kernel is restarting — show yellow, will go grey until next execution
+            updateKernelDot('busy');
         }
     };
 
@@ -1670,6 +1715,22 @@ function finishCodeStreaming(cellId, hasError) {
 // Track queue state for cells
 const cellQueueState = new Map(); // cellId -> {state: 'queued'|'running'|'idle', position: number}
 
+// Kernel status dot — updates the dot next to notebook title
+// States: (no class)=grey/disconnected, connected=green, busy=yellow, error=red
+function updateKernelDot(state) {
+    const dot = document.getElementById('kernel-dot');
+    if (!dot) return;
+    dot.classList.remove('connected', 'busy', 'error');
+    const titles = {
+        connected: 'Kernel: idle',
+        busy: 'Kernel: busy',
+        error: 'Kernel: error',
+        '': 'Kernel: not connected'
+    };
+    if (state) dot.classList.add(state);
+    dot.title = titles[state] || titles[''];
+}
+
 function handleQueueUpdate(data) {
     // Clear all previous queue states
     cellQueueState.forEach((_, cellId) => {
@@ -1692,6 +1753,9 @@ function handleQueueUpdate(data) {
     // Show/hide Cancel All button based on queue state
     const hasQueuedOrRunning = data.running_cell_id || (data.queued_cell_ids && data.queued_cell_ids.length > 0);
     updateCancelAllButton(hasQueuedOrRunning);
+
+    // Update kernel dot: busy if running/queued, connected if idle
+    updateKernelDot(hasQueuedOrRunning ? 'busy' : 'connected');
 }
 
 function updateCellQueueState(cellId, state, position) {
@@ -2345,3 +2409,213 @@ const ToolConfirmation = (function() {
         }
     };
 })();
+
+// ==================== Kernel Selection Modal ====================
+function toggleKernelModal(nbId) {
+    const overlay = document.getElementById('kernel-modal-overlay');
+    if (!overlay) return;
+    overlay.classList.toggle('visible');
+}
+
+function selectKernelOption(el, kernelType) {
+    // Highlight the selected kernel option (client-side only)
+    const body = el.closest('.kernel-modal-body');
+    if (!body) return;
+    // Remove active from all options
+    body.querySelectorAll('.kernel-option').forEach(opt => opt.classList.remove('active'));
+    // Hide all runtime pickers
+    body.querySelectorAll('.kernel-runtime-options').forEach(rp => rp.style.display = 'none');
+    // Activate the clicked option
+    el.classList.add('active');
+    // Show runtime picker for this option if it has one
+    const runtimePicker = el.querySelector('.kernel-runtime-options');
+    if (runtimePicker) {
+        runtimePicker.style.display = '';
+        // Select first runtime if none is active
+        if (!runtimePicker.querySelector('.kernel-runtime-btn.active')) {
+            const first = runtimePicker.querySelector('.kernel-runtime-btn');
+            if (first) {
+                first.classList.add('active');
+                const rtInput = document.getElementById('kernel-modal-selected-runtime');
+                if (rtInput) rtInput.value = first.dataset.runtime;
+            }
+        }
+    }
+    // Update hidden input
+    const typeInput = document.getElementById('kernel-modal-selected-type');
+    if (typeInput) typeInput.value = kernelType;
+}
+
+function selectKernelRuntime(btn, runtime) {
+    // Highlight the selected runtime button (client-side only)
+    const picker = btn.closest('.kernel-runtime-options');
+    if (picker) {
+        picker.querySelectorAll('.kernel-runtime-btn').forEach(b => b.classList.remove('active'));
+    }
+    btn.classList.add('active');
+    // Update hidden input
+    const rtInput = document.getElementById('kernel-modal-selected-runtime');
+    if (rtInput) rtInput.value = runtime;
+    // Stop click from bubbling to the kernel-option (which would re-trigger selectKernelOption)
+    event.stopPropagation();
+}
+
+function applyKernelSelection(nbId) {
+    const typeInput = document.getElementById('kernel-modal-selected-type');
+    const rtInput = document.getElementById('kernel-modal-selected-runtime');
+    if (!typeInput) return;
+    const kernelType = typeInput.value;
+    const runtimeType = rtInput ? rtInput.value : 'cpu';
+
+    // Send kernel type change
+    fetch(`/notebook/${nbId}/kernel/type`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: `kernel_type=${encodeURIComponent(kernelType)}`
+    }).then(response => response.text()).then(html => {
+        const statusEl = document.getElementById('status');
+        if (statusEl) statusEl.innerHTML = html;
+
+        // If Colab, also set runtime type
+        if (runtimeType && kernelType === 'colab') {
+            fetch(`/notebook/${nbId}/kernel/runtime`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: `runtime_type=${encodeURIComponent(runtimeType)}`
+            });
+        }
+
+        toggleKernelModal();
+        // Refresh kernel toolbar button
+        htmx.ajax('GET', `/notebook/${nbId}/kernel/info`, {target: '#kernel-status-bar', swap: 'outerHTML'});
+    });
+}
+
+// Refresh kernel status bar after first cell execution
+document.body.addEventListener('kernel-connected', function(e) {
+    const nbId = window.NOTEBOOK_ID;
+    if (nbId) {
+        htmx.ajax('GET', `/notebook/${nbId}/kernel/info`, {target: '#kernel-status-bar', swap: 'outerHTML'});
+    }
+});
+
+// Close kernel modal on Escape
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        const overlay = document.getElementById('kernel-modal-overlay');
+        if (overlay && overlay.classList.contains('visible')) {
+            toggleKernelModal();
+            return;
+        }
+    }
+});
+
+// ==================== File Explorer ====================
+function toggleFileExplorer() {
+    const sidebar = document.getElementById('file-explorer-sidebar');
+    if (sidebar) {
+        const isOpening = !sidebar.classList.contains('file-explorer-open');
+        sidebar.classList.toggle('file-explorer-open');
+
+        // Close outline if opening file explorer
+        if (isOpening) {
+            const outline = document.getElementById('outline-sidebar');
+            if (outline && outline.classList.contains('outline-open')) {
+                outline.classList.remove('outline-open');
+            }
+        }
+    }
+}
+
+function toggleNewItemModal() {
+    const modal = document.getElementById('new-item-modal');
+    if (modal) {
+        modal.classList.toggle('visible');
+        // Focus the name input when opening
+        if (modal.classList.contains('visible')) {
+            const input = document.getElementById('new-item-name');
+            if (input) { input.value = ''; input.focus(); }
+            // Reset type to dialog
+            selectNewItemType('dialog');
+        }
+    }
+}
+
+function selectNewItemType(type) {
+    const dialogBtn = document.getElementById('new-item-type-dialog');
+    const folderBtn = document.getElementById('new-item-type-folder');
+    const typeInput = document.getElementById('new-item-type');
+    if (typeInput) typeInput.value = type;
+    if (dialogBtn) dialogBtn.classList.toggle('active', type === 'dialog');
+    if (folderBtn) folderBtn.classList.toggle('active', type === 'folder');
+}
+
+function createNewItem(currentPath) {
+    const name = document.getElementById('new-item-name')?.value?.trim();
+    const type = document.getElementById('new-item-type')?.value || 'dialog';
+    if (!name) return;
+
+    if (type === 'folder') {
+        // Create folder via HTMX-style fetch
+        fetch('/files/new-folder', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: `path=${encodeURIComponent(currentPath)}&name=${encodeURIComponent(name)}`
+        }).then(r => r.text()).then(html => {
+            const container = document.getElementById('file-list-content');
+            if (container) {
+                container.outerHTML = html;
+                const newContainer = document.getElementById('file-list-content');
+                if (newContainer && typeof htmx !== 'undefined') htmx.process(newContainer);
+            }
+        });
+        toggleNewItemModal();
+    } else {
+        // Navigate to create new notebook with name
+        toggleNewItemModal();
+        window.location.href = `/notebook/new?dir=${encodeURIComponent(currentPath)}&name=${encodeURIComponent(name)}`;
+    }
+}
+
+// Delete confirmation modal
+function showDeleteConfirm(filePath, displayName) {
+    const modal = document.getElementById('delete-confirm-modal');
+    const pathInput = document.getElementById('delete-file-path');
+    const displaySpan = document.getElementById('delete-file-display');
+    if (modal && pathInput && displaySpan) {
+        pathInput.value = filePath;
+        displaySpan.textContent = displayName;
+        modal.classList.add('visible');
+    }
+}
+
+function hideDeleteConfirm() {
+    const modal = document.getElementById('delete-confirm-modal');
+    if (modal) modal.classList.remove('visible');
+}
+
+function confirmDeleteFile() {
+    const filePath = document.getElementById('delete-file-path')?.value;
+    if (!filePath) return;
+    fetch('/files/delete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: `path=${encodeURIComponent(filePath)}`
+    }).then(r => r.text()).then(html => {
+        const container = document.getElementById('file-list-content');
+        if (container) {
+            container.outerHTML = html;
+            const newContainer = document.getElementById('file-list-content');
+            if (newContainer && typeof htmx !== 'undefined') htmx.process(newContainer);
+        }
+    });
+    hideDeleteConfirm();
+}
+
+// Keyboard shortcut: Ctrl+Shift+E to toggle file explorer
+document.addEventListener('keydown', function(e) {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'E') {
+        e.preventDefault();
+        toggleFileExplorer();
+    }
+});
