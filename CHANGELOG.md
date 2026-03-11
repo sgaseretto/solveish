@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### Monaco Editor Migration
+
+- **Replaced Ace Editor with Monaco Editor** — migrated from Ace 1.32.6 (4 CDN scripts) to Monaco 0.52.2 (AMD loader) for code and shell cells
+- **Auto-resize editor** — Monaco editors grow/shrink with content (60px min, 600px max) using `onDidContentSizeChange`, replacing Ace's `minLines`/`maxLines`
+- **Improved theme integration** — Monaco switches between `vs-dark` and `vs` themes in sync with Dialeng's dark/light theme toggle
+- **Keyboard shortcuts preserved** — Shift+Enter (run + move), Ctrl/Cmd+Enter (run), Ctrl/Cmd+S (save) all work in Monaco via `addAction()` (not `addCommand()`) to properly override built-in Monaco keybindings
+- **HTMX lifecycle integration** — editors properly disposed on `htmx:beforeSwap` and reinitialized on `htmx:afterSettle`
+- **Pending init queue** — editors requested before Monaco AMD loader finishes are queued and initialized once ready
+
+### Fixed
+
+- **Scroll position preserved on cell operations** — adding, deleting, and moving cells no longer jumps the notebook to the bottom of the page; scroll position is saved before HTMX `outerHTML` swaps and restored after Monaco editors reinitialize
+- **Scroll passthrough from Monaco editors** — mouse wheel events now propagate to the notebook when the editor content is fully scrolled, via `alwaysConsumeMouseWheel: false`
+- **Flash of unstyled text mitigation (partial)** — Monaco editors start hidden (`opacity: 0`) and reveal after syntax tokenization is detected via DOM polling for colored token classes. This reduces but does not fully eliminate the brief flash of unstyled text during cell re-renders (see [Known Issues](#known-issues))
+
+### Known Issues
+
+- **Flash of unstyled text (FOUST)** — when a cell finishes executing, the server replaces the entire cell DOM via OOB swap, forcing Monaco to recreate from scratch. There is a brief moment where code appears without syntax colors before tokenization completes. The current opacity-based mitigation helps but does not fully solve it. A proper fix requires either targeted output-only swaps (avoiding editor DOM replacement) or editor model caching. See `docs/how_it_works/17_editor_cell_transitions.md` for details.
+
+### Added
+
+#### Kernel-Backed Code Completion
+
+- **Python code completion in Monaco** — `CompletionItemProvider` registered for Python language, triggered on `.` character and manual invoke
+- **Completion endpoint** — `POST /api/complete/{nb_id}` accepts `code` and `cursor_pos`, returns matching completions from the kernel
+- **Kernel completion pipeline** — `KernelService.complete()` → `SubprocessKernel.complete()` → kernel worker → `CaptureShell.complete()`
+- **Busy guard** — completions return empty while the kernel is executing code, preventing queue message interleaving
+- **Fixed kernel_worker.py completion handler** — `CaptureShell.complete()` takes 1 argument (code string) and returns `list[str]`, not a tuple; fixed the handler to match
+
 #### Package Restructuring
 
 - **Moved all source code into `dialeng/` package directory** — proper Python package layout with a single top-level package instead of multiple loose packages (`core`, `document`, `services`, `ui`, `extensions`) at the repo root

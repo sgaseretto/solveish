@@ -2,7 +2,7 @@
    Dialeng Client-Side JavaScript
    
    This file contains all client-side logic for the Dialeng notebook app:
-   - Ace Editor management
+   - Monaco Editor management
    - Cell focus and selection
    - Keyboard shortcuts
    - Markdown rendering
@@ -42,141 +42,267 @@ document.addEventListener('mousedown', (e) => {
     }
 }, true);  // Use capture phase to get the event before it's stopped
 
-// ==================== Ace Editor Management ====================
-const aceEditors = {};
+// ==================== Monaco Editor Management ====================
+const monacoEditors = {};
+let monacoReady = false;
+const pendingEditorInits = [];
 
-function initAceEditor(cellId, mode = 'python') {
-    const container = document.getElementById(`ace-${cellId}`);
-    if (!container) return null;
+// Monaco AMD loader initialization
+require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' }});
+require(['vs/editor/editor.main'], function() {
+    monacoReady = true;
 
-    // If editor already exists, destroy it first to ensure fresh state
-    if (aceEditors[cellId]) {
-        aceEditors[cellId].destroy();
-        delete aceEditors[cellId];
+    // Register kernel-backed completion provider for Python
+    let _completionTimer = null;
+    monaco.languages.registerCompletionItemProvider('python', {
+        triggerCharacters: ['.'],
+        provideCompletionItems: function(model, position, context, token) {
+            const nbId = window.NOTEBOOK_ID;
+            if (!nbId) return { suggestions: [] };
+
+            const code = model.getValue();
+            const cursorOffset = model.getOffsetAt(position);
+
+            if (_completionTimer) clearTimeout(_completionTimer);
+
+            return new Promise((resolve) => {
+                _completionTimer = setTimeout(async () => {
+                    try {
+                        const resp = await fetch(`/api/complete/${nbId}`, {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                            body: new URLSearchParams({ code, cursor_pos: cursorOffset })
+                        });
+                        if (!resp.ok) { resolve({ suggestions: [] }); return; }
+                        const data = await resp.json();
+
+                        const word = model.getWordUntilPosition(position);
+                        const range = {
+                            startLineNumber: position.lineNumber,
+                            startColumn: word.startColumn,
+                            endLineNumber: position.lineNumber,
+                            endColumn: position.column,
+                        };
+
+                        const suggestions = (data.matches || []).map((m, i) => ({
+                            label: m,
+                            kind: monaco.languages.CompletionItemKind.Variable,
+                            insertText: m,
+                            range: range,
+                            sortText: String(i).padStart(5, '0'),
+                        }));
+                        resolve({ suggestions });
+                    } catch (e) {
+                        resolve({ suggestions: [] });
+                    }
+                }, 150);
+            });
+        }
+    });
+
+    // Initialize any editors that were requested before Monaco loaded
+    pendingEditorInits.forEach(args => initMonacoEditor(...args));
+    pendingEditorInits.length = 0;
+});
+
+// ---------------------------------------------------------------------------
+// Monaco Editor Initialization
+//
+// EXPECTED BEHAVIOR (from the user's perspective):
+//   - When a cell is first loaded or created, the editor should appear with
+//     full syntax highlighting immediately — no flash of plain white text.
+//   - When a cell finishes executing, the output appears below the editor
+//     and the editor keeps its highlighted source code intact.
+//   - Scrolling inside an editor should propagate to the notebook when the
+//     editor content is fully scrolled (no scroll trapping).
+//   - Adding/deleting/moving cells should preserve the current scroll
+//     position — the notebook should NOT jump to the top or bottom.
+//   - Keyboard shortcuts (Shift+Enter, Ctrl+Enter, Ctrl+S) should work
+//     even though Monaco has built-in bindings for those keys.
+//
+// KNOWN ISSUE — Flash of Unstyled Text (FOUST):
+//   When cells are re-rendered via HTMX OOB swaps (e.g., after execution),
+//   the entire cell DOM is replaced. The new HTML contains an inline Script
+//   that calls initMonacoEditor(), which destroys the old editor and creates
+//   a fresh one via monaco.editor.create(). Monaco renders text immediately
+//   in plain white, then tokenizes asynchronously via web workers. This
+//   creates a brief flash where the code appears without syntax colors.
+//
+//   Current mitigation: we set container opacity to 0 and poll for colored
+//   token spans (mtk classes beyond the default mtk1). Once tokenization
+//   is detected, we reveal the editor. This works in most cases but the
+//   issue can still occasionally appear — particularly when:
+//     - The browser tab is under heavy load (tokenization takes longer)
+//     - Many cells are re-initialized simultaneously (bulk #cells swap)
+//     - The code contains no keywords (only comments or plain identifiers)
+//       so all tokens remain mtk1 and we fall through to the 30-frame timeout
+//
+//   A more robust fix would require one of:
+//     (a) Avoid full DOM replacement — use targeted OOB swaps that only
+//         update the output section, leaving the editor DOM untouched
+//     (b) Cache editor models and re-attach them instead of recreating
+//     (c) Use Monaco's built-in tokenization API (not public) to wait for
+//         tokenization to complete before rendering
+//   See docs/how_it_works/17_editor_cell_transitions.md for full details.
+// ---------------------------------------------------------------------------
+function initMonacoEditor(cellId, mode = 'python') {
+    if (!monacoReady) {
+        pendingEditorInits.push([cellId, mode]);
+        return null;
     }
 
-    // Also check if Ace left any state on the container
-    if (container.env && container.env.editor) {
-        try {
-            container.env.editor.destroy();
-        } catch (e) {}
+    const container = document.getElementById(`monaco-${cellId}`);
+    if (!container) return null;
+
+    // Destroy existing editor if it exists (handles HTMX re-renders)
+    if (monacoEditors[cellId]) {
+        monacoEditors[cellId].dispose();
+        delete monacoEditors[cellId];
     }
 
     // Get initial content from hidden textarea
     const textarea = document.getElementById(`source-${cellId}`);
     const initialContent = textarea ? textarea.value : '';
 
-    // Clear container completely before Ace takes over
+    // Hide container until tokenization completes to mitigate FOUST (see above).
+    // NOTE: This mitigation is imperfect — see "KNOWN ISSUE" comment above.
     container.innerHTML = '';
-    container.className = 'ace-container';  // Reset classes
+    container.className = 'monaco-container';
+    container.style.opacity = '0';
 
-    const editor = ace.edit(container);
-    const currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
-    editor.setTheme(currentTheme === 'light' ? 'ace/theme/chrome' : 'ace/theme/monokai');
-    editor.setOptions({
-        fontSize: "14px",
-        showPrintMargin: false,
-        highlightActiveLine: true,
-        wrap: true,
-        minLines: 3,
-        maxLines: 30,
+    const isDark = (document.documentElement.getAttribute('data-theme') || 'dark') !== 'light';
+    const langMap = { 'python': 'python', 'sh': 'shell' };
+
+    const editor = monaco.editor.create(container, {
+        value: initialContent,
+        language: langMap[mode] || 'python',
+        theme: isDark ? 'vs-dark' : 'vs',
+        fontSize: 14,
+        fontFamily: "'SF Mono', 'Fira Code', 'Consolas', monospace",
         tabSize: 4,
-        useSoftTabs: true,
+        insertSpaces: true,
+        wordWrap: 'on',
+        minimap: { enabled: false },
+        lineNumbers: 'on',
+        scrollBeyondLastLine: false,
+        automaticLayout: true,
+        overviewRulerLanes: 0,
+        hideCursorInOverviewRuler: true,
+        renderLineHighlight: 'line',
+        glyphMargin: false,
+        folding: false,
+        scrollbar: { vertical: 'hidden', horizontal: 'auto', alwaysConsumeMouseWheel: false },
     });
 
-    // Set content first, then apply mode (mode triggers re-highlighting)
-    editor.setValue(initialContent, -1);
+    // Auto-resize to content (replaces Ace minLines/maxLines)
+    const minHeight = 60;  // ~3 lines
+    const maxHeight = 600; // ~30 lines
+    function updateEditorHeight() {
+        const contentHeight = Math.max(minHeight, Math.min(maxHeight, editor.getContentHeight()));
+        container.style.height = contentHeight + 'px';
+        editor.layout();
+    }
+    editor.onDidContentSizeChange(updateEditorHeight);
+    updateEditorHeight();
 
-    // Apply mode after setValue - this ensures syntax highlighting works
-    // Use a small delay to let Ace settle
-    // Supported modes: python (default), sh (shell/bash), markdown, etc.
-    const aceMode = `ace/mode/${mode}`;
-    editor.session.setMode(aceMode);
+    // Reveal editor after syntax tokenization (prevents flash of unstyled text).
+    // Monaco tokenizes asynchronously after create(). We poll for colored token
+    // spans (mtk classes > mtk1) which indicate highlighting has been applied.
+    if (initialContent.trim()) {
+        let attempts = 0;
+        const pollTokens = () => {
+            attempts++;
+            // mtk1 = default/unstyled text. mtk3+ = keyword/string/etc colored tokens.
+            // When we see diverse mtk classes, tokenization is done.
+            const tokenSpans = container.querySelectorAll('.view-lines [class*="mtk"]');
+            let hasColoredTokens = false;
+            for (const span of tokenSpans) {
+                if (span.className !== 'mtk1') { hasColoredTokens = true; break; }
+            }
+            if (hasColoredTokens || attempts >= 30) {
+                container.style.opacity = '1';
+            } else {
+                requestAnimationFrame(pollTokens);
+            }
+        };
+        requestAnimationFrame(pollTokens);
+    } else {
+        container.style.opacity = '1';
+    }
 
-    // Force a complete re-render after a brief delay
-    setTimeout(() => {
-        editor.session.setMode(aceMode);
-        editor.renderer.updateFull();
-    }, 50);
-    
     // Sync to hidden textarea on change
     if (textarea) {
-        editor.session.on('change', () => {
+        editor.onDidChangeModelContent(() => {
             textarea.value = editor.getValue();
         });
     }
-    
-    // When Ace editor gets focus, also set cell as focused
-    editor.on('focus', () => {
-        setFocusedCell(cellId);
-    });
 
-    // Shift+Enter to run AND move to next cell (Jupyter style)
-    editor.commands.addCommand({
-        name: 'runCell',
-        bindKey: {win: 'Shift-Enter', mac: 'Shift-Enter'},
-        exec: function(editor) {
-            const cell = editor.container.closest('.cell');
+    // Focus tracking
+    editor.onDidFocusEditorText(() => setFocusedCell(cellId));
+
+    // Keyboard shortcuts (use addAction to properly override built-in Monaco keybindings)
+    // Shift+Enter: run cell and move to next
+    editor.addAction({
+        id: 'dialeng-shift-enter-' + cellId,
+        label: 'Run Cell and Move Next',
+        keybindings: [monaco.KeyMod.Shift | monaco.KeyCode.Enter],
+        run: () => {
+            syncMonacoToTextarea(cellId);
+            const cell = container.closest('.cell');
             if (cell) {
-                // Sync content first
-                const cellId = cell.id.replace('cell-', '');
-                syncAceToTextarea(cellId);
                 const btn = cell.querySelector('.btn-run');
                 if (btn) btn.click();
-                // Move to next cell immediately (Jupyter behavior)
                 moveToNextCell(cell);
             }
         }
     });
-    
-    // Ctrl/Cmd+Enter also runs
-    editor.commands.addCommand({
-        name: 'runCellAlt',
-        bindKey: {win: 'Ctrl-Enter', mac: 'Cmd-Enter'},
-        exec: function(editor) {
-            const cell = editor.container.closest('.cell');
+
+    // Ctrl/Cmd+Enter: run cell
+    editor.addAction({
+        id: 'dialeng-ctrl-enter-' + cellId,
+        label: 'Run Cell',
+        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter],
+        run: () => {
+            syncMonacoToTextarea(cellId);
+            const cell = container.closest('.cell');
             if (cell) {
-                const cellId = cell.id.replace('cell-', '');
-                syncAceToTextarea(cellId);
                 const btn = cell.querySelector('.btn-run');
                 if (btn) btn.click();
             }
         }
     });
-    
-    // Ctrl/Cmd+S to save
-    editor.commands.addCommand({
-        name: 'saveNotebook',
-        bindKey: {win: 'Ctrl-S', mac: 'Cmd-S'},
-        exec: function() {
+
+    // Ctrl/Cmd+S: save notebook
+    editor.addAction({
+        id: 'dialeng-save-' + cellId,
+        label: 'Save Notebook',
+        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
+        run: () => {
             document.getElementById('save-btn')?.click();
         }
     });
 
-    // Double-Escape to cancel all (handled by global keydown listener)
-    // No need for Ace-specific binding since Escape blurs the editor first
-
-    aceEditors[cellId] = editor;
+    monacoEditors[cellId] = editor;
     return editor;
 }
 
-function syncAceToTextarea(cellId) {
-    const editor = aceEditors[cellId];
+function syncMonacoToTextarea(cellId) {
+    const editor = monacoEditors[cellId];
     const textarea = document.getElementById(`source-${cellId}`);
     if (editor && textarea) {
         textarea.value = editor.getValue();
     }
 }
 
-function getAceContent(cellId) {
-    const editor = aceEditors[cellId];
+function getMonacoContent(cellId) {
+    const editor = monacoEditors[cellId];
     return editor ? editor.getValue() : '';
 }
 
-function destroyAceEditor(cellId) {
-    if (aceEditors[cellId]) {
-        aceEditors[cellId].destroy();
-        delete aceEditors[cellId];
+function destroyMonacoEditor(cellId) {
+    if (monacoEditors[cellId]) {
+        monacoEditors[cellId].dispose();
+        delete monacoEditors[cellId];
     }
 }
 
@@ -203,9 +329,9 @@ function focusNextCell(cellId) {
     // Scroll cell into view
     cell.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
-    // If it's a code cell with Ace editor, focus the editor
+    // If it's a code cell with Monaco editor, focus the editor
     if (cell.dataset.type === 'code') {
-        const editor = aceEditors[cellId];
+        const editor = monacoEditors[cellId];
         if (editor) {
             editor.focus();
         }
@@ -230,8 +356,8 @@ function getFocusedCellId() {
         const cell = active.closest('.cell');
         if (cell) return cell.id.replace('cell-', '');
     }
-    for (const [cellId, editor] of Object.entries(aceEditors)) {
-        if (editor.isFocused()) return cellId;
+    for (const [cellId, editor] of Object.entries(monacoEditors)) {
+        if (editor.hasTextFocus()) return cellId;
     }
     return focusedCellId;
 }
@@ -280,7 +406,7 @@ function createNewCellAtEnd() {
 document.addEventListener('keydown', e => {
     const target = e.target;
     const mod = e.ctrlKey || e.metaKey;
-    const inAce = target.closest('.ace_editor');
+    const inMonaco = target.closest('.monaco-editor');
     const inInput = target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable;
     
     let currentCellId = getFocusedCellId();
@@ -290,7 +416,7 @@ document.addEventListener('keydown', e => {
     
     // ===== D D to delete cell (Jupyter style) =====
     if (e.key === 'd' || e.key === 'D') {
-        if (!inInput && !inAce) {
+        if (!inInput && !inMonaco) {
             const now = Date.now();
             if (lastKey === 'd' && (now - lastKeyTime) < 500) {
                 // Double D pressed
@@ -316,14 +442,14 @@ document.addEventListener('keydown', e => {
     }
     
     // ===== Shift+Enter - Run current cell AND move to next (Jupyter style) =====
-    if (e.shiftKey && e.key === 'Enter' && !inAce) {
+    if (e.shiftKey && e.key === 'Enter' && !inMonaco) {
         // Use currentCellId (from getFocusedCellId) or fall back to target's cell
         const cellId = currentCellId || (target.closest('.cell')?.id.replace('cell-', ''));
         if (cellId) {
             e.preventDefault();
             const cell = document.getElementById(`cell-${cellId}`);
             if (cell) {
-                syncAceToTextarea(cellId);
+                syncMonacoToTextarea(cellId);
                 // Also sync prompt textarea
                 syncPromptContent(cellId);
                 const btn = cell.querySelector('.btn-run');
@@ -342,14 +468,14 @@ document.addEventListener('keydown', e => {
     }
 
     // ===== Ctrl/Cmd+Enter - Run current cell =====
-    if (mod && e.key === 'Enter' && !inAce) {
+    if (mod && e.key === 'Enter' && !inMonaco) {
         // Use currentCellId (from getFocusedCellId) or fall back to target's cell
         const cellId = currentCellId || (target.closest('.cell')?.id.replace('cell-', ''));
         if (cellId) {
             e.preventDefault();
             const cell = document.getElementById(`cell-${cellId}`);
             if (cell) {
-                syncAceToTextarea(cellId);
+                syncMonacoToTextarea(cellId);
                 syncPromptContent(cellId);
                 const btn = cell.querySelector('.btn-run');
                 if (btn) {
@@ -363,7 +489,7 @@ document.addEventListener('keydown', e => {
     }
     
     // ===== Ctrl/Cmd+S - Save notebook =====
-    if (mod && e.key === 's' && !inAce) {
+    if (mod && e.key === 's' && !inMonaco) {
         e.preventDefault();
         document.getElementById('save-btn')?.click();
     }
@@ -384,14 +510,14 @@ document.addEventListener('keydown', e => {
         if (document.activeElement) {
             document.activeElement.blur();
         }
-        Object.values(aceEditors).forEach(ed => ed.blur());
+        Object.values(monacoEditors).forEach(ed => ed.trigger('keyboard', 'blur', {}));
         lastKey = 'Escape';
         lastKeyTime = now;
     }
 
     // ===== Z - Collapse shortcuts =====
     // Z: cycle input collapse, Shift+Z: cycle output collapse, Alt+Z: cycle both
-    if ((e.key === 'z' || e.key === 'Z') && !inInput && !inAce) {
+    if ((e.key === 'z' || e.key === 'Z') && !inInput && !inMonaco) {
         if (currentCellId) {
             e.preventDefault();
             if (e.altKey) {
@@ -409,7 +535,7 @@ document.addEventListener('keydown', e => {
 
     // ===== 0-3: Set specific collapse level =====
     // 0-3 for input, Shift+0-3 for output
-    if (['0', '1', '2', '3'].includes(e.key) && !inInput && !inAce && !mod) {
+    if (['0', '1', '2', '3'].includes(e.key) && !inInput && !inMonaco && !mod) {
         if (currentCellId) {
             const level = parseInt(e.key);
             if (e.shiftKey) {
@@ -449,7 +575,7 @@ document.addEventListener('keydown', e => {
     
     // ===== Alt+Up or Ctrl/Cmd+Shift+Up - Move cell up =====
     if ((e.altKey && e.key === 'ArrowUp') || (mod && e.shiftKey && e.key === 'ArrowUp')) {
-        if (currentCellId && !inAce) {
+        if (currentCellId && !inMonaco) {
             e.preventDefault();
             const cell = document.getElementById(`cell-${currentCellId}`);
             if (cell) {
@@ -461,7 +587,7 @@ document.addEventListener('keydown', e => {
     
     // ===== Alt+Down or Ctrl/Cmd+Shift+Down - Move cell down =====
     if ((e.altKey && e.key === 'ArrowDown') || (mod && e.shiftKey && e.key === 'ArrowDown')) {
-        if (currentCellId && !inAce) {
+        if (currentCellId && !inMonaco) {
             e.preventDefault();
             const cell = document.getElementById(`cell-${currentCellId}`);
             if (cell) {
@@ -472,7 +598,7 @@ document.addEventListener('keydown', e => {
     }
     
     // ===== h/p/e - Toggle cell state shortcuts =====
-    if (!inInput && !inAce && !mod) {
+    if (!inInput && !inMonaco && !mod) {
         if (e.key === 'h' && currentCellId) {
             e.preventDefault();
             toggleCellState(currentCellId, 'skipped');
@@ -488,7 +614,7 @@ document.addEventListener('keydown', e => {
     }
 
     // ===== Add cell shortcuts (not in input) =====
-    if (!inInput && !inAce) {
+    if (!inInput && !inMonaco) {
         if (mod && e.shiftKey && e.key === 'C') {
             e.preventDefault();
             htmx.ajax('POST', window.location.pathname + '/cell/add?type=code', {target: '#cells'});
@@ -526,9 +652,9 @@ function syncPromptContent(cellId) {
     }
 }
 
-// Also sync when Ace editor content needs to go to hidden field
+// Also sync when Monaco editor content needs to go to hidden field
 function syncAllContent(cellId) {
-    syncAceToTextarea(cellId);
+    syncMonacoToTextarea(cellId);
     syncPromptContent(cellId);
 }
 
@@ -731,9 +857,9 @@ function initCell(cellId) {
     const cell = document.getElementById(`cell-${cellId}`);
     if (!cell) return;
     
-    // Initialize Ace editor for code cells
+    // Initialize Monaco editor for code cells
     if (cell.dataset.type === 'code') {
-        initAceEditor(cellId);
+        initMonacoEditor(cellId);
     }
     
     // Setup preview for note cells
@@ -776,31 +902,63 @@ function initCell(cellId) {
     });
 }
 
-// Cleanup before HTMX swaps
+// ---------------------------------------------------------------------------
+// HTMX Swap Lifecycle — Editor Cleanup & Scroll Preservation
+//
+// Several operations replace the entire #cells container via HTMX outerHTML:
+//   - Adding a cell (+ Code / + Note / + Prompt buttons, or via dialoghelper)
+//   - Deleting a cell
+//   - Moving a cell up/down
+//   - Cell execution completion (OOB swap from WebSocket)
+//
+// When #cells is replaced, ALL Monaco editors inside are destroyed and
+// recreated. This causes two problems:
+//   1. The last editor created may receive focus, scrolling the page to it
+//   2. Monaco re-initialization triggers layout, which can also cause scroll
+//
+// Fix: Save window.scrollY before the swap, restore it after editors init.
+// We restore in both htmx:afterSwap (immediate) and htmx:afterSettle
+// (after Monaco init) to cover both timing windows.
+//
+// The hx_swap="outerHTML show:none" on buttons also tells HTMX not to
+// scroll any element into view after the swap.
+// ---------------------------------------------------------------------------
+let _htmxScrollRestore = null;
+
 document.addEventListener('htmx:beforeSwap', (e) => {
-    // Only destroy Ace editors within the swap target (efficient)
     const target = e.detail.target;
     if (target) {
-        // If target itself is a cell with an ace-container
+        // Save scroll position when swapping the #cells container (multi-cell swap)
+        if (target.id === 'cells' || target.querySelectorAll('.cell').length > 1) {
+            _htmxScrollRestore = window.scrollY;
+        }
+        // If target itself is a cell with a monaco-container
         if (target.classList && target.classList.contains('cell')) {
-            const container = target.querySelector('.ace-container');
+            const container = target.querySelector('.monaco-container');
             if (container) {
-                const cellId = container.id.replace('ace-', '');
-                destroyAceEditor(cellId);
+                const cellId = container.id.replace('monaco-', '');
+                destroyMonacoEditor(cellId);
             }
         } else {
-            // If target contains ace-containers
-            target.querySelectorAll('.ace-container').forEach(container => {
-                const cellId = container.id.replace('ace-', '');
-                destroyAceEditor(cellId);
+            // If target contains monaco-containers
+            target.querySelectorAll('.monaco-container').forEach(container => {
+                const cellId = container.id.replace('monaco-', '');
+                destroyMonacoEditor(cellId);
             });
         }
     }
 });
 
+// Restore scroll immediately after DOM swap (before inline scripts run)
+document.addEventListener('htmx:afterSwap', (e) => {
+    if (_htmxScrollRestore !== null) {
+        window.scrollTo(0, _htmxScrollRestore);
+    }
+});
+
 // After HTMX settles (fires after all HTMX processing is complete)
 document.addEventListener('htmx:afterSettle', (e) => {
-    // Small delay to ensure DOM is fully ready and Ace can initialize properly
+    // Small delay to ensure DOM is fully ready and Monaco can initialize properly
     setTimeout(() => {
         // Only initialize cells within the swap target (efficient - not ALL cells)
         const target = e.detail.target || e.detail.elt;
@@ -822,8 +980,20 @@ document.addEventListener('htmx:afterSettle', (e) => {
             }
         }
         setupPreviewEditing();
+        // Restore scroll position after multi-cell swap (prevents jump-to-bottom)
+        _restoreScrollPosition();
     }, 20);
 });
+
+function _restoreScrollPosition() {
+    if (_htmxScrollRestore !== null) {
+        const pos = _htmxScrollRestore;
+        _htmxScrollRestore = null;
+        // Restore immediately and again after Monaco layout settles
+        window.scrollTo(0, pos);
+        requestAnimationFrame(() => window.scrollTo(0, pos));
+    }
+}
 
 // Handle HTMX errors - ensure streaming state is reset for both prompt and code cells
 function resetCellOnError(e, errorMsg) {
@@ -835,7 +1005,7 @@ function resetCellOnError(e, errorMsg) {
 
         if (cell && cell.classList.contains('streaming')) {
             // Determine cell type and reset appropriately
-            const isCodeCell = cell.querySelector('.ace-container') !== null;
+            const isCodeCell = cell.querySelector('.monaco-container') !== null;
             const isPromptCell = cell.querySelector('.prompt-source') !== null;
 
             if (isPromptCell && streamingCellId === cellId) {
@@ -901,11 +1071,10 @@ function toggleTheme() {
     html.setAttribute('data-theme', newTheme);
     localStorage.setItem('theme', newTheme);
 
-    // Update Ace editor themes
-    const aceTheme = newTheme === 'light' ? 'ace/theme/chrome' : 'ace/theme/monokai';
-    Object.values(aceEditors).forEach(editor => {
-        editor.setTheme(aceTheme);
-    });
+    // Update Monaco editor themes
+    if (typeof monaco !== 'undefined') {
+        monaco.editor.setTheme(newTheme === 'light' ? 'vs' : 'vs-dark');
+    }
 
     // Update toggle button
     const btn = document.getElementById('theme-toggle');
@@ -2051,7 +2220,7 @@ function processOOBSwap(html) {
             const activeEl = document.activeElement;
             const isEditingText = target.contains(activeEl) && activeEl && (
                 activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'INPUT' ||
-                activeEl.isContentEditable || activeEl.closest('.ace_editor')
+                activeEl.isContentEditable || activeEl.closest('.monaco-editor')
             );
             const isStreaming = target.classList.contains('streaming');
 
@@ -2071,9 +2240,9 @@ function processOOBSwap(html) {
             if (newCell) {
                 htmx.process(newCell);
 
-                // Reinitialize Ace editor if it's a code cell
+                // Reinitialize Monaco editor if it's a code cell
                 if (newCell.dataset.type === 'code') {
-                    setTimeout(() => initAceEditor(cellId), 0);
+                    setTimeout(() => initMonacoEditor(cellId), 0);
                 }
             }
 
@@ -2089,8 +2258,8 @@ function processOOBSwap(html) {
 
             // Only skip if user is actively typing AND no cell is currently streaming
             // If ANY cell is streaming (executing), we need to allow updates for add_msg() to work
-            // The Ace editor's hidden textarea keeps focus during execution, but that's not "real typing"
-            const isInInput = document.activeElement?.matches('input, textarea, .ace_text-input');
+            // The Monaco editor's hidden textarea keeps focus during execution, but that's not "real typing"
+            const isInInput = document.activeElement?.matches('input, textarea, .monaco-editor .inputarea');
             const anyCellStreaming = document.querySelector('.cell.streaming') !== null;
             const shouldSkip = isInInput && !anyCellStreaming;
             console.log('[OOB] isInInput:', isInInput, 'anyCellStreaming:', anyCellStreaming, 'shouldSkip:', shouldSkip);
@@ -2113,8 +2282,8 @@ function processOOBSwap(html) {
                 htmx.process(newCells);
             }
 
-            // Reinitialize Ace editors for all code cells
-            reinitializeAceEditors();
+            // Reinitialize Monaco editors for all code cells
+            reinitializeMonacoEditors();
 
             // Re-render all markdown previews
             renderAllPreviews();
@@ -2130,16 +2299,16 @@ function processOOBSwap(html) {
     }
 }
 
-function reinitializeAceEditors() {
-    // Destroy all existing Ace editors
-    for (const cellId of Object.keys(aceEditors)) {
-        destroyAceEditor(cellId);
+function reinitializeMonacoEditors() {
+    // Destroy all existing Monaco editors
+    for (const cellId of Object.keys(monacoEditors)) {
+        destroyMonacoEditor(cellId);
     }
 
     // Find all code cells and initialize their editors
     document.querySelectorAll('.cell[data-type="code"]').forEach(cell => {
         const cellId = cell.id.replace('cell-', '');
-        setTimeout(() => initAceEditor(cellId), 0);
+        setTimeout(() => initMonacoEditor(cellId), 0);
     });
 }
 

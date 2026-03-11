@@ -47,7 +47,7 @@ body {
     .file-list { flex-direction: column; }
     .file-item { text-align: center; }
     .source, .prompt-content { font-size: 0.85rem; }
-    .ace-container { min-height: 100px; }
+    .monaco-container { min-height: 60px; }
     .btn { padding: 8px 12px; }
     .btn-sm { padding: 6px 10px; }
     .mode-select, .model-select { width: 100%; margin-left: 0; }

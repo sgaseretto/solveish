@@ -85,19 +85,19 @@ def AddButtons(pos: int, nb_id: str):
     buttons = [
         Button(ss('plus', sz=12), " Code", cls="btn btn-sm btn-add",
                hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=code",
-               hx_target="#cells", hx_swap="outerHTML"),
+               hx_target="#cells", hx_swap="outerHTML show:none"),
         Button(ss('plus', sz=12), " Note", cls="btn btn-sm btn-add",
                hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=note",
-               hx_target="#cells", hx_swap="outerHTML"),
+               hx_target="#cells", hx_swap="outerHTML show:none"),
         Button(ss('plus', sz=12), " Prompt", cls="btn btn-sm btn-add",
                hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=prompt",
-               hx_target="#cells", hx_swap="outerHTML"),
+               hx_target="#cells", hx_swap="outerHTML show:none"),
     ]
     if shell_enabled:
         buttons.append(
             Button(ss('plus', sz=12), " Shell", cls="btn btn-sm btn-add",
                    hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=shell",
-                   hx_target="#cells", hx_swap="outerHTML")
+                   hx_target="#cells", hx_swap="outerHTML show:none")
         )
 
     return Div(*buttons, cls="add-row")

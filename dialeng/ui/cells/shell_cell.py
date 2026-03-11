@@ -1,7 +1,7 @@
 """
 Dialeng UI - Shell Cell Component
 
-Renders shell cells with Ace editor (bash mode) and output display.
+Renders shell cells with Monaco editor (shell mode) and output display.
 Shell cells execute bash commands via pshnb with optional safecmd validation.
 """
 
@@ -40,7 +40,7 @@ def ShellCellHeader(cell, notebook_id: str, safe_mode: bool = False):
     ]
 
     # Run button with bash-specific handling
-    run_onclick = f"syncAceToTextarea('{cell.id}'); prepareCodeRun('{cell.id}');"
+    run_onclick = f"syncMonacoToTextarea('{cell.id}'); prepareCodeRun('{cell.id}');"
     run_button = Button(
         ss('play', sz=14), cls="btn btn-sm btn-run",
         hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/run",
@@ -98,14 +98,14 @@ def ShellCellHeader(cell, notebook_id: str, safe_mode: bool = False):
             cancel_button,
             Button(ss('arrow-up', sz=14), cls="btn btn-sm btn-icon",
                    hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/move/up",
-                   hx_target="#cells", hx_swap="outerHTML", title="Move up"),
+                   hx_target="#cells", hx_swap="outerHTML show:none", title="Move up"),
             Button(ss('arrow-down', sz=14), cls="btn btn-sm btn-icon",
                    hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/move/down",
-                   hx_target="#cells", hx_swap="outerHTML", title="Move down"),
+                   hx_target="#cells", hx_swap="outerHTML show:none", title="Move down"),
             Button(ss('trash-2', sz=14), cls="btn btn-sm btn-icon btn-delete",
                    hx_delete=f"/notebook/{notebook_id}/cell/{cell.id}",
                    hx_target="#cells",
-                   hx_swap="outerHTML", title="Delete (D D)"),
+                   hx_swap="outerHTML show:none", title="Delete (D D)"),
             cls="cell-actions"
         ),
         cls="cell-header"
@@ -113,7 +113,7 @@ def ShellCellHeader(cell, notebook_id: str, safe_mode: bool = False):
 
 
 def ShellCellView(cell, notebook_id: str, safe_mode: bool = False):
-    """Render a shell cell with Ace editor (bash mode) and output.
+    """Render a shell cell with Monaco editor (shell mode) and output.
 
     Args:
         cell: Cell dataclass instance with cell_type="shell"
@@ -129,15 +129,15 @@ def ShellCellView(cell, notebook_id: str, safe_mode: bool = False):
     header = ShellCellHeader(cell, notebook_id, safe_mode)
 
     body = Div(
-        # Hidden textarea for form submission - Ace reads from this
+        # Hidden textarea for form submission - Monaco reads from this
         Textarea(cell.source, name="source", id=f"source-{cell.id}",
                  style="display: none;",
                  hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/source",
                  hx_trigger="blur changed", hx_swap="none"),
-        # Ace Editor container - with collapse support
-        # Uses bash mode for shell syntax highlighting
+        # Monaco Editor container - with collapse support
+        # Uses shell mode for shell syntax highlighting
         Div(
-            Div(id=f"ace-{cell.id}", cls="ace-container"),
+            Div(id=f"monaco-{cell.id}", cls="monaco-container"),
             cls=f"cell-input {input_collapse_cls}".strip(),
             data_collapse_section="input"
         ),
@@ -148,8 +148,8 @@ def ShellCellView(cell, notebook_id: str, safe_mode: bool = False):
             cls=f"cell-output{' error' if cell.output and ('Error' in cell.output or 'Traceback' in cell.output or 'DisallowedCmd' in cell.output) else ''} {output_collapse_cls}".strip(),
             data_collapse_section="output"
         ),
-        # Initialize Ace editor with bash mode
-        Script(f"setTimeout(() => initAceEditor('{cell.id}', 'sh'), 0);"),
+        # Initialize Monaco editor with shell mode
+        Script(f"setTimeout(() => initMonacoEditor('{cell.id}', 'sh'), 0);"),
         cls="cell-body"
     )
 

@@ -858,7 +858,7 @@ async def broadcast_cell_output(nb_id: str, cell_id: str, output):
 #   - static/css/themes.css    (theme color variables)
 #   - static/css/base.css      (reset, typography, layout)
 #   - static/css/components.css (cells, buttons, badges)
-#   - static/css/editor.css    (Ace editor styles)
+#   - static/css/editor.css    (Monaco editor styles)
 #   - static/js/app.js         (all client-side logic)
 #
 # See docs/how_it_works/07_code_organization.md for details.
@@ -878,11 +878,8 @@ app, rt = fast_app(
         Link(rel="stylesheet", href="/static/css/base.css"),
         Link(rel="stylesheet", href="/static/css/components.css"),
         Link(rel="stylesheet", href="/static/css/editor.css"),
-        # Ace Editor
-        Script(src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/ace.min.js"),
-        Script(src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/mode-python.min.js"),
-        Script(src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/theme-monokai.min.js"),
-        Script(src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/theme-chrome.min.js"),
+        # Monaco Editor (AMD loader - Monaco modules loaded in app.js via require())
+        Script(src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.min.js"),
         # Highlight.js for markdown code blocks
         Link(rel="stylesheet", href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"),
         Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"),
@@ -1222,6 +1219,17 @@ def get(nb_id: str):
                     headers={"Content-Disposition": f'attachment; filename="{nb_id}.ipynb"'})
 
 # ============================================================================
+# Code Completion Endpoint
+# ============================================================================
+
+@rt("/api/complete/{nb_id}")
+async def post(nb_id: str, code: str, cursor_pos: int):
+    """Code completion endpoint."""
+    code_to_cursor = code[:cursor_pos] if cursor_pos <= len(code) else code
+    matches = await kernel_service.complete(nb_id, code_to_cursor)
+    return {"matches": matches}
+
+
 # Outline Sidebar Endpoints
 # ============================================================================
 
@@ -1532,7 +1540,7 @@ async def post(nb_id: str, cid: str, source: str = None):
 
     c = target_cell
 
-    # Update source if provided (from Ace editor via hx-vals)
+    # Update source if provided (from Monaco editor via hx-vals)
     if source is not None:
         c.source = source
 

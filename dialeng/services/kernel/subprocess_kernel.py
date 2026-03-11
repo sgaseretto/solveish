@@ -411,6 +411,33 @@ class SubprocessKernel(BaseKernel):
             self._is_busy = False
 
 
+    async def complete(self, code: str, timeout: float = 3.0) -> list[str]:
+        """Get code completions from the kernel."""
+        if not self.is_alive or self._is_busy:
+            return []
+
+        self.input_queue.put({
+            'type': 'complete',
+            'code': code,
+        })
+
+        loop = asyncio.get_event_loop()
+        start_time = loop.time()
+
+        while True:
+            try:
+                msg = await loop.run_in_executor(
+                    None,
+                    lambda: self.output_queue.get(timeout=0.1)
+                )
+                if msg.get('type') == 'complete_reply':
+                    return msg.get('matches', [])
+            except Empty:
+                if loop.time() - start_time > timeout:
+                    return []
+                if not self.is_alive:
+                    return []
+
     async def get_namespace_info(self, timeout: float = 5.0) -> dict:
         """
         Get all user-defined variables and functions from the kernel namespace.

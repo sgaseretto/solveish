@@ -100,3 +100,7 @@ class BaseKernel(ABC):
 
     async def execute_tool(self, name: str, kwargs: dict, timeout: float = 60.0) -> dict:
         return {'name': name, 'status': 'error', 'error': 'Not supported by this kernel'}
+
+    async def complete(self, code: str, timeout: float = 3.0) -> list[str]:
+        """Get code completions for code text up to cursor position."""
+        return []

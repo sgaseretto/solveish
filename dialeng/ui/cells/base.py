@@ -85,14 +85,14 @@ def CellHeader(cell, notebook_id: str, collapse_controls: list = None):
             _cancel_button(cell, notebook_id),
             Button(ss('arrow-up', sz=14), cls="btn btn-sm btn-icon",
                    hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/move/up",
-                   hx_target="#cells", hx_swap="outerHTML", title="Move up"),
+                   hx_target="#cells", hx_swap="outerHTML show:none", title="Move up"),
             Button(ss('arrow-down', sz=14), cls="btn btn-sm btn-icon",
                    hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/move/down",
-                   hx_target="#cells", hx_swap="outerHTML", title="Move down"),
+                   hx_target="#cells", hx_swap="outerHTML show:none", title="Move down"),
             Button(ss('trash-2', sz=14), cls="btn btn-sm btn-icon btn-delete",
                    hx_delete=f"/notebook/{notebook_id}/cell/{cell.id}",
                    hx_target="#cells",
-                   hx_swap="outerHTML", title="Delete (D D)"),
+                   hx_swap="outerHTML show:none", title="Delete (D D)"),
             cls="cell-actions"
         ),
         cls="cell-header"
@@ -105,11 +105,11 @@ def _run_button(cell, notebook_id: str):
         return None
 
     if cell.cell_type == "prompt":
-        onclick = (f"syncAceToTextarea('{cell.id}'); "
+        onclick = (f"syncMonacoToTextarea('{cell.id}'); "
                    f"syncPromptContent('{cell.id}'); "
                    f"startStreaming('{cell.id}', {str(cell.use_thinking).lower()});")
     else:
-        onclick = f"syncAceToTextarea('{cell.id}'); prepareCodeRun('{cell.id}');"
+        onclick = f"syncMonacoToTextarea('{cell.id}'); prepareCodeRun('{cell.id}');"
 
     return Button(ss('play', sz=14), cls="btn btn-sm btn-run",
                   hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/run",

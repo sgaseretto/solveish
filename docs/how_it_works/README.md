@@ -23,6 +23,7 @@ Read the documents in numerical order for the best understanding of the system:
 | 14 | [14_package_structure.md](14_package_structure.md) | uv project setup - pyproject.toml, entry points, configurable paths |
 | 15 | [15_extension_registries.md](15_extension_registries.md) | Kernel, provider, toolbar, and settings registries |
 | 16 | [16_craft_template_autorun.md](16_craft_template_autorun.md) | CRAFT, TEMPLATE, and AUTORUN folder support |
+| 17 | [17_editor_cell_transitions.md](17_editor_cell_transitions.md) | Monaco editor lifecycle, cell transitions, scroll preservation, FOUST known issue |
 
 ## Purpose
 
@@ -69,6 +70,9 @@ These documents are intended for developers who want to:
 | CRAFT context injection | [16_craft_template_autorun.md](16_craft_template_autorun.md) |
 | TEMPLATE notebooks | [16_craft_template_autorun.md](16_craft_template_autorun.md) |
 | AUTORUN extensions | [16_craft_template_autorun.md](16_craft_template_autorun.md) |
+| Editor flash / transition bugs | [17_editor_cell_transitions.md](17_editor_cell_transitions.md) |
+| Scroll jumping on cell operations | [17_editor_cell_transitions.md](17_editor_cell_transitions.md) |
+| Monaco editor lifecycle | [17_editor_cell_transitions.md](17_editor_cell_transitions.md) |
 
 ## Related Documentation
 

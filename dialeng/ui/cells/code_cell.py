@@ -1,7 +1,7 @@
 """
 Dialeng UI - Code Cell Component
 
-Renders code cells with Ace editor and output display.
+Renders code cells with Monaco editor and output display.
 """
 
 from fasthtml.common import *
@@ -10,7 +10,7 @@ from .base import CellHeader
 
 
 def CodeCellView(cell, notebook_id: str):
-    """Render a code cell with Ace editor and output.
+    """Render a code cell with Monaco editor and output.
 
     Args:
         cell: Cell dataclass instance with cell_type="code"
@@ -25,14 +25,14 @@ def CodeCellView(cell, notebook_id: str):
     header = CellHeader(cell, notebook_id)
 
     body = Div(
-        # Hidden textarea for form submission - Ace reads from this
+        # Hidden textarea for form submission - Monaco reads from this
         Textarea(cell.source, name="source", id=f"source-{cell.id}",
                  style="display: none;",
                  hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/source",
                  hx_trigger="blur changed", hx_swap="none"),
-        # Ace Editor container - with collapse support
+        # Monaco Editor container - with collapse support
         Div(
-            Div(id=f"ace-{cell.id}", cls="ace-container"),
+            Div(id=f"monaco-{cell.id}", cls="monaco-container"),
             cls=f"cell-input {input_collapse_cls}".strip(),
             data_collapse_section="input"
         ),
@@ -43,8 +43,8 @@ def CodeCellView(cell, notebook_id: str):
             cls=f"cell-output{' error' if cell.output and ('Error' in cell.output or 'Traceback' in cell.output) else ''} {output_collapse_cls}".strip(),
             data_collapse_section="output"
         ),
-        # Initialize Ace editor
-        Script(f"setTimeout(() => initAceEditor('{cell.id}'), 0);"),
+        # Initialize Monaco editor
+        Script(f"setTimeout(() => initMonacoEditor('{cell.id}'), 0);"),
         cls="cell-body"
     )
 

@@ -258,6 +258,15 @@ class KernelService:
         for notebook_id in list(self._kernels.keys()):
             self.shutdown(notebook_id)
 
+    async def complete(self, notebook_id: str, code: str) -> list[str]:
+        """Get code completions for the given code text."""
+        if notebook_id not in self._kernels:
+            return []
+        kernel = self._kernels[notebook_id]
+        if not kernel.is_alive:
+            return []
+        return await kernel.complete(code)
+
     async def get_namespace_info(self, notebook_id: str) -> dict:
         """
         Get all user-defined variables and functions from the kernel namespace.

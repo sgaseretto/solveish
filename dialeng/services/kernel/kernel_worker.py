@@ -420,11 +420,13 @@ def kernel_worker_main(input_queue: Queue, output_queue: Queue):
 
         elif msg['type'] == 'complete':
             # Code completion request
-            completions = shell.complete(msg['code'], msg['cursor_pos'])
+            try:
+                matches = shell.complete(msg['code'])
+            except Exception:
+                matches = []
             output_queue.put({
                 'type': 'complete_reply',
-                'matches': completions[1] if completions else [],
-                'cursor_start': completions[0] if completions else msg['cursor_pos'],
+                'matches': matches,
             })
 
         elif msg['type'] == 'shutdown':
