@@ -951,7 +951,23 @@ function initCell(cellId) {
 // ---------------------------------------------------------------------------
 // HTMX Swap Lifecycle — Editor Cleanup & Scroll Preservation
 //
-// Several operations replace the entire #cells container via HTMX outerHTML:
+// FOUST PREVENTION CONTEXT:
+// Monaco Editor renders text white first, then asynchronously tokenizes via a
+// web worker to apply syntax highlighting. If the editor DOM is destroyed and
+// recreated (e.g., by an HTMX swap), users see a flash of white unstyled text
+// before highlighting reappears — this is FOUST (Flash of Unstyled Text).
+//
+// The FOUST prevention strategy has three layers:
+//   1. Server sends granular updates (JSON messages, targeted OOB swaps) instead
+//      of replacing entire cells/containers (see ws.onmessage handlers below)
+//   2. htmx:beforeSwap guard: skip editor disposal when swap style is "none"
+//   3. initMonacoEditor skip guard: don't re-create editor if DOM is intact
+//
+// The HTMX response from the initiating tab (AllCells, CellView, etc.) still
+// does a full replacement for that tab's local state. The WS broadcasts use
+// granular messages so OTHER tabs (collaborators) don't see FOUST.
+//
+// Several operations still use HTMX outerHTML as the local response:
 //   - Adding a cell (+ Code / + Note / + Prompt buttons, or via dialoghelper)
 //   - Deleting a cell
 //   - Moving a cell up/down
@@ -1575,8 +1591,15 @@ function connectWebSocket(notebookId) {
         } else if (data.type === 'kernel_restarting') {
             // Kernel is restarting — show yellow, will go grey until next execution
             updateKernelDot('busy');
+        // ---- FOUST Prevention Handlers ----
+        // These handlers receive granular JSON messages from the server and update
+        // the DOM surgically, avoiding full cell/container replacement that would
+        // destroy Monaco editors and cause FOUST (Flash of Unstyled Text).
+        // See docs/how_it_works/17_editor_cell_transitions.md for full architecture.
+
         } else if (data.type === 'cell_source_update') {
-            // In-place source update from dialoghelper — no editor destruction (no FOUST)
+            // In-place source update from dialoghelper — no editor destruction (no FOUST).
+            // editor.setValue() preserves the Monaco DOM and re-tokenizes in-place.
             const editor = monacoEditors[data.cell_id];
             if (editor) {
                 const currentValue = editor.getValue();
@@ -1593,6 +1616,80 @@ function connectWebSocket(notebookId) {
             // Update cell wrapper CSS classes (skipped, pinned, etc) without DOM replacement
             const cellEl = document.getElementById(`cell-${data.cell_id}`);
             if (cellEl) cellEl.className = data.cls;
+        } else if (data.type === 'cell_collapse_update') {
+            // Collapse toggle: update CSS classes in-place via setCollapseLevel().
+            // Previously used CellViewOOB (full cell replacement → FOUST).
+            if (data.section === 'input' || data.section === 'both')
+                setCollapseLevel(data.cell_id, 'input', data.input_collapse);
+            if (data.section === 'output' || data.section === 'both')
+                setCollapseLevel(data.cell_id, 'output', data.output_collapse);
+
+        } else if (data.type === 'cell_delete') {
+            // Granular cell removal: delete one cell + adjacent add-row.
+            // Previously used AllCellsOOB (replaced entire #cells → FOUST on ALL cells).
+            // DOM structure: .add-row, #cell-A, .add-row, #cell-B, .add-row
+            const cellEl = document.getElementById(`cell-${data.cell_id}`);
+            if (!cellEl) return; // Already deleted (e.g., HTMX response processed first)
+            const next = cellEl.nextElementSibling;
+            const prev = cellEl.previousElementSibling;
+            if (next && next.classList.contains('add-row')) next.remove();
+            else if (prev && prev.classList.contains('add-row')) prev.remove();
+            if (monacoEditors[data.cell_id]) {
+                monacoEditors[data.cell_id].dispose();
+                delete monacoEditors[data.cell_id];
+            }
+            cellEl.remove();
+
+        } else if (data.type === 'cell_move') {
+            // Granular cell reorder: swap two adjacent cells in DOM.
+            // Previously used AllCellsOOB (replaced entire #cells → FOUST on ALL cells).
+            // Key insight: insertBefore() MOVES DOM nodes (doesn't copy them), so Monaco
+            // editors survive the move with their full state — syntax highlighting, cursor
+            // position, undo history, etc. are all preserved.
+            // DOM structure: .add-row, #cell-A, .add-row, #cell-B, .add-row
+            const cellEl = document.getElementById(`cell-${data.cell_id}`);
+            if (!cellEl) return;
+            const parent = cellEl.parentNode;
+            if (data.direction === 'up') {
+                const addRow = cellEl.previousElementSibling;
+                const prevCell = addRow?.previousElementSibling;
+                if (prevCell && prevCell.id?.startsWith('cell-')) {
+                    parent.insertBefore(cellEl, prevCell);
+                }
+            } else {
+                const addRow = cellEl.nextElementSibling;
+                const nextCell = addRow?.nextElementSibling;
+                if (nextCell && nextCell.id?.startsWith('cell-')) {
+                    parent.insertBefore(nextCell, cellEl);
+                }
+            }
+
+        } else if (data.type === 'cell_add') {
+            // Granular cell insertion: add one cell + add-row at a position.
+            // Previously used AllCellsOOB (replaced entire #cells → FOUST on ALL cells).
+            //
+            // DUPLICATE GUARD: The initiating tab receives BOTH the HTMX response
+            // (which may include OOB content adding this cell) AND this WS message.
+            // Without this check, the cell appears twice — the duplicate has no HTMX
+            // bindings or Monaco editor, making it unselectable and uneditable.
+            if (document.getElementById(`cell-${data.cell_id}`)) return;
+            const cells = document.getElementById('cells');
+            if (!cells) return;
+            const addRows = cells.querySelectorAll('.add-row');
+            const target = addRows[data.pos];
+            if (target) {
+                target.insertAdjacentHTML('afterend', data.html);
+                const newCell = document.getElementById(`cell-${data.cell_id}`);
+                if (newCell) {
+                    htmx.process(newCell); // Enable hx-post/hx-get on new elements
+                    initCell(data.cell_id); // Initialize Monaco editor + event listeners
+                    const newAddRow = newCell.nextElementSibling;
+                    if (newAddRow && newAddRow.classList.contains('add-row')) {
+                        htmx.process(newAddRow);
+                    }
+                }
+                renderCellPreviews(data.cell_id); // Render markdown if note cell
+            }
         }
     };
 

@@ -9,11 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-#### GUI Smoothness Optimizations (Phase 1 & 2)
+#### GUI Smoothness Optimizations (Phase 1, 2 & 3)
+
+> **FOUST** = Flash of Unstyled Text. Monaco Editor renders code as plain white text first, then asynchronously tokenizes via a web worker to apply syntax highlighting. If the editor DOM is destroyed and recreated (e.g., by an HTMX swap), there's a visible flash of white text before highlighting reappears.
 
 - **Targeted OOB swaps for execution** — code cell execution now broadcasts `CellOutputOOB` + `CellHeaderOOB` instead of full `CellViewOOB`, preserving the Monaco editor DOM and eliminating FOUST on run
 - **JSON WebSocket messages for source edits** — dialoghelper source operations (`msg_insert_line_`, `msg_str_replace_`, etc.) now send `cell_source_update` JSON messages that update Monaco via `editor.setValue()` instead of replacing the cell DOM
 - **JSON WebSocket messages for state/class updates** — state toggles and collapse send `cell_class_update` JSON messages instead of full cell replacements
+- **Granular cell add** — `cell_add` JSON message inserts a single cell + add-row via `insertAdjacentHTML` instead of replacing the entire `#cells` container. Applied to `/cell/add`, `/add_relative_`, `/msg_paste_`, and auto-add after last cell run
+- **Granular cell delete** — `cell_delete` JSON message removes a single cell + adjacent add-row from DOM instead of replacing all cells. Applied to `DELETE /cell/{cid}`, `/rm_msg_`, and clipboard cut
+- **Granular cell move** — `cell_move` JSON message swaps two adjacent cells in DOM via `insertBefore` (which moves nodes without copying, preserving Monaco editors) instead of replacing all cells
+- **Collapse-section via JSON** — `cell_collapse_update` JSON message reuses the existing `setCollapseLevel()` function to update CSS classes instead of full cell OOB swap
+- **Prompt cell completion via targeted OOB** — prompt cell completion now broadcasts `CellHeaderOOB` + `cell_class_update` instead of full `CellViewOOB` (output already streamed via `stream_chunk`/`stream_end`)
 - **Stable header IDs** — cell headers now have `id="header-{cell.id}"` enabling targeted header-only OOB swaps
 - **Removed inline Script tags** — code and shell cells no longer emit `<Script>` tags for editor initialization; editors initialize via `initCell()` called from `htmx:afterSettle`
 - **Debounced streaming output** — code cell output uses `requestAnimationFrame`-based batching instead of per-chunk DOM writes, with smart auto-scroll
@@ -32,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **FOUST eliminated for add/delete/move** — granular JSON WebSocket messages (`cell_add`, `cell_delete`, `cell_move`) manipulate DOM directly via `insertAdjacentHTML`/`remove`/`insertBefore`, preserving all Monaco editors across all cells
+- **FOUST eliminated for collapse-section** — JSON `cell_collapse_update` message updates CSS classes in-place via `setCollapseLevel()` instead of replacing the full cell DOM
+- **FOUST eliminated for prompt completion** — targeted `CellHeaderOOB` + `cell_class_update` instead of full `CellViewOOB`
 - **FOUST eliminated for code cell execution** — targeted OOB swaps (`CellOutputOOB` + `CellHeaderOOB`) replace only the output and header sections, leaving the Monaco editor DOM untouched
 - **FOUST eliminated for `htmx:beforeSwap` on no-swap responses** — `htmx:beforeSwap` no longer destroys Monaco editors when `hx_swap="none"` (code cell run returns empty response); previously the editor was destroyed and recreated for no reason
 - **FOUST eliminated for `htmx:afterSettle` re-initialization** — `initMonacoEditor()` now checks if the container already has a live `.monaco-editor` element and skips re-initialization, preventing unnecessary editor destruction
@@ -43,8 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known Issues
 
-- **FOUST on add/delete/move operations** — these still use `AllCellsOOB` which replaces the entire `#cells` container, destroying all Monaco editors. Phase 3 will implement granular cell add/delete/move to avoid this.
-- **FOUST on cell type change and collapse-section** — these still use `CellViewOOB` which replaces the full cell DOM
+- **FOUST on cell type change** — this still uses `CellViewOOB` which replaces the full cell DOM; this is inherent since the input section fundamentally changes (Monaco ↔ textarea)
 
 ### Added
 

@@ -152,6 +152,10 @@ Used for streaming, in-place editor updates, and state changes.
 | `code_stream_end` | Code execution done | `{type, cell_id, has_error}` | Finalize code cell |
 | `cell_source_update` | Dialoghelper source edit | `{type, cell_id, source}` | Update Monaco via `setValue()` — no FOUST |
 | `cell_class_update` | State/class change | `{type, cell_id, cls}` | Update CSS classes in-place |
+| `cell_collapse_update` | Collapse toggle | `{type, cell_id, section, input_collapse, output_collapse}` | Update collapse CSS via `setCollapseLevel()` |
+| `cell_delete` | Cell deletion | `{type, cell_id}` | Remove cell + add-row from DOM |
+| `cell_move` | Cell reorder | `{type, cell_id, direction}` | Swap adjacent cells via `insertBefore` |
+| `cell_add` | Cell addition | `{type, cell_id, pos, html}` | Insert cell HTML via `insertAdjacentHTML` |
 | `cell_state_change` | Cell state transition | `{type, cell_id, state}` | Queue state tracking |
 | `queue_update` | Queue changes | `{type, running_cell_id, queued_cell_ids}` | Update queue UI |
 | `thinking_start` | Thinking mode begins | `{type, cell_id}` | Show thinking indicator |

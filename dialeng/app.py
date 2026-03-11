@@ -1429,8 +1429,23 @@ async def post(nb_id: str, pos: int = -1, type: str = "code"):
     else:
         nb.cells.insert(pos, Cell(cell_type=type))
 
-    # Broadcast to collaborators - send HTML with OOB swap
-    await broadcast_to_notebook(nb_id, AllCellsOOB(nb))
+    # FOUST fix (FOUST = Flash of Unstyled Text — Monaco renders code white first,
+    # then tokenizes async via web worker; destroying/recreating the editor causes a
+    # visible flash before syntax highlighting reappears).
+    # Broadcast granular cell_add JSON instead of AllCellsOOB. AllCellsOOB replaced
+    # the entire #cells container, destroying every Monaco editor. cell_add inserts
+    # a single cell via insertAdjacentHTML — existing editors are untouched.
+    # Note: the initiating tab also gets the HTMX response (AllCells). The client
+    # skips cell_add if the cell already exists in DOM to avoid duplicates.
+    new_cell = nb.cells[pos]
+    cell_html = to_xml(CellView(new_cell, nb_id))
+    add_html = to_xml(AddButtons(pos + 1, nb_id))
+    await broadcast_json(nb_id, {
+        "type": "cell_add",
+        "cell_id": new_cell.id,
+        "pos": pos,
+        "html": cell_html + add_html
+    })
 
     return AllCells(nb)
 
@@ -1447,8 +1462,10 @@ async def delete(nb_id: str, cid: str):
     # Broadcast queue state update
     await broadcast_queue_state(nb_id)
 
-    # Broadcast to collaborators - send HTML with OOB swap
-    await broadcast_to_notebook(nb_id, AllCellsOOB(nb))
+    # FOUST fix: broadcast granular cell_delete JSON instead of AllCellsOOB.
+    # The client removes just this cell + its adjacent add-row from DOM.
+    # Other cells' Monaco editors are completely untouched.
+    await broadcast_json(nb_id, {"type": "cell_delete", "cell_id": cid})
 
     return AllCells(nb)
 
@@ -1486,7 +1503,9 @@ async def post(nb_id: str, cid: str, cell_type: str):
             c.output = ""
             c.execution_count = None
 
-            # Broadcast cell type change to collaborators using OOB swap
+            # Cell type change is the ONE case where CellViewOOB is correct:
+            # the input section fundamentally changes (Monaco editor ↔ textarea),
+            # so full DOM replacement is unavoidable and expected.
             await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
 
             return CellView(c, nb.id)
@@ -1503,8 +1522,10 @@ async def post(nb_id: str, cid: str, direction: str):
                 nb.cells[i], nb.cells[i+1] = nb.cells[i+1], nb.cells[i]
             break
 
-    # Broadcast to collaborators using OOB swap
-    await broadcast_to_notebook(nb_id, AllCellsOOB(nb))
+    # FOUST fix: broadcast granular cell_move JSON instead of AllCellsOOB.
+    # The client uses DOM insertBefore() to swap adjacent cells. insertBefore
+    # MOVES nodes (doesn't copy), so Monaco editors survive with full state.
+    await broadcast_json(nb_id, {"type": "cell_move", "cell_id": cid, "direction": direction})
 
     return AllCells(nb)
 
@@ -1542,9 +1563,17 @@ async def post(nb_id: str, cid: str, section: str, level: int):
                 c.output_collapse = level
             break
 
-    # Broadcast collapse via full cell OOB (collapse affects body layout)
+    # FOUST fix: broadcast collapse via JSON instead of CellViewOOB.
+    # The client reuses the existing setCollapseLevel() function to update
+    # CSS classes in-place — no DOM replacement needed.
     if cell:
-        await broadcast_to_notebook(nb_id, CellViewOOB(cell, nb_id))
+        await broadcast_json(nb_id, {
+            "type": "cell_collapse_update",
+            "cell_id": cell.id,
+            "section": section,
+            "input_collapse": cell.input_collapse,
+            "output_collapse": cell.output_collapse
+        })
 
     return ""
 
@@ -1834,8 +1863,12 @@ async def post(nb_id: str, cid: str, source: str = None):
                     except:
                         pass
 
-        # Broadcast final prompt cell state to collaborators using OOB swap
-        await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
+        # FOUST fix: use targeted updates instead of CellViewOOB for prompt completion.
+        # The output was already streamed to the client via stream_chunk/stream_end,
+        # so only the header (execution count, time) and cell classes (state badges)
+        # need updating. No full cell replacement, no DOM churn.
+        await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
+        await broadcast_json(nb_id, {"type": "cell_class_update", "cell_id": c.id, "cls": get_cell_state_classes(c)})
 
     # Determine next cell ID for auto-focus
     next_cell_id = None
@@ -1848,8 +1881,22 @@ async def post(nb_id: str, cid: str, source: str = None):
         new_cell_index = len(nb.cells) - 1
         next_cell_id = new_cell.id
 
-        # Broadcast new cell addition to collaborators using OOB swap
-        await broadcast_to_notebook(nb_id, AllCellsOOB(nb))
+        # FOUST fix: broadcast granular cell_add instead of AllCellsOOB.
+        # IMPORTANT: The HTMX response below ALSO appends the new cell via
+        # hx_swap_oob="beforeend:#cells". Both the WS message and HTMX response
+        # reach the initiating tab. The client's cell_add handler has a duplicate
+        # guard (checks if cell already exists in DOM) to prevent creating two
+        # copies of the same cell — without this guard, the cell appears twice
+        # and the duplicate has no HTMX bindings or Monaco editor, making it
+        # unselectable and uneditable.
+        cell_html = to_xml(CellView(new_cell, nb_id))
+        add_html = to_xml(AddButtons(new_cell_index + 1, nb_id))
+        await broadcast_json(nb_id, {
+            "type": "cell_add",
+            "cell_id": new_cell.id,
+            "pos": new_cell_index,
+            "html": cell_html + add_html
+        })
 
         # Return: updated cell (main) + new cell with AddButtons (OOB appended to #cells)
         # Use a wrapper div with hx-swap-oob to append the new elements
@@ -2048,9 +2095,17 @@ async def post(dlg_name: str, content: str, placement: str = "add_after", id_: s
 
     nb.cells.insert(insert_idx, new_cell)
 
-    # Broadcast to all connected clients so they see the new cell immediately
+    # FOUST fix: broadcast granular cell_add JSON instead of AllCellsOOB.
+    # This is the dialoghelper version of the add route — same pattern as /cell/add.
     try:
-        await broadcast_to_notebook(dlg_name, AllCellsOOB(nb))
+        cell_html = to_xml(CellView(new_cell, dlg_name))
+        add_html = to_xml(AddButtons(insert_idx + 1, dlg_name))
+        await broadcast_json(dlg_name, {
+            "type": "cell_add",
+            "cell_id": new_cell.id,
+            "pos": insert_idx,
+            "html": cell_html + add_html
+        })
         print(f"[ADD_RELATIVE] Broadcast completed for {dlg_name}", flush=True)
     except Exception as e:
         print(f"[ADD_RELATIVE] Broadcast error: {e}", flush=True)
@@ -2078,8 +2133,8 @@ async def post(dlg_name: str, msid: str, log_changed: str = ""):
                 "output": cell.output[:200] if cell.output else "",
             })
         nb.cells.pop(idx)
-        # Broadcast to all connected clients so they see the cell removed immediately
-        await broadcast_to_notebook(dlg_name, AllCellsOOB(nb))
+        # FOUST fix: granular cell_delete instead of AllCellsOOB (dialoghelper route)
+        await broadcast_json(dlg_name, {"type": "cell_delete", "cell_id": msid})
     return {"status": "ok", "id": msid}
 
 def _str_to_bool(val: str) -> bool:
@@ -2351,7 +2406,9 @@ async def post(dlg_name: str, ids: str = "", id_: str = "", cmd: str = "copy"):
     result = clipboard_copy(nb, dlg_name, cell_ids, cut=(cmd == "cut"))
 
     if cmd == "cut":
-        await broadcast_to_notebook(dlg_name, AllCellsOOB(nb))
+        # FOUST fix: granular cell_delete per cell instead of AllCellsOOB
+        for cid in cell_ids:
+            await broadcast_json(dlg_name, {"type": "cell_delete", "cell_id": cid})
 
     return result
 
@@ -2362,7 +2419,19 @@ async def post(dlg_name: str, id_: str = "", after: str = "True"):
     new_ids = clipboard_paste(nb, dlg_name, ref_id=id_, after=_str_to_bool(after))
 
     if new_ids:
-        await broadcast_to_notebook(dlg_name, AllCellsOOB(nb))
+        # FOUST fix: granular cell_add per pasted cell instead of AllCellsOOB
+        for new_id in new_ids:
+            for idx, c in enumerate(nb.cells):
+                if c.id == new_id:
+                    cell_html = to_xml(CellView(c, dlg_name))
+                    add_html = to_xml(AddButtons(idx + 1, dlg_name))
+                    await broadcast_json(dlg_name, {
+                        "type": "cell_add",
+                        "cell_id": new_id,
+                        "pos": idx,
+                        "html": cell_html + add_html
+                    })
+                    break
 
     return {"status": "ok", "ids": new_ids}
 
