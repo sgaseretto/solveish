@@ -332,8 +332,11 @@ function focusNextCell(cellId) {
     const cell = document.getElementById(`cell-${cellId}`);
     if (!cell) return;
 
-    // Scroll cell into view
-    cell.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    // Suppress any pending HTMX scroll restore so it doesn't fight us
+    _htmxScrollRestore = null;
+
+    // Scroll cell into view - use 'center' so the focused cell is clearly visible
+    cell.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
     // If it's a code or shell cell with Monaco editor, focus the editor
     if (cell.dataset.type === 'code' || cell.dataset.type === 'shell') {
@@ -395,22 +398,20 @@ function createNewCellAtEnd() {
     const cells = document.querySelectorAll('#cells .cell');
     const position = cells.length;
 
-    // Create a new code cell at the end
-    htmx.ajax('POST', `${window.location.pathname}/cell/add?pos=${position}&type=code`, {
-        target: '#cells',
-        swap: 'outerHTML'
-    }).then(() => {
-        // After the cell is added, focus the last cell
-        // Use setTimeout to ensure DOM is updated
-        setTimeout(() => {
-            const newCells = document.querySelectorAll('#cells .cell');
-            if (newCells.length > 0) {
-                const lastCell = newCells[newCells.length - 1];
-                const lastCellId = lastCell.id.replace('cell-', '');
-                focusNextCell(lastCellId);
-            }
-        }, 100);
+    // Flag: scroll to the next cell inserted via WS cell_add
+    _pendingScrollToNewCell = true;
+
+    // POST to create the cell on the server. We intentionally DON'T use
+    // htmx.ajax with outerHTML swap — that would replace the entire #cells
+    // container, destroying all Monaco editors and causing race conditions.
+    // Instead, the server broadcasts a cell_add WS message, and the WS
+    // handler inserts just the new cell (existing editors untouched).
+    fetch(`${window.location.pathname}/cell/add?pos=${position}&type=code`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
     });
+    // The WS cell_add handler will insert the cell and scroll to it
+    // when it sees _pendingScrollToNewCell is true.
 }
 
 // ==================== Keyboard Shortcuts ====================
@@ -986,6 +987,7 @@ function initCell(cellId) {
 // scroll any element into view after the swap.
 // ---------------------------------------------------------------------------
 let _htmxScrollRestore = null;
+let _pendingScrollToNewCell = false;
 
 document.addEventListener('htmx:beforeSwap', (e) => {
     const target = e.detail.target;
@@ -1022,7 +1024,7 @@ document.addEventListener('htmx:beforeSwap', (e) => {
 
 // Restore scroll immediately after DOM swap (before inline scripts run)
 document.addEventListener('htmx:afterSwap', (e) => {
-    if (_htmxScrollRestore !== null) {
+    if (_htmxScrollRestore !== null && !_pendingScrollToNewCell) {
         window.scrollTo(0, _htmxScrollRestore);
     }
 });
@@ -1043,8 +1045,11 @@ document.addEventListener('htmx:afterSettle', (e) => {
                     finishStreaming(cellId);
                 }
             } else {
-                // If target contains cells (e.g., OOB swap to #cells), initialize those
-                target.querySelectorAll('.cell').forEach(cell => {
+                // For outerHTML swaps (e.g., createNewCellAtEnd), the target may be
+                // the OLD detached element. Query the live document's #cells instead
+                // to ensure newly added cells are also initialized.
+                const liveTarget = target.isConnected ? target : (document.getElementById('cells') || target);
+                liveTarget.querySelectorAll('.cell').forEach(cell => {
                     const cellId = cell.id.replace('cell-', '');
                     initCell(cellId);
                 });
@@ -1057,6 +1062,11 @@ document.addEventListener('htmx:afterSettle', (e) => {
 });
 
 function _restoreScrollPosition() {
+    if (_pendingScrollToNewCell) {
+        // Don't restore old scroll — we're about to scroll to the new cell
+        _htmxScrollRestore = null;
+        return;
+    }
     if (_htmxScrollRestore !== null) {
         const pos = _htmxScrollRestore;
         _htmxScrollRestore = null;
@@ -1689,6 +1699,19 @@ function connectWebSocket(notebookId) {
                     }
                 }
                 renderCellPreviews(data.cell_id); // Render markdown if note cell
+
+                // If Shift+Enter created this cell, scroll to it now that it's
+                // in the DOM with its Monaco editor fully initialized.
+                if (_pendingScrollToNewCell) {
+                    _pendingScrollToNewCell = false;
+                    requestAnimationFrame(() => {
+                        focusNextCell(data.cell_id);
+                        // The new cell is at the bottom of the page — scrollIntoView
+                        // with block:'center' can't center it (nothing below to fill
+                        // the viewport). Scroll to page bottom to guarantee visibility.
+                        window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
+                    });
+                }
             }
         }
     };

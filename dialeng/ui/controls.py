@@ -82,22 +82,25 @@ def AddButtons(pos: int, nb_id: str):
         Div containing add cell buttons
     """
     shell_enabled = _shell_cells_enabled()
+    # hx_swap="none" discards the server response (AllCells HTML).
+    # The server broadcasts a cell_add WS message which the client handles
+    # by inserting just the new cell — no editor destruction, no flicker.
     buttons = [
         Button(ss('plus', sz=12), " Code", cls="btn btn-sm btn-add",
                hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=code",
-               hx_target="#cells", hx_swap="outerHTML show:none"),
+               hx_swap="none"),
         Button(ss('plus', sz=12), " Note", cls="btn btn-sm btn-add",
                hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=note",
-               hx_target="#cells", hx_swap="outerHTML show:none"),
+               hx_swap="none"),
         Button(ss('plus', sz=12), " Prompt", cls="btn btn-sm btn-add",
                hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=prompt",
-               hx_target="#cells", hx_swap="outerHTML show:none"),
+               hx_swap="none"),
     ]
     if shell_enabled:
         buttons.append(
             Button(ss('plus', sz=12), " Shell", cls="btn btn-sm btn-add",
                    hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=shell",
-                   hx_target="#cells", hx_swap="outerHTML show:none")
+                   hx_swap="none")
         )
 
     return Div(*buttons, cls="add-row")
