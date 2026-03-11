@@ -160,7 +160,7 @@ The following are **always blocked** in Safe Mode:
 The core service for shell execution:
 
 ```python
-from services.shell_service import ShellService, ShellResult
+from dialeng.services.shell_service import ShellService, ShellResult
 
 # Create service (safe_mode requires shfmt)
 service = ShellService(safe_mode=True)

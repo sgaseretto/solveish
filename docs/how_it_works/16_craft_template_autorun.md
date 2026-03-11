@@ -224,3 +224,5 @@ The typical workflow:
 4. **Run prompt**: CRAFT context is prepended to give the LLM project-specific instructions
 
 All three features compose cleanly: AUTORUN provides infrastructure, TEMPLATE provides structure, and CRAFT provides runtime context.
+
+> **Breaking change (package restructuring):** The source code has been moved into a `dialeng/` package directory. User-authored AUTORUN extensions that import from the project must update their imports: for example, `from core.registry import ...` becomes `from dialeng.core.registry import ...`. The same applies to all top-level modules (`services`, `document`, `ui`, `extensions`, `app`, `state`).

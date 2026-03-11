@@ -35,7 +35,7 @@ The dispatch system routes operations based on cell type, enabling extensions to
 ### Built-in Dispatch Functions
 
 ```python
-from core.dispatch import render_cell, cell_to_llm_messages, cell_to_jupyter
+from dialeng.core.dispatch import render_cell, cell_to_llm_messages, cell_to_jupyter
 
 # Render a cell to HTML
 html = render_cell(cell, notebook_id)
@@ -50,7 +50,7 @@ jupyter_dict = cell_to_jupyter(cell)
 ### Registering Custom Handlers
 
 ```python
-from core.dispatch import register_renderer, register_llm_converter
+from dialeng.core.dispatch import register_renderer, register_llm_converter
 from fasthtml.common import Div, Pre
 
 @register_renderer("diagram")
@@ -115,8 +115,8 @@ sequenceDiagram
 ### Creating Callbacks
 
 ```python
-from core.callbacks import Callback, ExecutionContext
-from core.registry import register_callback
+from dialeng.core.callbacks import Callback, ExecutionContext
+from dialeng.core.registry import register_callback
 
 @register_callback
 class AutoImportCallback(Callback):
@@ -142,7 +142,7 @@ class AutoImportCallback(Callback):
 ### Built-in Callbacks
 
 ```python
-from core.callbacks import TimingCallback, LoggingCallback, OutputTruncateCallback
+from dialeng.core.callbacks import TimingCallback, LoggingCallback, OutputTruncateCallback
 
 # TimingCallback - Tracks execution time (order=-100, runs early)
 # LoggingCallback - Logs execution events (order=100, runs late)
@@ -156,7 +156,7 @@ The registry is the central store for all registered components.
 ### Registration API
 
 ```python
-from core.registry import (
+from dialeng.core.registry import (
     registry,
     register_cell_type,
     register_callback,
@@ -182,7 +182,7 @@ class MyLLMService:
 ### Accessing the Registry
 
 ```python
-from core.registry import registry
+from dialeng.core.registry import registry
 
 # Get all cell types
 cell_types = registry.cell_types
@@ -217,10 +217,10 @@ extensions/
 # extensions/diagram_cell.py
 """Diagram cell extension."""
 
-from core.registry import register_cell_type, register_callback
-from core.dispatch import register_renderer, register_llm_converter
-from core.callbacks import Callback, ExecutionContext
-from document.cell import Cell
+from dialeng.core.registry import register_cell_type, register_callback
+from dialeng.core.dispatch import register_renderer, register_llm_converter
+from dialeng.core.callbacks import Callback, ExecutionContext
+from dialeng.document.cell import Cell
 from fasthtml.common import Div, Pre
 
 # 1. Define the cell class
@@ -267,8 +267,8 @@ Create a code cell with the `# @extension` marker:
 
 ```python
 # @extension
-from core.registry import register_callback
-from core.callbacks import Callback
+from dialeng.core.registry import register_callback
+from dialeng.core.callbacks import Callback
 
 class MyExperiment(Callback):
     def before_execution(self, ctx):
@@ -278,7 +278,7 @@ class MyExperiment(Callback):
 ### Step 2: Extract to Extension
 
 ```python
-from core.extensions import extract_extension
+from dialeng.core.extensions import extract_extension
 from pathlib import Path
 
 # Extract all cells marked with # @extension
@@ -291,7 +291,7 @@ extract_extension(
 ### Step 3: Reload Extension (Development)
 
 ```python
-from core.extensions import reload_extension
+from dialeng.core.extensions import reload_extension
 
 # Reload without restarting dialeng
 reload_extension("my_extension")
@@ -308,10 +308,10 @@ Here's a complete example of adding a SQL cell type:
 from dataclasses import dataclass
 from typing import List, Dict
 from fasthtml.common import Div, Textarea, Pre, Input
-from core.registry import register_cell_type, register_callback
-from core.dispatch import register_renderer, register_llm_converter
-from core.callbacks import Callback, ExecutionContext
-from document.cell import Cell
+from dialeng.core.registry import register_cell_type, register_callback
+from dialeng.core.dispatch import register_renderer, register_llm_converter
+from dialeng.core.callbacks import Callback, ExecutionContext
+from dialeng.document.cell import Cell
 
 @dataclass
 class SQLCell(Cell):
@@ -361,7 +361,7 @@ The `CellView()` function in `ui/cells/base.py` now uses the dispatch system:
 
 ```python
 def CellView(cell, notebook_id: str):
-    from core.dispatch import render_cell
+    from dialeng.core.dispatch import render_cell
     return render_cell(cell, notebook_id)
 ```
 
@@ -371,7 +371,7 @@ The `cell_to_messages()` function in `services/dialoghelper_service.py` now uses
 
 ```python
 def cell_to_messages(cell) -> List[Dict]:
-    from core.dispatch import cell_to_llm_messages
+    from dialeng.core.dispatch import cell_to_llm_messages
     return cell_to_llm_messages(cell)
 ```
 

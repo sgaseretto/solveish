@@ -86,41 +86,29 @@ flowchart LR
 ## Project Structure
 
 ```
-llm_notebook/
-├── app.py              # Main application (all-in-one)
-├── requirements.txt    # Dependencies
-├── README.md          # User documentation
-├── DEVELOPERS.md      # This file
-├── ROADMAP.md         # Future plans
-└── notebooks/         # Saved notebooks (created at runtime)
-    └── *.ipynb
-```
-
-### Suggested Structure for Larger Projects
-
-```
-llm_notebook/
-├── app.py              # FastHTML app setup & routes
-├── models.py           # Cell, Notebook dataclasses
-├── kernel.py           # PythonKernel class
-├── llm/
-│   ├── __init__.py
-│   ├── base.py         # Abstract LLM interface
-│   ├── mock.py         # Mock provider
-│   ├── anthropic.py    # Claude integration
-│   └── openai.py       # OpenAI integration
-├── storage/
-│   ├── __init__.py
-│   ├── ipynb.py        # ipynb serialization
-│   └── database.py     # Optional DB backend
-├── components.py       # UI components
-├── static/
-│   ├── style.css
-│   └── script.js
-└── tests/
-    ├── test_models.py
-    ├── test_kernel.py
-    └── test_serialization.py
+dialeng/
+├── dialeng/                # Source package
+│   ├── app.py              # Main application (FastHTML)
+│   ├── core/               # Extension infrastructure
+│   ├── document/           # Data models
+│   ├── services/           # Service layer
+│   │   ├── kernel/         # Python kernel (subprocess, streaming)
+│   │   ├── shell_service.py # Shell execution (pshnb + safecmd)
+│   │   ├── llm_service.py  # LLM integration (multi-provider)
+│   │   └── dialoghelper_service.py  # DialogHelper shared logic
+│   ├── extensions/         # Extension modules
+│   │   └── shell_cell.py   # Shell cell type and callbacks
+│   ├── ui/                 # UI components
+│   │   └── cells/          # Cell renderers (code, note, prompt, shell)
+│   └── static/             # CSS, JS assets
+├── tests/                  # Test files
+├── notebooks/              # Saved notebooks
+├── docs/                   # Documentation
+├── pyproject.toml          # Package config
+├── README.md
+├── DEVELOPERS.md
+├── ROADMAP.md
+└── CHANGELOG.md
 ```
 
 ---
@@ -891,9 +879,9 @@ If working correctly:
 ```python
 # tests/test_models.py
 import pytest
-from document.cell import Cell
-from document.prompt_utils import split_prompt_content, join_prompt_content
-from app import Notebook
+from dialeng.document.cell import Cell
+from dialeng.document.prompt_utils import split_prompt_content, join_prompt_content
+from dialeng.app import Notebook
 
 def test_split_prompt_content():
     combined = """What is Python?

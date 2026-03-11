@@ -75,7 +75,7 @@ class KernelRegistration:
 `KernelService.get_kernel()` looks up the registry:
 
 ```python
-from core.registry import registry
+from dialeng.core.registry import registry
 reg = registry.kernels.get(kernel_type)
 if reg and reg.factory:
     kernel = reg.factory(**kwargs)
@@ -189,7 +189,7 @@ Example: Adding a custom kernel type via an AUTORUN extension.
 # AUTORUN/my_kernel.py
 #| export
 
-from core.registry import registry, KernelRegistration
+from dialeng.core.registry import registry, KernelRegistration
 
 class MyCustomKernel:
     """A custom kernel implementation."""
@@ -215,8 +215,8 @@ For toolbar and settings extensions:
 #| export
 
 from fasthtml.common import *
-from core.registry import registry, ToolbarItemRegistration, SettingsSectionRegistration
-from ui.settings import SettingsGroup, SettingToggle
+from dialeng.core.registry import registry, ToolbarItemRegistration, SettingsSectionRegistration
+from dialeng.ui.settings import SettingsGroup, SettingToggle
 
 # Add a toolbar button
 registry.register_toolbar_item(ToolbarItemRegistration(

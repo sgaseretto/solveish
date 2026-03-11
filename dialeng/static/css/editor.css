@@ -1,0 +1,38 @@
+/* ==========================================================================
+   Dialeng Editor Styles
+
+   This file contains styles specific to the Monaco code editor:
+   - Editor container sizing
+   - Font settings
+   - Focused cell indicator
+   ========================================================================== */
+
+/* Monaco Editor container */
+.monaco-container {
+    width: 100%;
+    min-height: 60px;
+    border-bottom: 1px solid var(--border);
+    position: relative;
+    transition: opacity 0.05s ease-in;
+}
+
+/* ==========================================================================
+   Focused Cell Indicator
+
+   When a cell has focus (user is interacting with it), highlight it with
+   a blue border and shadow. This helps users track which cell is active.
+   ========================================================================== */
+
+.cell.focused {
+    border-color: var(--accent-blue) !important;
+    outline: 2px solid var(--accent-blue);
+    outline-offset: -1px;
+}
+
+/* Ensure focused state overrides other visual states */
+.cell.focused.streaming {
+    border-color: var(--accent-blue) !important;
+}
+.cell.focused.queued {
+    border-color: var(--accent-blue) !important;
+}

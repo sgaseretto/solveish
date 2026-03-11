@@ -379,7 +379,7 @@ kernel = PythonKernel()
 result = kernel.execute(cell.source)
 
 # New approach (streaming)
-from services.kernel import KernelService
+from dialeng.services.kernel import KernelService
 
 kernel_service = KernelService()
 
@@ -442,20 +442,40 @@ if (output.type === 'my_new_type') {
 }
 ```
 
-### Adding Code Completion
+### Code Completion
 
-The kernel worker already supports completion:
+The kernel supports Python code completion via execnb's `CaptureShell.complete()`. The full pipeline:
+
+```mermaid
+sequenceDiagram
+    participant Monaco as Monaco Editor
+    participant App as app.py
+    participant KS as KernelService
+    participant SK as SubprocessKernel
+    participant KW as kernel_worker
+    participant CS as CaptureShell
+
+    Monaco->>App: POST /api/complete/{nb_id} (code, cursor_pos)
+    App->>KS: complete(nb_id, code_to_cursor)
+    KS->>SK: complete(code)
+    Note over SK: Busy guard: returns [] if kernel is executing
+    SK->>KW: input_queue.put({type: complete, code: ...})
+    KW->>CS: shell.complete(code)
+    CS-->>KW: ['match1', 'match2', ...]
+    KW->>SK: output_queue.put({type: complete_reply, matches: [...]})
+    SK-->>KS: ['match1', 'match2', ...]
+    KS-->>App: ['match1', 'match2', ...]
+    App-->>Monaco: {matches: ['match1', 'match2', ...]}
+```
+
+**Frontend:** Monaco's `CompletionItemProvider` for Python triggers on `.` with 150ms debounce. Completions are fetched from `/api/complete/{nb_id}`.
+
+**Backend:** The kernel worker calls `shell.complete(code)` which returns a `list[str]` of completion suffixes. The `SubprocessKernel` has a busy guard — if the kernel is executing code, completions return empty to avoid queue message interleaving.
 
 ```python
-# Send completion request
-kernel.input_queue.put({
-    'type': 'complete',
-    'code': 'imp',
-    'cursor_pos': 3
-})
-
-# Receive matches
-# {'type': 'complete_reply', 'matches': ['import'], 'cursor_start': 0}
+# Example: after running "import os", typing "os.pa" triggers:
+# shell.complete("os.pa") → ["th"]
+# Monaco shows "path" as a completion suggestion
 ```
 
 ### Remote Execution via Google Colab

@@ -38,6 +38,6 @@ debug_logs/
 # AUTORUN extracted modules cache
 .autorun_modules/
 
-# Test/demo files (development only)
-test_*.py
+# Test/demo files at root (development only)
+/test_*.py
 *_demo.py

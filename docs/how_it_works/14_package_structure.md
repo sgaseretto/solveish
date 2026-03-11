@@ -33,10 +33,10 @@ graph TD
 Key sections:
 
 - **`[project]`** — Package name (`dialeng`), version, Python requirement (`>=3.11`), and all runtime dependencies.
-- **`[project.scripts]`** — CLI entry point: `dialeng = "app:main"`.
+- **`[project.scripts]`** — CLI entry point: `dialeng = "dialeng.app:main"`.
 - **`[build-system]`** — Uses `hatchling`.
 - **`[tool.hatch.metadata]`** — `allow-direct-references = true` (needed for the git-based `dialoghelper` dependency).
-- **`[tool.hatch.build.targets.wheel]`** — Lists packages (`core`, `document`, `services`, `ui`, `extensions`) and includes `app.py`, `state.py`, and `static/` as package data.
+- **`[tool.hatch.build.targets.wheel]`** — Lists the `dialeng` package (which contains `core`, `document`, `services`, `ui`, `extensions`, `app.py`, `state.py`, and `static/`).
 - **`[dependency-groups]`** — Dev dependencies (`pytest`, `ruff`).
 
 ## Entry Points
@@ -45,11 +45,11 @@ Three ways to run Dialeng:
 
 | Command | How it works |
 |---------|-------------|
-| `uv run dialeng` | Uses the `[project.scripts]` entry point → calls `app.main()` |
-| `uv run python -m dialeng` | Uses `__main__.py` → imports and calls `app.main()` |
-| `uv run python app.py` | Direct execution via `if __name__ == "__main__": main()` |
+| `uv run dialeng` | Uses the `[project.scripts]` entry point → calls `dialeng.app.main()` |
+| `uv run python -m dialeng` | Uses `__main__.py` → imports and calls `dialeng.app.main()` |
+| `uv run python -m dialeng.app` | Direct execution via `if __name__ == "__main__": main()` |
 
-The `main()` function in `app.py` prints startup info (credentials, config, shortcuts) then calls `serve(port=8000)`.
+The `main()` function in `dialeng/app.py` prints startup info (credentials, config, shortcuts) then calls `serve(port=8000)`.
 
 ## Configurable Paths
 

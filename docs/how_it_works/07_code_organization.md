@@ -58,7 +58,7 @@ dialeng/
 │   │   ├── themes.css        # Theme color variables (dark/light)
 │   │   ├── base.css          # Reset, typography, layout
 │   │   ├── components.css    # Cells, buttons, badges, markdown
-│   │   └── editor.css        # Ace editor styles
+│   │   └── editor.css        # Monaco editor styles
 │   └── js/
 │       └── app.js            # All client-side logic (~1,700 lines)
 ├── ui/                       # FastHTML UI components
@@ -70,7 +70,7 @@ dialeng/
 │   └── cells/
 │       ├── __init__.py
 │       ├── base.py           # CellView dispatcher, CellHeader
-│       ├── code_cell.py      # CodeCellView
+│       ├── code_cell.py      # CodeCellView (Monaco editor + output)
 │       ├── note_cell.py      # NoteCellView
 │       └── prompt_cell.py    # PromptCellView
 ├── core/                     # Extension infrastructure (NEW)
@@ -111,7 +111,7 @@ CSS is split into logical files that are loaded in order:
 | `themes.css` | CSS custom properties for theming | Adding themes, changing colors |
 | `base.css` | Reset, body styles, typography, responsive rules | Fonts, base layout |
 | `components.css` | Cells, buttons, badges, markdown preview | New UI components |
-| `editor.css` | Ace editor container, focus states | Editor appearance |
+| `editor.css` | Monaco editor container, focus states | Editor appearance |
 
 **Theme System:**
 
@@ -143,12 +143,12 @@ Single file with clear section headers:
 
 ```javascript
 // ==================== Global State ====================
-const aceEditors = {};
+const monacoEditors = {};
 let focusedCellId = null;
 
-// ==================== Ace Editor Management ====================
-function initAceEditor(cellId) { ... }
-function syncAceToTextarea(cellId) { ... }
+// ==================== Monaco Editor Management ====================
+function initMonacoEditor(cellId, mode) { ... }
+function syncMonacoToTextarea(cellId) { ... }
 
 // ==================== Cell Focus & Selection ====================
 function setFocusedCell(cellId) { ... }
@@ -216,7 +216,7 @@ ui/
 
 ```python
 # In app.py or routes
-from ui import (
+from dialeng.ui import (
     CellView, NotebookPage, AllCells, AllCellsOOB,
     AddButtons, TypeSelect, CollapseBtn
 )
@@ -283,8 +283,8 @@ def CellView(cell, notebook_id: str):
 ```python
 # Imports
 from fasthtml.common import *
-from ui import CellView, NotebookPage, ...
-from services import ...
+from dialeng.ui import CellView, NotebookPage, ...
+from dialeng.services import ...
 
 # Constants
 SOLVEIT_VER = 2
@@ -717,7 +717,7 @@ Services **consume** core infrastructure - they don't define it:
 ```python
 # services/dialoghelper_service.py
 def cell_to_messages(cell) -> List[Dict]:
-    from core.dispatch import cell_to_llm_messages  # Uses core infrastructure
+    from dialeng.core.dispatch import cell_to_llm_messages  # Uses core infrastructure
     return cell_to_llm_messages(cell)
 ```
 

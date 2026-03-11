@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+#### GUI Smoothness Optimizations (Phase 1, 2 & 3)
+
+> **FOUST** = Flash of Unstyled Text. Monaco Editor renders code as plain white text first, then asynchronously tokenizes via a web worker to apply syntax highlighting. If the editor DOM is destroyed and recreated (e.g., by an HTMX swap), there's a visible flash of white text before highlighting reappears.
+
+- **Targeted OOB swaps for execution** — code cell execution now broadcasts `CellOutputOOB` + `CellHeaderOOB` instead of full `CellViewOOB`, preserving the Monaco editor DOM and eliminating FOUST on run
+- **JSON WebSocket messages for source edits** — dialoghelper source operations (`msg_insert_line_`, `msg_str_replace_`, etc.) now send `cell_source_update` JSON messages that update Monaco via `editor.setValue()` instead of replacing the cell DOM
+- **JSON WebSocket messages for state/class updates** — state toggles and collapse send `cell_class_update` JSON messages instead of full cell replacements
+- **Granular cell add** — `cell_add` JSON message inserts a single cell + add-row via `insertAdjacentHTML` instead of replacing the entire `#cells` container. Applied to `/cell/add`, `/add_relative_`, `/msg_paste_`, and auto-add after last cell run
+- **Granular cell delete** — `cell_delete` JSON message removes a single cell + adjacent add-row from DOM instead of replacing all cells. Applied to `DELETE /cell/{cid}`, `/rm_msg_`, and clipboard cut
+- **Granular cell move** — `cell_move` JSON message swaps two adjacent cells in DOM via `insertBefore` (which moves nodes without copying, preserving Monaco editors) instead of replacing all cells
+- **Collapse-section via JSON** — `cell_collapse_update` JSON message reuses the existing `setCollapseLevel()` function to update CSS classes instead of full cell OOB swap
+- **Prompt cell completion via targeted OOB** — prompt cell completion now broadcasts `CellHeaderOOB` + `cell_class_update` instead of full `CellViewOOB` (output already streamed via `stream_chunk`/`stream_end`)
+- **Stable header IDs** — cell headers now have `id="header-{cell.id}"` enabling targeted header-only OOB swaps
+- **Removed inline Script tags** — code and shell cells no longer emit `<Script>` tags for editor initialization; editors initialize via `initCell()` called from `htmx:afterSettle`
+- **Debounced streaming output** — code cell output uses `requestAnimationFrame`-based batching instead of per-chunk DOM writes, with smart auto-scroll
+- **AbortController for event listener cleanup** — `initCell()` uses `AbortController` to prevent listener accumulation on re-init
+- **WebSocket exponential backoff** — reconnect delay starts at 1s, doubles per failure (capped at 30s), resets on successful connection
+- **CSS performance** — `will-change: opacity` on thinking indicator, child combinator (`>`) instead of universal selector (`*`) in `.collapse-summary`, outline-based focus indicator instead of `box-shadow`
+
+#### Monaco Editor Migration
+
+- **Replaced Ace Editor with Monaco Editor** — migrated from Ace 1.32.6 (4 CDN scripts) to Monaco 0.52.2 (AMD loader) for code and shell cells
+- **Auto-resize editor** — Monaco editors grow/shrink with content (60px min, 600px max) using `onDidContentSizeChange`, replacing Ace's `minLines`/`maxLines`
+- **Improved theme integration** — Monaco switches between `vs-dark` and `vs` themes in sync with Dialeng's dark/light theme toggle
+- **Keyboard shortcuts preserved** — Shift+Enter (run + move), Ctrl/Cmd+Enter (run), Ctrl/Cmd+S (save) all work in Monaco via `addAction()` (not `addCommand()`) to properly override built-in Monaco keybindings
+- **HTMX lifecycle integration** — editors properly disposed on `htmx:beforeSwap` and reinitialized on `htmx:afterSettle`
+- **Pending init queue** — editors requested before Monaco AMD loader finishes are queued and initialized once ready
+
+### Fixed
+
+- **FOUST eliminated for add/delete/move** — granular JSON WebSocket messages (`cell_add`, `cell_delete`, `cell_move`) manipulate DOM directly via `insertAdjacentHTML`/`remove`/`insertBefore`, preserving all Monaco editors across all cells
+- **FOUST eliminated for collapse-section** — JSON `cell_collapse_update` message updates CSS classes in-place via `setCollapseLevel()` instead of replacing the full cell DOM
+- **FOUST eliminated for prompt completion** — targeted `CellHeaderOOB` + `cell_class_update` instead of full `CellViewOOB`
+- **FOUST eliminated for code cell execution** — targeted OOB swaps (`CellOutputOOB` + `CellHeaderOOB`) replace only the output and header sections, leaving the Monaco editor DOM untouched
+- **FOUST eliminated for `htmx:beforeSwap` on no-swap responses** — `htmx:beforeSwap` no longer destroys Monaco editors when `hx_swap="none"` (code cell run returns empty response); previously the editor was destroyed and recreated for no reason
+- **FOUST eliminated for `htmx:afterSettle` re-initialization** — `initMonacoEditor()` now checks if the container already has a live `.monaco-editor` element and skips re-initialization, preventing unnecessary editor destruction
+- **Race condition: debounced RAF vs OOB output** — pending `requestAnimationFrame` from streaming is cancelled in `finishCodeStreaming()` before OOB output arrives, preventing empty content from overwriting server-rendered output
+- **Cell focus not moving to non-code cells** — `focusNextCell()` now explicitly moves DOM focus (`cell.focus()`) for note and prompt cells, so Shift+Enter correctly advances past non-code cells instead of re-running the previous code cell
+- **Shell cells not initialized after inline Script removal** — `initCell()`, `processOOBSwap()`, and `reinitializeMonacoEditors()` now handle `data-type="shell"` cells
+- **Scroll position preserved on cell operations** — adding, deleting, and moving cells no longer jumps the notebook to the bottom of the page; scroll position is saved before HTMX `outerHTML` swaps and restored after Monaco editors reinitialize
+- **Scroll passthrough from Monaco editors** — mouse wheel events now propagate to the notebook when the editor content is fully scrolled, via `alwaysConsumeMouseWheel: false`
+
+### Known Issues
+
+- **FOUST on cell type change** — this still uses `CellViewOOB` which replaces the full cell DOM; this is inherent since the input section fundamentally changes (Monaco ↔ textarea)
+
+### Added
+
+#### Kernel-Backed Code Completion
+
+- **Python code completion in Monaco** — `CompletionItemProvider` registered for Python language, triggered on `.` character and manual invoke
+- **Completion endpoint** — `POST /api/complete/{nb_id}` accepts `code` and `cursor_pos`, returns matching completions from the kernel
+- **Kernel completion pipeline** — `KernelService.complete()` → `SubprocessKernel.complete()` → kernel worker → `CaptureShell.complete()`
+- **Busy guard** — completions return empty while the kernel is executing code, preventing queue message interleaving
+- **Fixed kernel_worker.py completion handler** — `CaptureShell.complete()` takes 1 argument (code string) and returns `list[str]`, not a tuple; fixed the handler to match
+
+#### Package Restructuring
+
+- **Moved all source code into `dialeng/` package directory** — proper Python package layout with a single top-level package instead of multiple loose packages (`core`, `document`, `services`, `ui`, `extensions`) at the repo root
+- **Moved test files into `tests/` directory** — `test_integration.py`, `test_kernel.py`, `test_stateless_dialoghelper.py`
+- **Simplified `pyproject.toml`** — entry point is now `dialeng.app:main`, build config is `packages = ["dialeng"]` (no more `include` hacks)
+- **Updated all imports** — cross-package imports now use `from dialeng.X import ...` (e.g., `from dialeng.core.registry import registry`)
+- **Static file serving** — now resolves paths relative to the package directory via `Path(__file__).parent`
+
+#### Breaking Changes
+
+- **User-authored extensions** in `AUTORUN/` or `extensions/` that import from the project must update their imports: `from core.registry import ...` becomes `from dialeng.core.registry import ...`. The same applies to all modules (`services`, `document`, `ui`, `extensions`, `app`, `state`).
+
 ### Added
 
 #### GUI Aesthetic Overhaul & Display Settings

@@ -78,7 +78,7 @@ The mode selector only shows available options based on credentials:
 The credential detection logic is in `services/credential_service.py`:
 
 ```python
-from services.credential_service import detect_credentials, get_available_modes
+from dialeng.services.credential_service import detect_credentials, get_available_modes
 
 # Detect at startup
 CREDENTIAL_STATUS = detect_credentials()
@@ -433,7 +433,7 @@ services/
       claudette_provider.py        # Claudette API/Bedrock provider
       claudette_agent_provider.py  # claudette-agent wrapper provider
       claude_agent_sdk_provider.py # claude-agent-sdk direct provider
-  llm_service.py                   # Compatibility shim → imports from services.llm
+  llm_service.py                   # Compatibility shim → imports from dialeng.services.llm
 ```
 
 ### Architecture Diagram
@@ -472,7 +472,7 @@ The coordinator owns:
 - **Usage/cost delegation** via `provider.last_result`
 
 ```python
-from services.llm import LLMService, llm_service, SYSTEM_PROMPTS
+from dialeng.services.llm import LLMService, llm_service, SYSTEM_PROMPTS
 
 # Stream a response
 async for item in llm_service.stream_response(prompt, context, "standard"):
@@ -737,7 +737,7 @@ claudette-agent tracks token usage and estimated costs. After each streaming res
 ### Accessing Usage Data
 
 ```python
-from services.llm import llm_service
+from dialeng.services.llm import llm_service
 
 # After streaming completes
 usage = llm_service.last_usage  # Usage object with token counts
@@ -1075,7 +1075,7 @@ The config status is logged at startup:
 The configuration is managed by `services/dialeng_config.py`:
 
 ```python
-from services.dialeng_config import load_config, get_config
+from dialeng.services.dialeng_config import load_config, get_config
 
 # Load config (creates default if missing)
 config = load_config()
