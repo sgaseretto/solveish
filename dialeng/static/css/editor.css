@@ -25,7 +25,8 @@
 
 .cell.focused {
     border-color: var(--accent-blue) !important;
-    box-shadow: 0 0 0 2px var(--accent-blue) !important;
+    outline: 2px solid var(--accent-blue);
+    outline-offset: -1px;
 }
 
 /* Ensure focused state overrides other visual states */

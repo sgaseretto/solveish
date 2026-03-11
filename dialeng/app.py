@@ -49,8 +49,8 @@ from dialeng.services.shell_service import (
 # UI Components (extracted to ui/ package)
 from dialeng.ui import (
     CellView, NotebookPage, AllCells, AllCellsContent,
-    AllCellsOOB, CellViewOOB, AddButtons,
-    TypeSelect, CollapseBtn, get_collapse_class
+    AllCellsOOB, CellViewOOB, CellOutputOOB, CellHeaderOOB, AddButtons,
+    TypeSelect, CollapseBtn, get_collapse_class, get_cell_state_classes
 )
 
 # Extension system
@@ -237,8 +237,9 @@ async def finalize_cell_execution(nb_id: str, cell, has_error: bool):
             except:
                 pass
 
-    # Broadcast final cell state via OOB swap
-    await broadcast_to_notebook(nb_id, CellViewOOB(cell, nb_id))
+    # Broadcast output + header via targeted OOB swaps (preserves Monaco editor DOM)
+    await broadcast_to_notebook(nb_id, CellOutputOOB(cell))
+    await broadcast_to_notebook(nb_id, CellHeaderOOB(cell, nb_id))
 
 # ============================================================================
 # Mock LLM with Streaming
@@ -746,6 +747,29 @@ async def broadcast_to_notebook(nb_id: str, component, exclude_send: Any = None)
             pass
 
     # Replace with only alive connections
+    ws_connections[nb_id] = alive
+
+
+async def broadcast_json(nb_id: str, data: dict, exclude_send=None):
+    """Broadcast a JSON message to all WebSocket connections for a notebook.
+
+    Used for lightweight updates (source changes, class updates) that don't
+    need full HTML OOB swaps. The client-side WebSocket handler processes
+    these by type.
+    """
+    if nb_id not in ws_connections or not ws_connections[nb_id]:
+        return
+    msg = json.dumps(data)
+    alive = []
+    for send in ws_connections[nb_id]:
+        if send is exclude_send:
+            alive.append(send)
+            continue
+        try:
+            await send(msg)
+            alive.append(send)
+        except Exception:
+            pass
     ws_connections[nb_id] = alive
 
 
@@ -1494,9 +1518,10 @@ async def post(nb_id: str, cid: str, collapsed: str):
             c.collapsed = collapsed.lower() == "true"
             break
 
-    # Broadcast full collapse state change to collaborators using OOB swap
+    # Broadcast collapse state via targeted header OOB + class update
     if cell:
-        await broadcast_to_notebook(nb_id, CellViewOOB(cell, nb_id))
+        await broadcast_to_notebook(nb_id, CellHeaderOOB(cell, nb_id))
+        await broadcast_json(nb_id, {"type": "cell_class_update", "cell_id": cell.id, "cls": get_cell_state_classes(cell)})
 
     return ""
 
@@ -1517,7 +1542,7 @@ async def post(nb_id: str, cid: str, section: str, level: int):
                 c.output_collapse = level
             break
 
-    # Broadcast collapse state change to collaborators using OOB swap
+    # Broadcast collapse via full cell OOB (collapse affects body layout)
     if cell:
         await broadcast_to_notebook(nb_id, CellViewOOB(cell, nb_id))
 
@@ -2119,8 +2144,21 @@ async def post(dlg_name: str, id_: str,
             log_change(dlg_name, "update", id_, changes)
 
         print(f"[UPDATE_MSG] Cell {cell.id} after: pinned={cell.pinned}", flush=True)
-        # Broadcast the updated cell to all connected clients
-        await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
+        # Smart broadcast: use targeted updates to preserve Monaco editor DOM
+        if msg_type is not None:
+            # Type change requires full cell re-render
+            await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
+        else:
+            # Source change → JSON update (no FOUST)
+            if content is not None:
+                await broadcast_json(dlg_name, {"type": "cell_source_update", "cell_id": cell.id, "source": cell.source})
+            # Output change → targeted OOB
+            if output is not None:
+                await broadcast_to_notebook(dlg_name, CellOutputOOB(cell))
+            # Header/state changes → targeted header OOB + class update
+            if any(v is not None for v in [time_run, is_exported, skipped, pinned, i_collapsed, o_collapsed, heading_collapsed]):
+                await broadcast_to_notebook(dlg_name, CellHeaderOOB(cell, dlg_name))
+                await broadcast_json(dlg_name, {"type": "cell_class_update", "cell_id": cell.id, "cls": get_cell_state_classes(cell)})
     # New dialoghelper expects JSON with 'id' key (res['id'])
     return {"id": id_}
 
@@ -2157,7 +2195,8 @@ async def post(dlg_name: str, id_: str, insert_line: int, new_str: str):
         lines = cell.source.split('\n')
         lines.insert(insert_line, new_str)
         cell.source = '\n'.join(lines)
-        await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
+        # JSON source update — preserves Monaco editor DOM (no FOUST)
+        await broadcast_json(dlg_name, {"type": "cell_source_update", "cell_id": cell.id, "source": cell.source})
     return {"status": "ok"}
 
 @rt("/msg_str_replace_")
@@ -2203,7 +2242,8 @@ async def post(dlg_name: str, id_: str, old_str: str, new_str: str,
         count = n_matches if n_matches else 0
         cell.source = source.replace(old_str, new_str, count) if count else source.replace(old_str, new_str)
 
-    await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
+    # JSON source update — preserves Monaco editor DOM (no FOUST)
+    await broadcast_json(dlg_name, {"type": "cell_source_update", "cell_id": cell.id, "source": cell.source})
     return {"status": "ok"}
 
 @rt("/msg_strs_replace_")
@@ -2217,7 +2257,8 @@ async def post(dlg_name: str, id_: str, old_strs: str, new_strs: str):
         new_list = json.loads(new_strs)
         for old, new in zip(old_list, new_list):
             cell.source = cell.source.replace(old, new, 1)
-        await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
+        # JSON source update — preserves Monaco editor DOM (no FOUST)
+        await broadcast_json(dlg_name, {"type": "cell_source_update", "cell_id": cell.id, "source": cell.source})
     return {"status": "ok"}
 
 @rt("/msg_replace_lines_")
@@ -2230,7 +2271,8 @@ async def post(dlg_name: str, id_: str, start_line: int, end_line: int, new_cont
         lines = cell.source.split('\n')
         lines[start_line:end_line] = [new_content]
         cell.source = '\n'.join(lines)
-        await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
+        # JSON source update — preserves Monaco editor DOM (no FOUST)
+        await broadcast_json(dlg_name, {"type": "cell_source_update", "cell_id": cell.id, "source": cell.source})
     return {"status": "ok"}
 
 @rt("/msg_del_lines_")
@@ -2262,7 +2304,8 @@ async def post(dlg_name: str, id_: str, start_line: int, end_line: int,
         del lines[s:e]
 
     cell.source = '\n'.join(lines)
-    await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
+    # JSON source update — preserves Monaco editor DOM (no FOUST)
+    await broadcast_json(dlg_name, {"type": "cell_source_update", "cell_id": cell.id, "source": cell.source})
     return {"status": "ok"}
 
 @rt("/msg_pyrun_")
@@ -2283,7 +2326,8 @@ async def post(dlg_name: str, id_: str, code: str):
         exec(code, namespace)
         if "text" in namespace and namespace["text"] != cell.source:
             cell.source = namespace["text"]
-            await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
+            # JSON source update — preserves Monaco editor DOM (no FOUST)
+            await broadcast_json(dlg_name, {"type": "cell_source_update", "cell_id": cell.id, "source": cell.source})
         return {"status": "ok"}
     except Exception as e:
         return {"error": str(e)}
@@ -2336,7 +2380,8 @@ async def post(dlg_name: str, id_: str):
 
     cell = nb.cells[idx]
     cell.heading_collapsed = not cell.heading_collapsed
-    await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
+    # Targeted header OOB (preserves editor DOM)
+    await broadcast_to_notebook(dlg_name, CellHeaderOOB(cell, dlg_name))
     return {"status": "ok", "heading_collapsed": cell.heading_collapsed}
 
 @rt("/notebook/{nb_id}/cell/{cell_id}/toggle/{prop}")
@@ -2354,7 +2399,9 @@ async def post(nb_id: str, cell_id: str, prop: str):
     # Sync #| export directive with is_exported flag
     if prop == 'is_exported':
         cell.sync_export_directive()
-    await broadcast_to_notebook(nb_id, CellViewOOB(cell, nb_id))
+    # Targeted header OOB + class update (preserves editor DOM)
+    await broadcast_to_notebook(nb_id, CellHeaderOOB(cell, nb_id))
+    await broadcast_json(nb_id, {"type": "cell_class_update", "cell_id": cell.id, "cls": get_cell_state_classes(cell)})
     return {"status": "ok", prop: getattr(cell, prop)}
 
 @rt("/bookmark_")
@@ -2376,7 +2423,8 @@ async def post(dlg_name: str, id_: str, n: int):
                 c.bookmark = 0
         cell.bookmark = n
 
-    await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
+    # Targeted header OOB (preserves editor DOM)
+    await broadcast_to_notebook(dlg_name, CellHeaderOOB(cell, dlg_name))
     return {"status": "ok", "bookmark": cell.bookmark}
 
 @rt("/toggle_comment_")
@@ -2414,7 +2462,8 @@ async def post(dlg_name: str, ids: str = "", id_: str = ""):
                 (l[:len(l) - len(l.lstrip())] + '# ' + l.lstrip()) if l.strip() else l
                 for l in lines
             )
-        await broadcast_to_notebook(dlg_name, CellViewOOB(cell, dlg_name))
+        # JSON source update — preserves Monaco editor DOM (no FOUST)
+        await broadcast_json(dlg_name, {"type": "cell_source_update", "cell_id": cell.id, "source": cell.source})
 
     return {"status": "ok"}
 

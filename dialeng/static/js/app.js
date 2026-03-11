@@ -154,8 +154,14 @@ function initMonacoEditor(cellId, mode = 'python') {
     const container = document.getElementById(`monaco-${cellId}`);
     if (!container) return null;
 
-    // Destroy existing editor if it exists (handles HTMX re-renders)
+    // If editor already exists AND the container still has the editor DOM (not replaced),
+    // skip re-initialization — this prevents FOUST when htmx:afterSettle fires
+    // for non-swap responses (e.g., hx_swap="none" on code cell run)
     if (monacoEditors[cellId]) {
+        if (container.querySelector('.monaco-editor')) {
+            return monacoEditors[cellId];
+        }
+        // Container was replaced (HTMX re-render) — destroy old editor
         monacoEditors[cellId].dispose();
         delete monacoEditors[cellId];
     }
@@ -329,8 +335,8 @@ function focusNextCell(cellId) {
     // Scroll cell into view
     cell.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
-    // If it's a code cell with Monaco editor, focus the editor
-    if (cell.dataset.type === 'code') {
+    // If it's a code or shell cell with Monaco editor, focus the editor
+    if (cell.dataset.type === 'code' || cell.dataset.type === 'shell') {
         const editor = monacoEditors[cellId];
         if (editor) {
             editor.focus();
@@ -341,12 +347,17 @@ function focusNextCell(cellId) {
         if (promptTextarea && promptTextarea.style.display !== 'none') {
             promptTextarea.focus();
         } else {
-            // If prompt has been run (has preview), just keep cell selected
-            // User can double-click to edit
+            // If prompt has been run (has preview), just select the cell
+            // and move DOM focus out of any Monaco editor
+            cell.tabIndex = -1;
+            cell.focus();
         }
-    } else if (cell.dataset.type === 'note') {
-        // For note cells, just ensure the cell is focused/selected
-        // Don't auto-open edit mode
+    } else {
+        // Note cells and other types: move DOM focus to the cell element
+        // so that the previous Monaco editor loses keyboard focus.
+        // Without this, Shift+Enter would re-run the previous code cell.
+        cell.tabIndex = -1;
+        cell.focus();
     }
 }
 
@@ -413,7 +424,35 @@ document.addEventListener('keydown', e => {
     if (!currentCellId && target.closest('.cell')) {
         currentCellId = target.closest('.cell').id.replace('cell-', '');
     }
-    
+
+    // ===== Escape to close sidebars =====
+    if (e.key === 'Escape') {
+        const sidebar = document.getElementById('settings-sidebar');
+        if (sidebar && sidebar.classList.contains('open')) {
+            toggleSettings();
+            return;
+        }
+        const outlineSidebar = document.getElementById('outline-sidebar');
+        if (outlineSidebar && outlineSidebar.classList.contains('outline-open')) {
+            toggleOutline();
+            return;
+        }
+    }
+
+    // ===== Ctrl+Shift+O to toggle outline =====
+    if (e.ctrlKey && e.shiftKey && e.key === 'O') {
+        e.preventDefault();
+        toggleOutline();
+        return;
+    }
+
+    // ===== Ctrl+Shift+E to toggle file explorer =====
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'E') {
+        e.preventDefault();
+        toggleFileExplorer();
+        return;
+    }
+
     // ===== D D to delete cell (Jupyter style) =====
     if (e.key === 'd' || e.key === 'D') {
         if (!inInput && !inMonaco) {
@@ -857,9 +896,11 @@ function initCell(cellId) {
     const cell = document.getElementById(`cell-${cellId}`);
     if (!cell) return;
     
-    // Initialize Monaco editor for code cells
+    // Initialize Monaco editor for code and shell cells
     if (cell.dataset.type === 'code') {
         initMonacoEditor(cellId);
+    } else if (cell.dataset.type === 'shell') {
+        initMonacoEditor(cellId, 'sh');
     }
     
     // Setup preview for note cells
@@ -893,13 +934,18 @@ function initCell(cellId) {
         }
     }
     
+    // Abort previous listeners to prevent accumulation on re-init
+    if (cell._abortCtrl) cell._abortCtrl.abort();
+    cell._abortCtrl = new AbortController();
+    const signal = cell._abortCtrl.signal;
+
     // Track focus - both focusin (for editors/inputs) and click (for cell background)
-    cell.addEventListener('focusin', () => setFocusedCell(cellId));
+    cell.addEventListener('focusin', () => setFocusedCell(cellId), { signal });
     cell.addEventListener('click', (e) => {
         // Only set focus if clicking directly on cell or its non-interactive children
         // This allows clicking anywhere on the cell to select it
         setFocusedCell(cellId);
-    });
+    }, { signal });
 }
 
 // ---------------------------------------------------------------------------
@@ -932,6 +978,15 @@ document.addEventListener('htmx:beforeSwap', (e) => {
         if (target.id === 'cells' || target.querySelectorAll('.cell').length > 1) {
             _htmxScrollRestore = window.scrollY;
         }
+
+        // Skip editor destruction when no actual DOM replacement will happen.
+        // hx_swap="none" means the response is discarded — the target DOM stays intact.
+        // Without this check, editors get destroyed and recreated for nothing (causing FOUST).
+        const swapStyle = e.detail.swapStyle || (e.detail.requestConfig && e.detail.requestConfig.swapStyle);
+        if (swapStyle === 'none' || (e.detail.serverResponse === '' && !e.detail.isError)) {
+            return;
+        }
+
         // If target itself is a cell with a monaco-container
         if (target.classList && target.classList.contains('cell')) {
             const container = target.querySelector('.monaco-container');
@@ -1232,21 +1287,7 @@ function toggleSettings() {
     }
 }
 
-// Close settings sidebar with Escape key
-document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') {
-        const sidebar = document.getElementById('settings-sidebar');
-        if (sidebar && sidebar.classList.contains('open')) {
-            toggleSettings();
-            return;
-        }
-        // Also close outline sidebar on Escape
-        const outlineSidebar = document.getElementById('outline-sidebar');
-        if (outlineSidebar && outlineSidebar.classList.contains('outline-open')) {
-            toggleOutline();
-        }
-    }
-});
+// Settings/outline Escape handling is consolidated into the main keydown handler (line ~406)
 
 // ==================== Outline Sidebar Toggle ====================
 function toggleOutline() {
@@ -1281,13 +1322,7 @@ function scrollToCell(cellId) {
     }
 }
 
-// Keyboard shortcut for outline toggle (Ctrl+Shift+O)
-document.addEventListener('keydown', function(e) {
-    if (e.ctrlKey && e.shiftKey && e.key === 'O') {
-        e.preventDefault();
-        toggleOutline();
-    }
-});
+// Outline toggle shortcut is consolidated into the main keydown handler (line ~406)
 
 // ==================== Cell Collapse ====================
 // Collapse levels: 0=expanded, 1=scrollable, 2=summary
@@ -1411,6 +1446,8 @@ let ws = null;
 let streamingCellId = null;
 let currentNotebookId = null;  // Global notebook ID for use in cancelAllExecution, etc.
 
+let _wsReconnectDelay = 1000;
+
 function connectWebSocket(notebookId) {
     currentNotebookId = notebookId;  // Store globally for other functions to use
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1418,6 +1455,7 @@ function connectWebSocket(notebookId) {
 
     ws.onopen = function() {
         console.log('[WS] Connected to notebook:', notebookId);
+        _wsReconnectDelay = 1000;  // Reset backoff on successful connection
         // Send join message to register this connection with the notebook
         ws.send(JSON.stringify({type: 'join', notebook_id: notebookId}));
     };
@@ -1537,12 +1575,32 @@ function connectWebSocket(notebookId) {
         } else if (data.type === 'kernel_restarting') {
             // Kernel is restarting — show yellow, will go grey until next execution
             updateKernelDot('busy');
+        } else if (data.type === 'cell_source_update') {
+            // In-place source update from dialoghelper — no editor destruction (no FOUST)
+            const editor = monacoEditors[data.cell_id];
+            if (editor) {
+                const currentValue = editor.getValue();
+                if (currentValue !== data.source) {
+                    const position = editor.getPosition();
+                    editor.setValue(data.source);
+                    if (position) editor.setPosition(position);
+                }
+            }
+            // Also update hidden textarea
+            const textarea = document.getElementById(`source-${data.cell_id}`);
+            if (textarea) textarea.value = data.source;
+        } else if (data.type === 'cell_class_update') {
+            // Update cell wrapper CSS classes (skipped, pinned, etc) without DOM replacement
+            const cellEl = document.getElementById(`cell-${data.cell_id}`);
+            if (cellEl) cellEl.className = data.cls;
         }
     };
 
     ws.onclose = function() {
-        console.log('[WS] Disconnected, reconnecting in 3s...');
-        setTimeout(() => connectWebSocket(notebookId), 3000);
+        const delay = _wsReconnectDelay + Math.random() * _wsReconnectDelay * 0.2;
+        console.log(`[WS] Disconnected, reconnecting in ${Math.round(delay)}ms...`);
+        setTimeout(() => connectWebSocket(notebookId), delay);
+        _wsReconnectDelay = Math.min(_wsReconnectDelay * 2, 30000);
     };
 
     ws.onerror = function(error) {
@@ -1749,17 +1807,13 @@ function startCodeStreaming(cellId) {
     console.log('[Code] Started streaming for cell:', cellId, 'cell found:', !!cell, 'output found:', !!outputEl);
 }
 
+// Debounced stream rendering — coalesce multiple chunks per animation frame
+const _streamDirty = new Set();
+const _streamRafIds = new Map();
+
 function appendCodeOutput(cellId, chunk, streamName) {
     const outputEl = document.getElementById(`output-${cellId}`);
     if (!outputEl) return;
-
-    // Get or create stream output container
-    let streamEl = outputEl.querySelector('.stream-output');
-    if (!streamEl) {
-        streamEl = document.createElement('pre');
-        streamEl.className = 'stream-output';
-        outputEl.appendChild(streamEl);
-    }
 
     if (streamName === 'stderr') {
         outputEl.classList.add('error');
@@ -1790,9 +1844,37 @@ function appendCodeOutput(cellId, chunk, streamName) {
     // Store updated raw text
     streamTextContent.set(cellId, currentText);
 
-    // Render with ANSI color conversion
-    streamEl.innerHTML = ansiToHtml(currentText);
-    streamEl.scrollTop = streamEl.scrollHeight;
+    // Schedule a single render per animation frame (debounce)
+    if (!_streamDirty.has(cellId)) {
+        _streamDirty.add(cellId);
+        const rafId = requestAnimationFrame(() => _flushStreamRender(cellId));
+        _streamRafIds.set(cellId, rafId);
+    }
+}
+
+function _flushStreamRender(cellId) {
+    _streamDirty.delete(cellId);
+    _streamRafIds.delete(cellId);
+
+    // Don't render if streaming already finished (prevents overwriting OOB output)
+    if (!streamTextContent.has(cellId)) return;
+
+    const outputEl = document.getElementById(`output-${cellId}`);
+    if (!outputEl) return;
+
+    let streamEl = outputEl.querySelector('.stream-output');
+    if (!streamEl) {
+        streamEl = document.createElement('pre');
+        streamEl.className = 'stream-output';
+        outputEl.appendChild(streamEl);
+    }
+
+    const text = streamTextContent.get(cellId) || '';
+    streamEl.innerHTML = ansiToHtml(text);
+
+    // Only auto-scroll if user is near the bottom
+    const nearBottom = streamEl.scrollTop + streamEl.clientHeight >= streamEl.scrollHeight - 30;
+    if (nearBottom) streamEl.scrollTop = streamEl.scrollHeight;
 }
 
 function appendDisplayData(cellId, html, displayId) {
@@ -1861,6 +1943,13 @@ function finishCodeStreaming(cellId, hasError) {
     if (outputEl && hasError) {
         outputEl.classList.add('error');
     }
+
+    // Cancel any pending debounced stream render to prevent overwriting OOB output
+    if (_streamRafIds.has(cellId)) {
+        cancelAnimationFrame(_streamRafIds.get(cellId));
+        _streamRafIds.delete(cellId);
+    }
+    _streamDirty.delete(cellId);
 
     // Clean up text content tracker
     streamTextContent.delete(cellId);
@@ -2121,10 +2210,20 @@ function processOOBSwap(html) {
     // This handles both full cells container updates and single cell updates
     console.log('[OOB] processOOBSwap called, HTML length:', html.length);
 
-    // Parse the HTML to extract the element(s)
+    // Parse the HTML and find all OOB elements (may be nested in wrapper divs)
     const template = document.createElement('template');
     template.innerHTML = html.trim();
-    const elements = template.content.children;
+    // Collect OOB elements: check top-level first, then search nested
+    const topLevel = Array.from(template.content.children);
+    const elements = [];
+    for (const el of topLevel) {
+        if (el.getAttribute('hx-swap-oob')) {
+            elements.push(el);
+        } else {
+            // Search inside wrapper divs for nested OOB elements
+            el.querySelectorAll('[hx-swap-oob]').forEach(nested => elements.push(nested));
+        }
+    }
     console.log('[OOB] Parsed elements count:', elements.length);
 
     for (const element of elements) {
@@ -2240,14 +2339,26 @@ function processOOBSwap(html) {
             if (newCell) {
                 htmx.process(newCell);
 
-                // Reinitialize Monaco editor if it's a code cell
+                // Reinitialize Monaco editor if it's a code or shell cell
                 if (newCell.dataset.type === 'code') {
                     setTimeout(() => initMonacoEditor(cellId), 0);
+                } else if (newCell.dataset.type === 'shell') {
+                    setTimeout(() => initMonacoEditor(cellId, 'sh'), 0);
                 }
             }
 
             // Re-render previews for this cell
             renderCellPreviews(cellId);
+        }
+        else if (targetId.startsWith('output-') || targetId.startsWith('header-')) {
+            // Targeted OOB swap for output or header sections only
+            // This preserves the Monaco editor DOM — no FOUST
+            console.log('[OOB] Targeted swap for:', targetId);
+            element.removeAttribute('hx-swap-oob');
+            target.replaceWith(element);
+            // Reinitialize HTMX bindings on the new element
+            const newEl = document.getElementById(targetId);
+            if (newEl) htmx.process(newEl);
         }
         else if (targetId === 'cells') {
             // Full cells container update (e.g., from dialoghelper add_msg)
@@ -2305,10 +2416,14 @@ function reinitializeMonacoEditors() {
         destroyMonacoEditor(cellId);
     }
 
-    // Find all code cells and initialize their editors
+    // Find all code and shell cells and initialize their editors
     document.querySelectorAll('.cell[data-type="code"]').forEach(cell => {
         const cellId = cell.id.replace('cell-', '');
         setTimeout(() => initMonacoEditor(cellId), 0);
+    });
+    document.querySelectorAll('.cell[data-type="shell"]').forEach(cell => {
+        const cellId = cell.id.replace('cell-', '');
+        setTimeout(() => initMonacoEditor(cellId, 'sh'), 0);
     });
 }
 
@@ -2781,10 +2896,4 @@ function confirmDeleteFile() {
     hideDeleteConfirm();
 }
 
-// Keyboard shortcut: Ctrl+Shift+E to toggle file explorer
-document.addEventListener('keydown', function(e) {
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'E') {
-        e.preventDefault();
-        toggleFileExplorer();
-    }
-});
+// File explorer toggle shortcut is consolidated into the main keydown handler (line ~406)

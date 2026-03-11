@@ -108,6 +108,7 @@ def ShellCellHeader(cell, notebook_id: str, safe_mode: bool = False):
                    hx_swap="outerHTML show:none", title="Delete (D D)"),
             cls="cell-actions"
         ),
+        id=f"header-{cell.id}",
         cls="cell-header"
     )
 
@@ -148,8 +149,6 @@ def ShellCellView(cell, notebook_id: str, safe_mode: bool = False):
             cls=f"cell-output{' error' if cell.output and ('Error' in cell.output or 'Traceback' in cell.output or 'DisallowedCmd' in cell.output) else ''} {output_collapse_cls}".strip(),
             data_collapse_section="output"
         ),
-        # Initialize Monaco editor with shell mode
-        Script(f"setTimeout(() => initMonacoEditor('{cell.id}', 'sh'), 0);"),
         cls="cell-body"
     )
 

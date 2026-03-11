@@ -43,8 +43,6 @@ def CodeCellView(cell, notebook_id: str):
             cls=f"cell-output{' error' if cell.output and ('Error' in cell.output or 'Traceback' in cell.output) else ''} {output_collapse_cls}".strip(),
             data_collapse_section="output"
         ),
-        # Initialize Monaco editor
-        Script(f"setTimeout(() => initMonacoEditor('{cell.id}'), 0);"),
         cls="cell-body"
     )
 

@@ -12,11 +12,11 @@ Usage:
     from dialeng.ui.layout import NotebookPage, AllCells
     from dialeng.ui.settings import SettingsSidebar, SettingsOverlay
     from dialeng.ui.outline import OutlineSidebar, OutlineToggleButton
-    from dialeng.ui.oob import AllCellsOOB, CellViewOOB
+    from dialeng.ui.oob import AllCellsOOB, CellViewOOB, CellOutputOOB, CellHeaderOOB
 """
 
 # Base utilities
-from .base import get_collapse_class
+from .base import get_collapse_class, get_cell_state_classes
 
 # Cell components
 from .cells import CellView, CellHeader, CodeCellView, NoteCellView, PromptCellView
@@ -40,11 +40,12 @@ from .kernel_modal import KernelToolbarButton, KernelModal
 from .file_explorer import FileExplorerSidebar, FileListContent, NewItemModal
 
 # OOB (Out-of-Band) components for WebSocket
-from .oob import AllCellsOOB, CellViewOOB
+from .oob import AllCellsOOB, CellViewOOB, CellOutputOOB, CellHeaderOOB
 
 __all__ = [
     # Base
     'get_collapse_class',
+    'get_cell_state_classes',
     # Cells
     'CellView',
     'CellHeader',
@@ -77,4 +78,6 @@ __all__ = [
     # OOB
     'AllCellsOOB',
     'CellViewOOB',
+    'CellOutputOOB',
+    'CellHeaderOOB',
 ]

@@ -95,6 +95,7 @@ def CellHeader(cell, notebook_id: str, collapse_controls: list = None):
                    hx_swap="outerHTML show:none", title="Delete (D D)"),
             cls="cell-actions"
         ),
+        id=f"header-{cell.id}",
         cls="cell-header"
     )
 

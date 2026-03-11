@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### GUI Smoothness Optimizations (Phase 1 & 2)
+
+- **Targeted OOB swaps for execution** — code cell execution now broadcasts `CellOutputOOB` + `CellHeaderOOB` instead of full `CellViewOOB`, preserving the Monaco editor DOM and eliminating FOUST on run
+- **JSON WebSocket messages for source edits** — dialoghelper source operations (`msg_insert_line_`, `msg_str_replace_`, etc.) now send `cell_source_update` JSON messages that update Monaco via `editor.setValue()` instead of replacing the cell DOM
+- **JSON WebSocket messages for state/class updates** — state toggles and collapse send `cell_class_update` JSON messages instead of full cell replacements
+- **Stable header IDs** — cell headers now have `id="header-{cell.id}"` enabling targeted header-only OOB swaps
+- **Removed inline Script tags** — code and shell cells no longer emit `<Script>` tags for editor initialization; editors initialize via `initCell()` called from `htmx:afterSettle`
+- **Debounced streaming output** — code cell output uses `requestAnimationFrame`-based batching instead of per-chunk DOM writes, with smart auto-scroll
+- **AbortController for event listener cleanup** — `initCell()` uses `AbortController` to prevent listener accumulation on re-init
+- **WebSocket exponential backoff** — reconnect delay starts at 1s, doubles per failure (capped at 30s), resets on successful connection
+- **CSS performance** — `will-change: opacity` on thinking indicator, child combinator (`>`) instead of universal selector (`*`) in `.collapse-summary`, outline-based focus indicator instead of `box-shadow`
+
 #### Monaco Editor Migration
 
 - **Replaced Ace Editor with Monaco Editor** — migrated from Ace 1.32.6 (4 CDN scripts) to Monaco 0.52.2 (AMD loader) for code and shell cells
@@ -20,13 +32,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **FOUST eliminated for code cell execution** — targeted OOB swaps (`CellOutputOOB` + `CellHeaderOOB`) replace only the output and header sections, leaving the Monaco editor DOM untouched
+- **FOUST eliminated for `htmx:beforeSwap` on no-swap responses** — `htmx:beforeSwap` no longer destroys Monaco editors when `hx_swap="none"` (code cell run returns empty response); previously the editor was destroyed and recreated for no reason
+- **FOUST eliminated for `htmx:afterSettle` re-initialization** — `initMonacoEditor()` now checks if the container already has a live `.monaco-editor` element and skips re-initialization, preventing unnecessary editor destruction
+- **Race condition: debounced RAF vs OOB output** — pending `requestAnimationFrame` from streaming is cancelled in `finishCodeStreaming()` before OOB output arrives, preventing empty content from overwriting server-rendered output
+- **Cell focus not moving to non-code cells** — `focusNextCell()` now explicitly moves DOM focus (`cell.focus()`) for note and prompt cells, so Shift+Enter correctly advances past non-code cells instead of re-running the previous code cell
+- **Shell cells not initialized after inline Script removal** — `initCell()`, `processOOBSwap()`, and `reinitializeMonacoEditors()` now handle `data-type="shell"` cells
 - **Scroll position preserved on cell operations** — adding, deleting, and moving cells no longer jumps the notebook to the bottom of the page; scroll position is saved before HTMX `outerHTML` swaps and restored after Monaco editors reinitialize
 - **Scroll passthrough from Monaco editors** — mouse wheel events now propagate to the notebook when the editor content is fully scrolled, via `alwaysConsumeMouseWheel: false`
-- **Flash of unstyled text mitigation (partial)** — Monaco editors start hidden (`opacity: 0`) and reveal after syntax tokenization is detected via DOM polling for colored token classes. This reduces but does not fully eliminate the brief flash of unstyled text during cell re-renders (see [Known Issues](#known-issues))
 
 ### Known Issues
 
-- **Flash of unstyled text (FOUST)** — when a cell finishes executing, the server replaces the entire cell DOM via OOB swap, forcing Monaco to recreate from scratch. There is a brief moment where code appears without syntax colors before tokenization completes. The current opacity-based mitigation helps but does not fully solve it. A proper fix requires either targeted output-only swaps (avoiding editor DOM replacement) or editor model caching. See `docs/how_it_works/17_editor_cell_transitions.md` for details.
+- **FOUST on add/delete/move operations** — these still use `AllCellsOOB` which replaces the entire `#cells` container, destroying all Monaco editors. Phase 3 will implement granular cell add/delete/move to avoid this.
+- **FOUST on cell type change and collapse-section** — these still use `CellViewOOB` which replaces the full cell DOM
 
 ### Added
 

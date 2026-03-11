@@ -126,29 +126,37 @@ function connectWebSocket(notebookId) {
 
 ### HTML Messages (OOB Swaps)
 
-Used for structural updates that replace DOM elements.
+Used for structural updates that replace DOM elements. Targeted swaps (`CellOutputOOB`, `CellHeaderOOB`) replace only subsections to preserve Monaco editors.
 
-| Trigger | Function Called | HTML Sent |
-|---------|-----------------|-----------|
-| Add cell | `AllCellsOOB(nb)` | `<div id="cells" hx-swap-oob="true">...</div>` |
-| Delete cell | `AllCellsOOB(nb)` | `<div id="cells" hx-swap-oob="true">...</div>` |
-| Move cell | `AllCellsOOB(nb)` | `<div id="cells" hx-swap-oob="true">...</div>` |
-| Run code cell | `CellViewOOB(cell, nb_id)` | `<div id="cell-xxx" hx-swap-oob="true">...</div>` |
-| Collapse cell | `CellViewOOB(cell, nb_id)` | `<div id="cell-xxx" hx-swap-oob="true">...</div>` |
-| Change cell type | `CellViewOOB(cell, nb_id)` | `<div id="cell-xxx" hx-swap-oob="true">...</div>` |
-| Prompt complete | `CellViewOOB(cell, nb_id)` | `<div id="cell-xxx" hx-swap-oob="true">...</div>` |
+| Trigger | Function Called | HTML Target | Editor Impact |
+|---------|-----------------|-------------|---------------|
+| Add cell | `AllCellsOOB(nb)` | `#cells` | Destroyed & recreated |
+| Delete cell | `AllCellsOOB(nb)` | `#cells` | Destroyed & recreated |
+| Move cell | `AllCellsOOB(nb)` | `#cells` | Destroyed & recreated |
+| Run code cell | `CellOutputOOB(cell)` + `CellHeaderOOB(cell, nb_id)` | `#output-{id}` + `#header-{id}` | **Preserved** |
+| State toggle | `CellHeaderOOB(cell, nb_id)` | `#header-{id}` | **Preserved** |
+| Collapse cell | `CellViewOOB(cell, nb_id)` | `#cell-{id}` | Destroyed & recreated |
+| Change cell type | `CellViewOOB(cell, nb_id)` | `#cell-{id}` | Destroyed & recreated |
+| Prompt complete | `CellViewOOB(cell, nb_id)` | `#cell-{id}` | Destroyed & recreated |
 
-### JSON Messages (Streaming)
+### JSON Messages
 
-Used for real-time streaming during prompt cell execution.
+Used for streaming, in-place editor updates, and state changes.
 
-| Type | When Sent | Payload |
-|------|-----------|---------|
-| `stream_chunk` | Each LLM token | `{type, cell_id, chunk, thinking?}` |
-| `stream_end` | Streaming complete | `{type, cell_id}` |
-| `thinking_start` | Thinking mode begins | `{type, cell_id}` |
-| `thinking_end` | Thinking mode ends | `{type, cell_id}` |
-| `cancel` | User clicks cancel (client→server) | `{type, cell_id}` |
+| Type | When Sent | Payload | Purpose |
+|------|-----------|---------|---------|
+| `stream_chunk` | Each LLM token | `{type, cell_id, chunk, thinking?}` | Prompt cell streaming |
+| `stream_end` | Streaming complete | `{type, cell_id}` | Prompt cell done |
+| `code_stream_start` | Code execution begins | `{type, cell_id}` | Show running indicator |
+| `code_stream_chunk` | Code output chunk | `{type, cell_id, chunk, stream}` | Stream code output |
+| `code_stream_end` | Code execution done | `{type, cell_id, has_error}` | Finalize code cell |
+| `cell_source_update` | Dialoghelper source edit | `{type, cell_id, source}` | Update Monaco via `setValue()` — no FOUST |
+| `cell_class_update` | State/class change | `{type, cell_id, cls}` | Update CSS classes in-place |
+| `cell_state_change` | Cell state transition | `{type, cell_id, state}` | Queue state tracking |
+| `queue_update` | Queue changes | `{type, running_cell_id, queued_cell_ids}` | Update queue UI |
+| `thinking_start` | Thinking mode begins | `{type, cell_id}` | Show thinking indicator |
+| `thinking_end` | Thinking mode ends | `{type, cell_id}` | Hide thinking indicator |
+| `cancel` | User clicks cancel (client→server) | `{type, cell_id}` | Cancel streaming |
 
 ---
 
@@ -158,28 +166,30 @@ Used for real-time streaming during prompt cell execution.
 
 HTMX's OOB swap allows updating elements by ID without the typical request/response cycle. When an element has `hx-swap-oob="true"`, HTMX finds the element with matching ID and replaces it.
 
-### Server-Side: Creating OOB Components
+### Server-Side: Creating OOB Components (`dialeng/ui/oob.py`)
 
 ```python
-# Full cells container replacement (app.py:2124-2132)
+# Full cells container replacement — destroys all editors (used for add/delete/move)
 def AllCellsOOB(nb: Notebook):
-    """Returns AllCells with hx-swap-oob for WebSocket broadcasting."""
     items = [AddButtons(0, nb.id)]
     for i, c in enumerate(nb.cells):
         items.extend([CellView(c, nb.id), AddButtons(i+1, nb.id)])
     return Div(*items, id="cells", hx_swap_oob="true")
 
-# Single cell replacement (app.py:2134-2150)
+# Single cell replacement — destroys editor (used for type change, collapse)
 def CellViewOOB(cell: Cell, notebook_id: str):
-    """Returns CellView with hx-swap-oob for WebSocket broadcasting."""
     cell_div = CellView(cell, notebook_id)
-    return Div(
-        *cell_div.children,
-        id=f"cell-{cell.id}",
-        cls=cell_div.attrs.get('class', ''),
-        hx_swap_oob="true",
-        **{k: v for k, v in cell_div.attrs.items() if k not in ('id', 'class')}
-    )
+    return Div(*cell_div.children, id=f"cell-{cell.id}",
+               cls=cell_div.attrs.get('class', ''), hx_swap_oob="true", ...)
+
+# Targeted output swap — preserves editor (used for execution)
+def CellOutputOOB(cell):
+    return Div(*output_content, id=f"output-{cell.id}", hx_swap_oob="true")
+
+# Targeted header swap — preserves editor (used for execution, state toggle)
+def CellHeaderOOB(cell, notebook_id):
+    return Div(*CellHeader(cell, notebook_id).children,
+               id=f"header-{cell.id}", hx_swap_oob="true")
 ```
 
 ### Server-Side: Broadcasting
@@ -212,61 +222,44 @@ async def broadcast_to_notebook(nb_id: str, component, exclude_send: Any = None)
 ### Client-Side: Processing OOB Swaps
 
 ```javascript
-// Process incoming HTML (app.py:2669-2820)
+// Process incoming HTML from WebSocket (app.js)
 function processOOBSwap(html) {
     const template = document.createElement('template');
     template.innerHTML = html.trim();
 
-    for (const element of template.content.children) {
-        const oobAttr = element.getAttribute('hx-swap-oob');
+    // Collect OOB elements (may be nested in wrapper divs)
+    const elements = [];
+    for (const el of template.content.children) {
+        if (el.getAttribute('hx-swap-oob')) elements.push(el);
+        else el.querySelectorAll('[hx-swap-oob]').forEach(n => elements.push(n));
+    }
 
-        // Handle swap strategies like "beforeend:#js-script"
-        // (see Script Injection OOB section below)
-        if (oobAttr && oobAttr.includes(':')) {
-            // Parse and handle swap strategy
-            // ...
-            continue;
-        }
-
-        if (oobAttr !== 'true') continue;
-
-        // Handle script elements (fire_event)
-        if (element.tagName === 'SCRIPT') {
-            // Create and execute script
-            // ...
-            continue;
-        }
-
+    for (const element of elements) {
         const targetId = element.id;
         const target = document.getElementById(targetId);
         if (!target) continue;
 
-        // Single cell update
-        if (targetId.startsWith('cell-')) {
-            const cellId = targetId.replace('cell-', '');
-            const isEditing = target.contains(document.activeElement);
-            const isStreaming = target.classList.contains('streaming');
-
-            // Skip if user is editing or streaming
-            if (isEditing || isStreaming) continue;
-
+        // Targeted swap: output or header only (preserves Monaco editor)
+        if (targetId.startsWith('output-') || targetId.startsWith('header-')) {
             element.removeAttribute('hx-swap-oob');
             target.replaceWith(element);
-
-            // Reinitialize Ace editor for code cells
-            if (newCell.dataset.type === 'code') {
-                setTimeout(() => initAceEditor(cellId), 0);
-            }
-            renderCellPreviews(cellId);
+            htmx.process(document.getElementById(targetId));
         }
-        // Full cells container update
-        else if (targetId === 'cells') {
-            // Skip if any cell is being edited or streaming
-            if (editingCell || streamingCell) continue;
-
+        // Full single cell swap (destroys + recreates Monaco editor)
+        else if (targetId.startsWith('cell-')) {
+            // Skip if user is editing or cell is streaming
+            if (isEditing || isStreaming) continue;
             element.removeAttribute('hx-swap-oob');
             target.replaceWith(element);
-            reinitializeAceEditors();
+            // Reinitialize Monaco editor for code/shell cells
+            if (newCell.dataset.type === 'code') initMonacoEditor(cellId);
+            else if (newCell.dataset.type === 'shell') initMonacoEditor(cellId, 'sh');
+        }
+        // Full cells container update (destroys + recreates all editors)
+        else if (targetId === 'cells') {
+            element.removeAttribute('hx-swap-oob');
+            target.replaceWith(element);
+            reinitializeMonacoEditors();
             renderAllPreviews();
         }
     }
@@ -348,22 +341,26 @@ if (element.tagName === 'SCRIPT') {
 ### Code Cells
 
 **When Run:**
-1. Server executes Python code via the kernel
-2. Output is stored in `cell.output`
-3. `CellViewOOB(cell, nb_id)` is broadcast to all clients
-4. Each client's `processOOBSwap()` replaces the cell (unless editing)
-5. Ace editor is reinitialized for code cells
+1. Server queues cell execution in the `ExecutionQueue`
+2. Route returns `""` immediately (no HTMX swap — `hx_swap="none"`)
+3. Output streams via JSON WebSocket messages (`code_stream_chunk`)
+4. On completion, targeted OOB swaps update only output and header
+5. Monaco editor DOM is **preserved** — no FOUST
 
 **Route:** `POST /notebook/{nb_id}/cell/{cid}/run`
 
 ```python
-# Code cell execution (app.py:2367-2376)
+# Code cell execution — returns immediately, runs in background
 if c.cell_type == "code":
-    c.output = kernel.execute(c.source)
-    c.time_run = datetime.now().strftime("%H:%M:%S")
+    queue.queue_cell(nb_id, c)
+    return ""
 
-    # Broadcast to collaborators
-    await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
+# On completion (via ExecutionQueue callback):
+async def finalize_cell_execution(nb_id, cell, has_error):
+    cell.output = ''.join(output_parts)
+    # Targeted OOB — only output and header, editor untouched
+    await broadcast_to_notebook(nb_id, CellOutputOOB(cell))
+    await broadcast_to_notebook(nb_id, CellHeaderOOB(cell, nb_id))
 ```
 
 ### Note Cells
@@ -521,19 +518,17 @@ if (targetId === 'cells') {
 | Line 2503-2511 | `ws_on_disconnect()` | Handles WebSocket disconnections |
 | Line 2513-2529 | `@app.ws('/ws/{nb_id}')` | WebSocket endpoint handler |
 
-### Client-Side (JavaScript in app.py)
+### Client-Side (`dialeng/static/js/app.js`)
 
-| Location | Function | Purpose |
-|----------|----------|---------|
-| Line 1600-1647 | `connectWebSocket()` | Establishes WebSocket, handles messages |
-| Line 1649-1661 | `appendToResponse()` | Appends streaming chunks to prompt cells |
-| Line 1663-1679 | `showThinkingIndicator()` | Shows thinking UI during prompt execution |
-| Line 1681-1684 | `hideThinkingIndicator()` | Hides thinking UI |
-| Line 1686-1698 | `finishStreaming()` | Cleans up after streaming completes |
-| Line 1723-1802 | `processOOBSwap()` | Handles incoming HTML OOB updates |
-| Line 1803-1822 | `reinitializeAceEditors()` | Recreates Ace editors after DOM updates |
-| Line 1823-1836 | `renderAllPreviews()` | Re-renders markdown previews |
-| Line 1837-1851 | `renderCellPreviews()` | Re-renders previews for specific cell |
+| Function | Purpose |
+|----------|---------|
+| `connectWebSocket()` | Establishes WebSocket, routes HTML to `processOOBSwap` and JSON to handlers |
+| `processOOBSwap()` | Handles incoming HTML OOB updates (targeted, cell, or full container) |
+| `initMonacoEditor()` | Creates Monaco editor with skip guard for existing editors |
+| `reinitializeMonacoEditors()` | Recreates all Monaco editors after full `#cells` swap |
+| `startCodeStreaming()` / `finishCodeStreaming()` | Manage code cell execution UI state |
+| `appendCodeOutput()` | Debounced (RAF) streaming output for code cells |
+| `focusNextCell()` / `moveToNextCell()` | Cell navigation with proper DOM focus for all cell types |
 
 ---
 

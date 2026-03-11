@@ -157,7 +157,8 @@ button, select { font-size: var(--btn-font-size, inherit); }
     border-radius: 8px;
     margin-bottom: 12px;
     overflow: hidden;
-    transition: border-color 0.15s, box-shadow 0.3s;
+    transition: border-color 0.15s, outline-color 0.15s;
+    contain: layout style;
 }
 .cell:focus-within { border-color: var(--accent-blue); }
 .cell.streaming { border-color: var(--accent-orange); }
@@ -457,6 +458,7 @@ button, select { font-size: var(--btn-font-size, inherit); }
     background: var(--accent-orange); border-radius: 50%;
     animation: pulse 1s infinite;
     margin-left: 8px;
+    will-change: opacity;
 }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
@@ -464,6 +466,7 @@ button, select { font-size: var(--btn-font-size, inherit); }
     display: inline-flex; align-items: center; gap: 4px;
     font-size: 0.85rem; color: var(--accent-purple);
     animation: thinking-pulse 1.5s ease-in-out infinite;
+    will-change: opacity;
 }
 @keyframes thinking-pulse {
     0%, 100% { opacity: 1; }
@@ -506,7 +509,7 @@ button, select { font-size: var(--btn-font-size, inherit); }
     text-overflow: ellipsis !important;
     padding: 6px 12px !important;
 }
-.collapse-summary * {
+.collapse-summary > * {
     display: inline !important;
     white-space: nowrap !important;
 }
