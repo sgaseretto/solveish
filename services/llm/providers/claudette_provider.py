@@ -311,3 +311,16 @@ class ClaudetteProvider(BaseLLMProvider):
                         'input': item.get('input', {})
                     })
         return extracted
+
+
+
+# Register as an LLM provider
+def _register_claudette_provider():
+    from core.registry import registry, ProviderRegistration
+    registry.register_provider(ProviderRegistration(
+        name="claudette", label="Anthropic API / Bedrock",
+        factory=ClaudetteProvider,
+        priority=10  # Highest priority - direct API access
+    ))
+
+_register_claudette_provider()

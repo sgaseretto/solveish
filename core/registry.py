@@ -36,6 +36,46 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class KernelRegistration:
+    """Registration for a kernel backend."""
+    name: str               # "local", "colab", "julia"
+    label: str              # "Local Python", "Google Colab"
+    icon: str               # lucide icon name or emoji
+    factory: Callable       # (**kwargs) -> BaseKernel
+    description: str = ""
+    requires_auth: bool = False
+    runtime_options: List[str] = field(default_factory=list)  # e.g., ["cpu", "gpu", "tpu"]
+
+
+@dataclass
+class ProviderRegistration:
+    """Registration for an LLM provider."""
+    name: str               # "claudette", "claudette_agent", "openai"
+    label: str              # "Anthropic API", "Claude Code"
+    factory: Callable       # () -> BaseLLMProvider
+    credential_checker: Optional[Callable] = None  # () -> Optional[CredentialInfo]
+    priority: int = 0       # Higher = preferred when multiple match
+
+
+@dataclass
+class ToolbarItemRegistration:
+    """Registration for a custom toolbar item."""
+    name: str
+    renderer: Callable      # (notebook, config) -> FT component
+    position: str = "right" # "left", "center", "right"
+    order: int = 50
+
+
+@dataclass
+class SettingsSectionRegistration:
+    """Registration for a custom settings section."""
+    name: str
+    label: str
+    renderer: Callable      # (config) -> FT component (SettingsGroup)
+    order: int = 50
+
+
+@dataclass
 class CellTypeRegistration:
     """
     Registration for a custom cell type.
@@ -70,6 +110,10 @@ class ExtensionRegistry:
     cell_types: Dict[str, CellTypeRegistration] = field(default_factory=dict)
     callbacks: List['Callback'] = field(default_factory=list)
     services: Dict[str, Any] = field(default_factory=dict)
+    kernels: Dict[str, KernelRegistration] = field(default_factory=dict)
+    providers: Dict[str, ProviderRegistration] = field(default_factory=dict)
+    toolbar_items: Dict[str, ToolbarItemRegistration] = field(default_factory=dict)
+    settings_sections: Dict[str, SettingsSectionRegistration] = field(default_factory=dict)
 
     # Track loaded extensions
     _loaded_extensions: List[str] = field(default_factory=list)
@@ -137,6 +181,46 @@ class ExtensionRegistry:
         from .callbacks import CallbackHandler
         return CallbackHandler(self.callbacks.copy())
 
+    def register_kernel_type(self, registration: KernelRegistration) -> None:
+        """Register a kernel backend."""
+        name = registration.name
+        if name in self.kernels:
+            logger.warning(f"Overwriting existing kernel: {name}")
+        self.kernels[name] = registration
+        logger.info(f"Registered kernel: {name} ({registration.label})")
+
+    def register_provider(self, registration: ProviderRegistration) -> None:
+        """Register an LLM provider."""
+        name = registration.name
+        if name in self.providers:
+            logger.warning(f"Overwriting existing provider: {name}")
+        self.providers[name] = registration
+        logger.info(f"Registered provider: {name} ({registration.label})")
+
+    def register_toolbar_item(self, registration: ToolbarItemRegistration) -> None:
+        """Register a custom toolbar item."""
+        name = registration.name
+        if name in self.toolbar_items:
+            logger.warning(f"Overwriting existing toolbar item: {name}")
+        self.toolbar_items[name] = registration
+        logger.info(f"Registered toolbar item: {name}")
+
+    def register_settings_section(self, registration: SettingsSectionRegistration) -> None:
+        """Register a custom settings section."""
+        name = registration.name
+        if name in self.settings_sections:
+            logger.warning(f"Overwriting existing settings section: {name}")
+        self.settings_sections[name] = registration
+        logger.info(f"Registered settings section: {name} ({registration.label})")
+
+    def get_kernel_choices(self) -> List[tuple]:
+        """Get list of (value, label) tuples for kernel selection UI."""
+        return [(name, reg.label) for name, reg in self.kernels.items()]
+
+    def get_provider_choices(self) -> List[tuple]:
+        """Get list of (value, label) tuples for provider selection UI."""
+        return [(name, reg.label) for name, reg in self.providers.items()]
+
     def get_cell_type_choices(self) -> List[tuple]:
         """
         Get list of (value, label) tuples for UI dropdowns.
@@ -174,7 +258,9 @@ class ExtensionRegistry:
             f"ExtensionRegistry("
             f"cell_types={list(self.cell_types.keys())}, "
             f"callbacks={len(self.callbacks)}, "
-            f"services={list(self.services.keys())})"
+            f"services={list(self.services.keys())}, "
+            f"kernels={list(self.kernels.keys())}, "
+            f"providers={list(self.providers.keys())})"
         )
 
 
@@ -276,4 +362,107 @@ def register_service(name: str):
     def decorator(cls):
         registry.register_service(name, cls)
         return cls
+    return decorator
+
+
+def register_kernel(
+    name: str,
+    label: str,
+    icon: str = "cpu",
+    description: str = "",
+    requires_auth: bool = False,
+    runtime_options: Optional[List[str]] = None
+):
+    """
+    Decorator to register a kernel backend.
+
+        @register_kernel("julia", "Julia", icon="terminal")
+        class JuliaKernel(BaseKernel):
+            ...
+
+    Can also be used as a function with a factory callable:
+
+        register_kernel("local", "Local Python", icon="house-plug")(
+            lambda **kw: SubprocessKernel(start_immediately=kw.get("start_immediately", True))
+        )
+    """
+    def decorator(factory_or_class):
+        factory = factory_or_class
+        registration = KernelRegistration(
+            name=name, label=label, icon=icon,
+            factory=factory, description=description,
+            requires_auth=requires_auth,
+            runtime_options=runtime_options or []
+        )
+        registry.register_kernel_type(registration)
+        return factory_or_class
+    return decorator
+
+
+def register_llm_provider(
+    name: str,
+    label: str,
+    priority: int = 0,
+    credential_checker: Optional[Callable] = None
+):
+    """
+    Decorator to register an LLM provider.
+
+        @register_llm_provider("openai", "OpenAI API", priority=5)
+        class OpenAIProvider(BaseLLMProvider):
+            ...
+    """
+    def decorator(factory_or_class):
+        registration = ProviderRegistration(
+            name=name, label=label,
+            factory=factory_or_class,
+            credential_checker=credential_checker,
+            priority=priority
+        )
+        registry.register_provider(registration)
+        return factory_or_class
+    return decorator
+
+
+def register_toolbar_item_decorator(
+    name: str,
+    position: str = "right",
+    order: int = 50
+):
+    """
+    Decorator to register a toolbar item renderer.
+
+        @register_toolbar_item_decorator("my_button")
+        def render_my_button(notebook, config):
+            return Button("Click me")
+    """
+    def decorator(renderer):
+        registration = ToolbarItemRegistration(
+            name=name, renderer=renderer,
+            position=position, order=order
+        )
+        registry.register_toolbar_item(registration)
+        return renderer
+    return decorator
+
+
+def register_settings_section_decorator(
+    name: str,
+    label: str,
+    order: int = 50
+):
+    """
+    Decorator to register a settings section renderer.
+
+        @register_settings_section_decorator("my_settings", "My Extension Settings")
+        def render_my_settings(config):
+            return SettingsGroup("My Settings", SettingToggle(...))
+    """
+    def decorator(renderer):
+        registration = SettingsSectionRegistration(
+            name=name, label=label,
+            renderer=renderer, order=order
+        )
+        registry.register_settings_section(registration)
+        return renderer
     return decorator

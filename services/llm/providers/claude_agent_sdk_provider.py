@@ -370,3 +370,16 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
                 shutil.rmtree(temp_cwd, ignore_errors=True)
             except Exception:
                 pass
+
+
+
+# Register as an LLM provider
+def _register_claude_agent_sdk_provider():
+    from core.registry import registry, ProviderRegistration
+    registry.register_provider(ProviderRegistration(
+        name="claude_agent_sdk", label="Claude Code (SDK)",
+        factory=ClaudeAgentSdkProvider,
+        priority=5
+    ))
+
+_register_claude_agent_sdk_provider()

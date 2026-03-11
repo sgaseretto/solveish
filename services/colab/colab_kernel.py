@@ -750,3 +750,17 @@ print("__NS_INFO__" + _json.dumps(_ns_info))
                 except (json.JSONDecodeError, IndexError):
                     pass
         return result
+
+
+# Register as a kernel backend
+def _register_colab_kernel():
+    from core.registry import registry, KernelRegistration
+    registry.register_kernel_type(KernelRegistration(
+        name="colab", label="Google Colab", icon="cloud",
+        factory=None,  # Colab kernels are created via ColabSessionManager, not a simple factory
+        description="Remote Google Colab runtime (requires Google auth)",
+        requires_auth=True,
+        runtime_options=["cpu", "gpu", "tpu"]
+    ))
+
+_register_colab_kernel()

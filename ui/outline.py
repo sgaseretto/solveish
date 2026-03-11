@@ -57,14 +57,15 @@ def OutlineSection(title: str, items: List[Any], icon_name: str = None, empty_me
     if not items:
         items = [Li(Em(empty_message, cls="text-muted"), cls="outline-empty")]
 
-    return Div(
-        Div(
+    return Details(
+        Summary(
             icon,
             Span(title, cls="outline-section-title"),
             cls="outline-section-header"
         ),
         Ul(*items, cls="outline-section-list"),
-        cls="outline-section"
+        cls="outline-section",
+        open=True
     )
 
 

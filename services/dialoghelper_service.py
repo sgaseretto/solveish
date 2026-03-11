@@ -9,6 +9,7 @@ The dialoghelper library (https://github.com/AnswerDotAI/dialoghelper) allows
 programmatic manipulation of notebook cells from within notebook code. This
 service implements the server-side logic that dialoghelper's call_endp() calls.
 """
+import os
 import re
 import logging
 from collections import defaultdict
@@ -635,6 +636,23 @@ def build_context_messages(notebook, current_cell_id: str) -> List[Dict]:
         logger.info(f"  source: {cell.source[:80]}..." if len(cell.source) > 80 else f"  source: {cell.source}")
         logger.info(f"  output: {cell.output[:80]}..." if cell.output and len(cell.output) > 80 else f"  output: {cell.output}")
         logger.info(f"  -> {len(cell_messages)} messages")
+
+    # 6. Prepend CRAFT.ipynb context (note/prompt cells from CRAFT files)
+    notebook_path = getattr(notebook, 'path', None)
+    if notebook_path:
+        try:
+            from services.craft_service import find_craft_files, get_craft_context
+            from pathlib import Path
+            # Use NOTEBOOKS_DIR as root; fall back to parent of notebook
+            root = Path(os.environ.get("DIALENG_NOTEBOOKS_DIR", "notebooks"))
+            craft_paths = find_craft_files(notebook_path, root)
+            if craft_paths:
+                craft_messages = get_craft_context(craft_paths)
+                if craft_messages:
+                    logger.info(f"build_context_messages: Prepending {len(craft_messages)} CRAFT messages")
+                    messages = craft_messages + messages
+        except Exception as e:
+            logger.error(f"build_context_messages: CRAFT context error: {e}")
 
     logger.info(f"build_context_messages: Final context has {len(messages)} messages")
     return messages

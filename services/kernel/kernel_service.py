@@ -10,7 +10,6 @@ from datetime import datetime
 
 from document.cell import Cell, CellState, CellOutput
 from .base_kernel import BaseKernel
-from .subprocess_kernel import SubprocessKernel
 
 
 class KernelService:
@@ -52,11 +51,20 @@ class KernelService:
             BaseKernel instance for the notebook
         """
         if notebook_id not in self._kernels:
+            from core.registry import registry
+            reg = registry.kernels.get(kernel_type)
             if kernel_type == "colab" and self._colab_session_manager:
+                # Colab kernels are created via session manager (needs auth + API client)
                 self._kernels[notebook_id] = self._colab_session_manager.get_kernel(
                     notebook_id, runtime_type=runtime_type
                 )
+            elif reg and reg.factory:
+                self._kernels[notebook_id] = reg.factory(
+                    start_immediately=self._lazy_start
+                )
             else:
+                # Fallback to local subprocess kernel
+                from .subprocess_kernel import SubprocessKernel
                 self._kernels[notebook_id] = SubprocessKernel(
                     start_immediately=self._lazy_start
                 )
@@ -213,6 +221,7 @@ class KernelService:
         """
         if notebook_id not in self._kernels:
             # Create a new kernel (default to local)
+            from .subprocess_kernel import SubprocessKernel
             self._kernels[notebook_id] = SubprocessKernel()
             return True
         return self._kernels[notebook_id].restart()
@@ -223,6 +232,7 @@ class KernelService:
         Handles both local and Colab kernels correctly.
         """
         if notebook_id not in self._kernels:
+            from .subprocess_kernel import SubprocessKernel
             self._kernels[notebook_id] = SubprocessKernel()
             return True
         kernel = self._kernels[notebook_id]

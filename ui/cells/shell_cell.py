@@ -42,7 +42,7 @@ def ShellCellHeader(cell, notebook_id: str, safe_mode: bool = False):
     # Run button with bash-specific handling
     run_onclick = f"syncAceToTextarea('{cell.id}'); prepareCodeRun('{cell.id}');"
     run_button = Button(
-        "▶", cls="btn btn-sm btn-run",
+        ss('play', sz=14), cls="btn btn-sm btn-run",
         hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/run",
         hx_target=f"#cell-{cell.id}",
         hx_swap="none",
@@ -55,7 +55,7 @@ def ShellCellHeader(cell, notebook_id: str, safe_mode: bool = False):
     # Cancel button
     cancel_onclick = f"interruptCodeCell('{notebook_id}', '{cell.id}')"
     cancel_button = Button(
-        "Stop", cls="btn btn-sm btn-cancel",
+        ss('square', sz=14), cls="btn btn-sm btn-cancel",
         onclick=cancel_onclick,
         title="Interrupt execution (Ctrl+C)",
         style="display: none;"
@@ -72,7 +72,7 @@ def ShellCellHeader(cell, notebook_id: str, safe_mode: bool = False):
 
     return Div(
         Div(
-            Button("V", cls="collapse-btn",
+            Button(ss('chevron-down', sz=14), cls="collapse-btn",
                    onclick=f"toggleCollapse('{cell.id}')",
                    title="Collapse/Expand (full)"),
             Span("SHELL", cls="cell-badge shell"),
@@ -96,13 +96,13 @@ def ShellCellHeader(cell, notebook_id: str, safe_mode: bool = False):
             TypeSelect(cell.id, cell.cell_type, notebook_id),
             run_button,
             cancel_button,
-            Button("Up", cls="btn btn-sm btn-icon",
+            Button(ss('arrow-up', sz=14), cls="btn btn-sm btn-icon",
                    hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/move/up",
                    hx_target="#cells", hx_swap="outerHTML", title="Move up"),
-            Button("Down", cls="btn btn-sm btn-icon",
+            Button(ss('arrow-down', sz=14), cls="btn btn-sm btn-icon",
                    hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/move/down",
                    hx_target="#cells", hx_swap="outerHTML", title="Move down"),
-            Button("X", cls="btn btn-sm btn-icon",
+            Button(ss('trash-2', sz=14), cls="btn btn-sm btn-icon btn-delete",
                    hx_delete=f"/notebook/{notebook_id}/cell/{cell.id}",
                    hx_target="#cells",
                    hx_swap="outerHTML", title="Delete (D D)"),

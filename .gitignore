@@ -35,6 +35,9 @@ debug_logs/
 # Jupyter checkpoints
 .ipynb_checkpoints/
 
+# AUTORUN extracted modules cache
+.autorun_modules/
+
 # Test/demo files (development only)
 test_*.py
 *_demo.py
