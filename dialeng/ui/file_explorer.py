@@ -100,7 +100,7 @@ def FileItem(name: str, path: str, is_active: bool, nb_id: str,
 
     Args:
         name: Notebook name (without .ipynb)
-        path: Relative path for navigation
+        path: Relative path for navigation (relative to NOTEBOOKS_DIR)
         is_active: Whether this is the currently open notebook
         nb_id: Active notebook ID
         has_kernel: Whether this notebook has a running kernel
@@ -112,11 +112,13 @@ def FileItem(name: str, path: str, is_active: bool, nb_id: str,
     if has_kernel:
         cls_parts.append("has-kernel")
     file_path = f"{path}/{name}" if path and path != "." else name
+    # Use query param approach: /notebook/?name=subfolder/test
+    nb_name_param = f"{path}/{name}" if path and path != "." else name
     return Div(
         A(
             icon_sprites(icon_name, sz=16),
             Span(name, cls="file-explorer-item-name"),
-            href=f"/notebook/{name}",
+            href=f"/notebook/?name={nb_name_param}",
             cls="file-explorer-item-link",
         ),
         Button(
@@ -133,6 +135,10 @@ def FileListContent(path: Path, root: Path, active_notebook_id: str,
                     kernel_notebooks: set = None):
     """File list content (breadcrumbs + folders + files) for HTMX partial swaps.
 
+    Also stores the current relative path in a hidden input so JS can read it
+    when creating new items (the modal is rendered once at page load, so it
+    can't have the path baked in).
+
     Args:
         path: Current directory to display
         root: Root notebooks directory
@@ -148,7 +154,12 @@ def FileListContent(path: Path, root: Path, active_notebook_id: str,
     except ValueError:
         rel = ""
 
-    items = [BreadcrumbNav(path, root, active_notebook_id)]
+    # Hidden input that JS reads to know the currently browsed folder
+    current_path_val = rel if rel and rel != "." else ""
+    items = [
+        Input(type="hidden", id="current-explorer-path", value=current_path_val),
+        BreadcrumbNav(path, root, active_notebook_id),
+    ]
 
     # Folders
     for folder in folders:
@@ -157,9 +168,10 @@ def FileListContent(path: Path, root: Path, active_notebook_id: str,
 
     # Notebooks
     for nb_name in notebooks:
-        is_active = nb_name == active_notebook_id
+        nb_rel_path = f"{rel}/{nb_name}" if rel and rel != "." else nb_name
+        is_active = nb_rel_path == active_notebook_id or nb_name == active_notebook_id
         items.append(FileItem(nb_name, rel, is_active, active_notebook_id,
-                              has_kernel=nb_name in kernel_notebooks))
+                              has_kernel=nb_rel_path in kernel_notebooks or nb_name in kernel_notebooks))
 
     if not folders and not notebooks:
         items.append(Div("Empty folder", cls="file-explorer-item",
@@ -188,7 +200,7 @@ def FileExplorerSidebar(current_path: Path, root: Path, active_notebook_id: str,
             icon_sprites('folder-open', sz=16),
             Span("Files", cls="file-explorer-title"),
             Button(icon_sprites('refresh-cw', sz=14),
-                   hx_get="/files?path=", hx_target="#file-list-content", hx_swap="innerHTML",
+                   onclick="refreshFileExplorer()",
                    title="Refresh file explorer"),
             Button(icon_sprites('file-plus', sz=14), onclick="toggleNewItemModal()",
                    title="New notebook or folder"),
@@ -206,11 +218,12 @@ def FileExplorerSidebar(current_path: Path, root: Path, active_notebook_id: str,
     )
 
 
-def NewItemModal(current_path: str):
+def NewItemModal():
     """Modal for creating new notebooks or folders.
 
-    Args:
-        current_path: Current directory path (relative)
+    The current path is read dynamically from the hidden #current-explorer-path
+    input inside #file-list-content, so it always reflects the folder the user
+    is currently browsing (not the path at page-load time).
     """
     return Div(
         Div(
@@ -244,7 +257,7 @@ def NewItemModal(current_path: str):
             Div(
                 Button("Cancel", cls="btn btn-sm", onclick="toggleNewItemModal()"),
                 Button("Create", cls="btn btn-sm btn-save",
-                       onclick=f"createNewItem('{current_path}')"),
+                       onclick="createNewItem()"),
                 cls="new-item-modal-actions"
             ),
             cls="new-item-panel"

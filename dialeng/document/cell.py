@@ -301,7 +301,7 @@ class Cell:
             cell = {
                 "cell_type": "markdown",
                 "id": self.id,
-                "metadata": {},
+                "metadata": {"solveit_note": True},
                 "source": self._to_source_lines(self.source)
             }
             if self.collapsed: cell["metadata"]["collapsed"] = True

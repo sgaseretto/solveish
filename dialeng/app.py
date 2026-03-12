@@ -318,12 +318,66 @@ def _load_notebook(path: str) -> Notebook:
     return nb
 
 
+def _nb_id_from_path(path: Path) -> str:
+    """Derive a URL-safe notebook ID from a file path.
+
+    Uses the file stem for root notebooks, and dir_stem for subdirectory ones.
+    Examples: notebooks/test.ipynb → 'test'
+              notebooks/subfolder/test.ipynb → 'subfolder_test'
+              notebooks/a/b/test.ipynb → 'a_b_test'
+    """
+    try:
+        rel = path.resolve().relative_to(NOTEBOOKS_DIR.resolve())
+    except ValueError:
+        return path.stem
+    parts = list(rel.parts)
+    parts[-1] = rel.stem  # Remove .ipynb extension
+    return "_".join(parts) if len(parts) > 1 else parts[0]
+
+def _find_notebook_path(notebook_id: str) -> Optional[Path]:
+    """Find a notebook file by ID, checking root first then subdirectories."""
+    # Check root directly (most common case)
+    root_path = NOTEBOOKS_DIR / f"{notebook_id}.ipynb"
+    if root_path.exists():
+        return root_path
+    # Check if an in-memory notebook has a path set
+    if notebook_id in notebooks and notebooks[notebook_id].path:
+        p = Path(notebooks[notebook_id].path)
+        if p.exists():
+            return p
+    # Reverse the _ encoding: scan all notebooks and find the one whose
+    # _nb_id_from_path matches this notebook_id
+    for p in NOTEBOOKS_DIR.rglob("*.ipynb"):
+        if any(part.startswith('.') or part == '__pycache__' for part in p.relative_to(NOTEBOOKS_DIR).parts):
+            continue
+        if _nb_id_from_path(p) == notebook_id:
+            return p
+    return None
+
+def _find_notebook_by_name(name: str) -> Optional[str]:
+    """Find a notebook by its relative path name (e.g., 'subfolder/test').
+
+    Returns the notebook ID if found (loading it if necessary), or None.
+    """
+    target = NOTEBOOKS_DIR / f"{name}.ipynb"
+    if not target.exists() or not target.resolve().is_relative_to(NOTEBOOKS_DIR.resolve()):
+        return None
+    nb_id = _nb_id_from_path(target)
+    # Load into memory if not already
+    if nb_id not in notebooks:
+        nb = _load_notebook(target)
+        nb.id = nb_id  # Ensure ID matches the URL-safe key, not just the filename stem
+        notebooks[nb_id] = nb
+    return nb_id
+
 def get_notebook(notebook_id: str) -> Notebook:
     """Get or create a notebook - ALWAYS requires notebook_id"""
     if notebook_id not in notebooks:
-        path = NOTEBOOKS_DIR / f"{notebook_id}.ipynb"
-        if path.exists():
-            notebooks[notebook_id] = _load_notebook(path)
+        path = _find_notebook_path(notebook_id)
+        if path:
+            nb = _load_notebook(path)
+            nb.id = notebook_id  # Ensure ID matches the URL-safe key
+            notebooks[notebook_id] = nb
         else:
             nb = Notebook(id=notebook_id, title=notebook_id,
                          dialog_mode=DEFAULT_DIALOG_MODE, model=DEFAULT_MODEL)
@@ -346,8 +400,10 @@ def get_notebook(notebook_id: str) -> Notebook:
 
 def save_notebook(notebook_id: str):
     if notebook_id in notebooks:
-        path = NOTEBOOKS_DIR / f"{notebook_id}.ipynb"
-        notebooks[notebook_id].save(str(path))
+        nb = notebooks[notebook_id]
+        # Use existing path if set (preserves subdirectory location), else default to root
+        path = nb.path if nb.path else NOTEBOOKS_DIR / f"{notebook_id}.ipynb"
+        nb.save(str(path))
 
 def list_notebooks() -> List[str]:
     return [p.stem for p in NOTEBOOKS_DIR.glob("*.ipynb")]
@@ -400,11 +456,12 @@ def render_mime_bundle(data: dict, metadata: dict = None) -> str:
         b64 = data["image/gif"].replace('\n', '').replace('\r', '')
         return f'<img class="mime-image" src="data:image/gif;base64,{b64}" />'
 
-    # Markdown - convert to HTML for proper rendering (tables, formatting)
+    # Markdown - convert to HTML using mistlefoot for extended features
     if 'text/markdown' in data:
         try:
-            from markdown_it import MarkdownIt
-            html = MarkdownIt().enable('table').render(data['text/markdown'])
+            from mistletoe import markdown as md_render
+            from mistlefoot import ExtendedHtmlRenderer
+            html = md_render(data['text/markdown'], ExtendedHtmlRenderer)
             return f'<div class="mime-markdown">{html}</div>'
         except ImportError:
             return f'<div class="mime-markdown">{data["text/markdown"]}</div>'
@@ -937,29 +994,62 @@ def get():
     return RedirectResponse("/notebook/default", status_code=302)
 
 @rt("/notebook/")
-def get():
-    """Redirect /notebook/ (with trailing slash) to /notebook/default."""
+async def get(name: str = ""):
+    """Handle /notebook/ and /notebook?name=path/to/notebook.
+
+    With name param: resolve the path to a notebook ID and render directly
+    (keeps the clean URL in the browser). Supports solveit-style URLs.
+    Without: redirect to default notebook.
+    """
+    if name:
+        nb_id = _find_notebook_by_name(name)
+        if not nb_id:
+            # Notebook not found at that path — create it
+            dir_part = str(Path(name).parent) if '/' in name else ""
+            name_part = Path(name).name
+            return RedirectResponse(f"/notebook/new?dir={dir_part}&name={name_part}", status_code=302)
+        # Render the notebook page directly (same as /notebook/{nb_id})
+        return await _render_notebook_page(nb_id)
     return RedirectResponse("/notebook/default", status_code=302)
 
 @rt("/notebook/new")
 def get(dir: str = "", name: str = ""):
-    new_id = name.strip() if name.strip() else uuid.uuid4().hex[:8]
-    nb = Notebook(id=new_id, title=new_id,
+    display_name = name.strip() if name.strip() else uuid.uuid4().hex[:8]
+    target_dir = NOTEBOOKS_DIR / dir if dir else NOTEBOOKS_DIR
+    file_path = target_dir / f"{display_name}.ipynb"
+
+    # Derive URL-safe ID from path: "subfolder/test.ipynb" → "subfolder_test"
+    new_id = _nb_id_from_path(file_path)
+
+    # If this notebook already exists in memory (e.g., re-creation after delete),
+    # remove the stale version so we get fresh template cells
+    notebooks.pop(new_id, None)
+
+    nb = Notebook(id=new_id, title=display_name,
                   dialog_mode=DEFAULT_DIALOG_MODE, model=DEFAULT_MODEL)
 
-    # Try to load cells from TEMPLATE.ipynb
+    # Load cells from TEMPLATE.ipynb (parent-first hierarchy)
     from dialeng.services.template_service import find_templates, load_template_cells
-    target_dir = NOTEBOOKS_DIR / dir if dir else NOTEBOOKS_DIR
     template_paths = find_templates(target_dir, NOTEBOOKS_DIR)
     if template_paths:
         template_cells = load_template_cells(template_paths)
-        nb.cells = template_cells if template_cells else [Cell(cell_type="note", source="# New Notebook\n\nStart writing here...")]
+        if template_cells:
+            nb.cells = template_cells
+            print(f"[TEMPLATE] Applied {len(template_cells)} cells from {len(template_paths)} template(s) to {new_id}", flush=True)
+            for tp in template_paths:
+                print(f"[TEMPLATE]   - {tp}", flush=True)
+        else:
+            nb.cells = [Cell(cell_type="note", source="# New Notebook\n\nStart writing here...")]
     else:
         nb.cells = [Cell(cell_type="note", source="# New Notebook\n\nStart writing here...")]
 
+    # Set path so save_notebook writes to the correct subdirectory
+    nb.path = file_path
     notebooks[new_id] = nb
     save_notebook(new_id)
-    return RedirectResponse(f"/notebook/{new_id}", status_code=302)
+    # Redirect to clean name-based URL
+    nb_name = f"{dir}/{display_name}" if dir else display_name
+    return RedirectResponse(f"/notebook/?name={nb_name}", status_code=302)
 
 # ============================================================================
 # File Explorer Routes
@@ -1013,38 +1103,51 @@ def post(path: str = ""):
 # Notebook Routes
 # ============================================================================
 
-@rt("/notebook/{nb_id}")
-async def get(nb_id: str):
-    # Guard against empty notebook_id (can happen with trailing slash routing)
-    if not nb_id or not nb_id.strip():
-        return RedirectResponse("/notebook/default", status_code=302)
+async def _render_notebook_page(nb_id: str):
+    """Render a notebook page by ID (shared by /notebook/{nb_id} and /notebook/?name=...)."""
     nb = get_notebook(nb_id)
 
     # Auto-execute CRAFT code cells (non-blocking background task)
-    nb_path = NOTEBOOKS_DIR / f"{nb_id}.ipynb"
-    if nb_path.exists():
+    # Determine notebook path for CRAFT discovery: use nb.path, or find on disk
+    nb_path = nb.path
+    if not nb_path:
+        found = _find_notebook_path(nb_id)
+        nb_path = found if found else NOTEBOOKS_DIR / f"{nb_id}.ipynb"
+        if found:
+            nb.path = found  # Cache for future use
+
+    if nb_path and Path(nb_path).exists():
         from dialeng.services.craft_service import find_craft_files, get_craft_code_cells, _executed_craft
         craft_paths = find_craft_files(nb_path, NOTEBOOKS_DIR)
+        # If this notebook IS a CRAFT file, exclude it from its own CRAFT paths
+        # (only run parent CRAFT files, not self)
+        nb_path_resolved = Path(nb_path).resolve()
+        craft_paths = [cp for cp in craft_paths if Path(cp).resolve() != nb_path_resolved]
         if craft_paths:
             craft_cells = get_craft_code_cells(craft_paths)
             executed = _executed_craft.get(nb_id, set())
             unexecuted = [(cid, src) for cid, src in craft_cells if cid not in executed]
             if unexecuted:
+                # Mark all cells as executed synchronously to prevent double execution
+                # from HTMX double page loads
+                _executed_craft.setdefault(nb_id, set()).update(cid for cid, _ in unexecuted)
+                print(f"[CRAFT] Executing {len(unexecuted)} code cells for {nb_id} from {len(craft_paths)} CRAFT file(s)", flush=True)
+                for cp in craft_paths:
+                    print(f"[CRAFT]   - {cp}", flush=True)
                 async def _run_craft():
                     for cid, src in unexecuted:
                         try:
                             cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
                             async for _ in kernel_service.execute_cell(nb_id, cell):
                                 pass
-                            _executed_craft.setdefault(nb_id, set()).add(cid)
+                            print(f"[CRAFT] Executed: {cid}", flush=True)
                         except Exception as e:
-                            print(f"[CRAFT] Error executing cell {cid}: {e}")
+                            print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
+                    print(f"[CRAFT] All cells executed for {nb_id}", flush=True)
                 asyncio.create_task(_run_craft())
 
     nb_list = list_notebooks() or [nb_id]
-    # Pass config for settings sidebar
     config = get_config()
-    # Check kernel status for this notebook and all notebooks (for file explorer)
     nb_kernel_alive = kernel_service.kernel_is_alive(nb_id)
     kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
     return NotebookPage(nb, nb_list, AVAILABLE_DIALOG_MODES, AVAILABLE_MODELS, config,
@@ -1054,6 +1157,12 @@ async def get(nb_id: str):
                         notebooks_dir=NOTEBOOKS_DIR,
                         kernel_alive=nb_kernel_alive,
                         kernel_notebooks=kernel_nbs)
+
+@rt("/notebook/{nb_id}")
+async def get(nb_id: str):
+    if not nb_id or not nb_id.strip():
+        return RedirectResponse("/notebook/default", status_code=302)
+    return await _render_notebook_page(nb_id)
 
 @rt("/notebook/{nb_id}/save")
 def post(nb_id: str):
@@ -1925,6 +2034,43 @@ async def post(nb_id: str):
     """Restart the kernel for a specific notebook."""
     await broadcast_kernel_status(nb_id, "restarting")
     await kernel_service.restart_async(nb_id)
+
+    # Clear CRAFT execution tracking so CRAFT cells re-execute on next page load
+    from dialeng.services.craft_service import reset_craft_tracking
+    reset_craft_tracking(nb_id)
+    print(f"[CRAFT] Reset execution tracking for {nb_id} (kernel restart)", flush=True)
+
+    # Re-run CRAFT code cells in the fresh kernel
+    nb = notebooks.get(nb_id)
+    if nb:
+        nb_path = nb.path
+        if not nb_path:
+            found = _find_notebook_path(nb_id)
+            nb_path = found if found else NOTEBOOKS_DIR / f"{nb_id}.ipynb"
+        if nb_path and Path(nb_path).exists():
+            from dialeng.services.craft_service import find_craft_files, get_craft_code_cells, _executed_craft
+            craft_paths = find_craft_files(nb_path, NOTEBOOKS_DIR)
+            # Exclude self if this notebook is a CRAFT file
+            nb_path_resolved = Path(nb_path).resolve()
+            craft_paths = [cp for cp in craft_paths if Path(cp).resolve() != nb_path_resolved]
+            if craft_paths:
+                craft_cells = get_craft_code_cells(craft_paths)
+                if craft_cells:
+                    # Mark synchronously to prevent race conditions
+                    _executed_craft.setdefault(nb_id, set()).update(cid for cid, _ in craft_cells)
+                    print(f"[CRAFT] Re-executing {len(craft_cells)} code cells after kernel restart", flush=True)
+                    async def _run_craft():
+                        for cid, src in craft_cells:
+                            try:
+                                cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
+                                async for _ in kernel_service.execute_cell(nb_id, cell):
+                                    pass
+                                print(f"[CRAFT] Executed: {cid}", flush=True)
+                            except Exception as e:
+                                print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
+                        print(f"[CRAFT] All cells re-executed for {nb_id}", flush=True)
+                    asyncio.create_task(_run_craft())
+
     return Div("✓ Kernel restarted", cls="status success")
 
 @rt("/notebook/{nb_id}/kernel/interrupt")
@@ -2606,6 +2752,21 @@ async def post(dlg_name: str, data_id: str, timeout: int = 15):
         return data
     except asyncio.TimeoutError:
         return {"error": "timeout"}
+
+# ============================================================================
+# Markdown Rendering API
+# ============================================================================
+
+@rt("/render-markdown")
+async def post(text: str):
+    """Render markdown to HTML using mistlefoot's ExtendedHtmlRenderer."""
+    try:
+        from mistletoe import markdown as md_render
+        from mistlefoot import ExtendedHtmlRenderer
+        html = md_render(text, ExtendedHtmlRenderer)
+        return {"html": html}
+    except ImportError:
+        return {"html": text}
 
 # ============================================================================
 # WebSocket for Streaming
