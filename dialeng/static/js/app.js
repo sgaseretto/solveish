@@ -208,16 +208,30 @@ function initMonacoEditor(cellId, mode = 'python') {
         scrollbar: { vertical: 'hidden', horizontal: 'auto', alwaysConsumeMouseWheel: false },
     });
 
-    // Auto-resize to content (replaces Ace minLines/maxLines)
+    // Auto-resize to content (replaces Ace minLines/maxLines).
+    // Uses requestAnimationFrame to batch height changes and avoid a feedback loop
+    // where resize → automaticLayout → word-wrap recalc → content size change → resize.
     const minHeight = 60;  // ~3 lines
     const maxHeight = 600; // ~30 lines
+    let _heightRaf = null;
     function updateEditorHeight() {
-        const contentHeight = Math.max(minHeight, Math.min(maxHeight, editor.getContentHeight()));
-        container.style.height = contentHeight + 'px';
-        editor.layout();
+        if (_heightRaf) return;  // already scheduled
+        _heightRaf = requestAnimationFrame(() => {
+            _heightRaf = null;
+            const contentHeight = Math.max(minHeight, Math.min(maxHeight, editor.getContentHeight()));
+            const currentHeight = container.style.height;
+            const newHeight = contentHeight + 'px';
+            if (currentHeight !== newHeight) {
+                container.style.height = newHeight;
+                editor.layout();
+            }
+        });
     }
     editor.onDidContentSizeChange(updateEditorHeight);
-    updateEditorHeight();
+    // Initial sizing (synchronous to avoid flash)
+    const initHeight = Math.max(minHeight, Math.min(maxHeight, editor.getContentHeight()));
+    container.style.height = initHeight + 'px';
+    editor.layout();
 
     // Reveal editor after syntax tokenization (prevents flash of unstyled text).
     // Monaco tokenizes asynchronously after create(). We poll for colored token
@@ -1579,6 +1593,11 @@ function connectWebSocket(notebookId) {
             console.log('[WS] stream_end received for cell:', data.cell_id);
             cancelledCells.delete(data.cell_id);
             finishStreaming(data.cell_id);
+        } else if (data.type === 'prompt_stream_start') {
+            // Prompt cell LLM generation started (e.g., from _add_msg_unsafe with run_mode='run').
+            // Shows "Generating..." indicator so the user knows the LLM is working.
+            console.log('[WS] prompt_stream_start received for cell:', data.cell_id);
+            startStreaming(data.cell_id, false);
         } else if (data.type === 'thinking_start') {
             showThinkingIndicator(data.cell_id);
             resetStreamingTimeout();
@@ -2031,9 +2050,8 @@ function appendCodeOutput(cellId, chunk, streamName) {
     const outputEl = document.getElementById(`output-${cellId}`);
     if (!outputEl) return;
 
-    if (streamName === 'stderr') {
-        outputEl.classList.add('error');
-    }
+    // Note: stderr does NOT mean error — tools like tqdm write progress to stderr.
+    // The 'error' class is only applied by finishCodeStreaming when has_error is true.
 
     // Get current raw text and apply chunk
     let currentText = streamTextContent.get(cellId) || '';

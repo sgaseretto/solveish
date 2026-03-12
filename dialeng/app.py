@@ -52,6 +52,7 @@ from dialeng.ui import (
     AllCellsOOB, CellViewOOB, CellOutputOOB, CellHeaderOOB, AddButtons,
     TypeSelect, CollapseBtn, get_collapse_class, get_cell_state_classes
 )
+from dialeng.ui.mime import render_mime_bundle
 
 # Extension system
 from dialeng.core.extensions import load_extensions
@@ -207,25 +208,12 @@ def _make_state_callback(nb_id: str):
 
 
 async def finalize_cell_execution(nb_id: str, cell, has_error: bool):
-    """Convert cell outputs to HTML string and broadcast final state."""
-    # Convert outputs to HTML string
-    output_parts = []
-    for output in cell.outputs:
-        if output.output_type == 'stream':
-            output_parts.append(ansi_to_html(output.content))
-        elif output.output_type == 'execute_result':
-            if output_parts and output_parts[-1] and not output_parts[-1].endswith('\n'):
-                output_parts.append('\n')
-            output_parts.append(ansi_to_html(output.content))
-        elif output.output_type == 'error':
-            tb_text = '\n'.join(output.traceback or [])
-            output_parts.append(ansi_to_html(tb_text))
-        elif output.output_type in ('display_data', 'update_display_data'):
-            html_content = render_mime_bundle(output.content, output.metadata)
-            output_parts.append(html_content)
-        # clear_output and other transient types are skipped in final HTML
+    """Broadcast final cell state via OOB swaps after execution completes.
 
-    cell.output = ''.join(output_parts)
+    Note: We preserve cell.outputs as-is from kernel streaming rather than
+    flattening to a string via cell.output setter, which would destroy
+    structured outputs (display_data, MIME bundles, etc.).
+    """
     cell.time_run = datetime.now().strftime("%H:%M:%S")
 
     # Send code_stream_end signal
@@ -407,137 +395,6 @@ def save_notebook(notebook_id: str):
 
 def list_notebooks() -> List[str]:
     return [p.stem for p in NOTEBOOKS_DIR.glob("*.ipynb")]
-
-def render_mime_bundle(data: dict, metadata: dict = None) -> str:
-    """
-    Convert Jupyter MIME bundle to HTML.
-    Priority: text/html > image/svg+xml > image/png > image/jpeg > text/markdown > text/plain
-
-    Args:
-        data: Dict with MIME types as keys and content as values
-        metadata: Optional dict with rendering hints (width, height, etc.)
-
-    Returns:
-        HTML string for rendering
-    """
-    import html as html_module
-    metadata = metadata or {}
-
-    # HTML - render directly (trusted user code, matches Jupyter behavior)
-    if 'text/html' in data:
-        return f'<div class="mime-html">{data["text/html"]}</div>'
-
-    # SVG - render inline
-    if 'image/svg+xml' in data:
-        return f'<div class="mime-svg">{data["image/svg+xml"]}</div>'
-
-    # PNG image - base64 data URL
-    if 'image/png' in data:
-        width = metadata.get('width', '')
-        height = metadata.get('height', '')
-        style_parts = []
-        if width:
-            style_parts.append(f'width:{width}px')
-        if height:
-            style_parts.append(f'height:{height}px')
-        style = ';'.join(style_parts)
-        style_attr = f' style="{style}"' if style else ''
-        # Strip newlines from base64 data (Jupyter wire protocol may include them)
-        b64 = data["image/png"].replace('\n', '').replace('\r', '')
-        return f'<img class="mime-image" src="data:image/png;base64,{b64}"{style_attr} />'
-
-    # JPEG image
-    if 'image/jpeg' in data:
-        b64 = data["image/jpeg"].replace('\n', '').replace('\r', '')
-        return f'<img class="mime-image" src="data:image/jpeg;base64,{b64}" />'
-
-    # GIF image
-    if 'image/gif' in data:
-        b64 = data["image/gif"].replace('\n', '').replace('\r', '')
-        return f'<img class="mime-image" src="data:image/gif;base64,{b64}" />'
-
-    # Markdown - convert to HTML using mistlefoot for extended features
-    if 'text/markdown' in data:
-        try:
-            from mistletoe import markdown as md_render
-            from mistlefoot import ExtendedHtmlRenderer
-            html = md_render(data['text/markdown'], ExtendedHtmlRenderer)
-            return f'<div class="mime-markdown">{html}</div>'
-        except ImportError:
-            return f'<div class="mime-markdown">{data["text/markdown"]}</div>'
-
-    # LaTeX - wrap for MathJax/KaTeX processing
-    if 'text/latex' in data:
-        return f'<div class="mime-latex">{html_module.escape(data["text/latex"])}</div>'
-
-    # JSON - pretty print
-    if 'application/json' in data:
-        json_str = json.dumps(data['application/json'], indent=2)
-        return f'<pre class="mime-json">{html_module.escape(json_str)}</pre>'
-
-    # Plain text fallback
-    if 'text/plain' in data:
-        return f'<pre class="mime-text">{html_module.escape(data["text/plain"])}</pre>'
-
-    # Unknown format - show raw
-    return f'<pre class="mime-unknown">{html_module.escape(str(data))}</pre>'
-
-
-def ansi_to_html(text: str) -> str:
-    """
-    Convert ANSI escape codes to HTML spans with inline styles.
-
-    Handles common ANSI codes for colors (30-37, 90-97), backgrounds (40-47),
-    bold (1), and reset (0).
-    """
-    import re
-    import html as html_module
-
-    ANSI_COLORS = {
-        '30': '#000', '31': '#c00', '32': '#0a0', '33': '#a50',
-        '34': '#00a', '35': '#a0a', '36': '#0aa', '37': '#aaa',
-        '90': '#555', '91': '#f55', '92': '#5f5', '93': '#ff5',
-        '94': '#55f', '95': '#f5f', '96': '#5ff', '97': '#fff',
-    }
-    ANSI_BG_COLORS = {
-        '40': '#000', '41': '#c00', '42': '#0a0', '43': '#a50',
-        '44': '#00a', '45': '#a0a', '46': '#0aa', '47': '#aaa',
-    }
-
-    result = []
-    open_spans = 0
-
-    # Split by ANSI escape sequences
-    parts = re.split(r'(\x1b\[[0-9;]*m)', text)
-
-    for part in parts:
-        match = re.match(r'\x1b\[([0-9;]*)m', part)
-        if match:
-            codes = match.group(1).split(';')
-            for code in codes:
-                if code == '0' or code == '':
-                    # Reset all styles
-                    while open_spans > 0:
-                        result.append('</span>')
-                        open_spans -= 1
-                elif code == '1':
-                    result.append('<span style="font-weight:bold">')
-                    open_spans += 1
-                elif code in ANSI_COLORS:
-                    result.append(f'<span style="color:{ANSI_COLORS[code]}">')
-                    open_spans += 1
-                elif code in ANSI_BG_COLORS:
-                    result.append(f'<span style="background:{ANSI_BG_COLORS[code]}">')
-                    open_spans += 1
-        else:
-            result.append(html_module.escape(part))
-
-    # Close any remaining open spans
-    while open_spans > 0:
-        result.append('</span>')
-        open_spans -= 1
-
-    return ''.join(result)
 
 
 def _deduplicate_response_text(text: str) -> str:
@@ -1793,6 +1650,17 @@ async def post(nb_id: str, cid: str, source: str = None):
         pre_tool_text = []  # Text before first tool call
         post_tool_text = []  # Text after last tool_result (potential final response or more reasoning)
 
+        # Notify clients that this prompt cell is now generating.
+        # This is needed for cells created programmatically (e.g., via _add_msg_unsafe
+        # with run_mode='run') where no UI button click triggers startStreaming().
+        if nb_id in ws_connections and ws_connections[nb_id]:
+            msg = json.dumps({"type": "prompt_stream_start", "cell_id": cid})
+            for send in list(ws_connections[nb_id]):
+                try:
+                    await send(msg)
+                except:
+                    pass
+
         try:
             async for item in stream_func:
                 # Check if cancelled
@@ -2259,8 +2127,24 @@ async def post(dlg_name: str, content: str, placement: str = "add_after", id_: s
     # Optionally trigger execution (support both old 'run' and new 'run_mode')
     should_run = _str_to_bool(run) or run_mode
     if should_run:
-        queue = get_execution_queue(dlg_name)
-        queue.queue_cell(dlg_name, new_cell)
+        if new_cell.cell_type == "prompt":
+            # Prompt cells need LLM execution, not Python kernel.
+            # Fire-and-forget via background task so /add_relative_ returns immediately
+            # (otherwise the caller times out waiting for the LLM to finish streaming).
+            async def _run_prompt():
+                import httpx
+                async with httpx.AsyncClient() as client:
+                    try:
+                        await client.post(
+                            f'http://localhost:8000/notebook/{dlg_name}/cell/{new_cell.id}/run',
+                            timeout=300.0
+                        )
+                    except Exception as e:
+                        print(f"[ADD_RELATIVE] Prompt run failed: {e}", flush=True)
+            asyncio.create_task(_run_prompt())
+        else:
+            queue = get_execution_queue(dlg_name)
+            queue.queue_cell(dlg_name, new_cell)
 
     # New dialoghelper expects JSON with 'id' key (res['id'])
     return {"id": new_cell.id}

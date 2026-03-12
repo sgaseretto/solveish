@@ -170,11 +170,22 @@ class SubprocessKernel(BaseKernel):
 
                 elif msg_type == 'execute_result':
                     data = msg.get('data', {})
-                    yield CellOutput(
-                        output_type='execute_result',
-                        content=data.get('text/plain', ''),
-                        metadata=msg.get('metadata')
-                    )
+                    # If result has rich MIME types (HTML, images, etc.),
+                    # emit as display_data to preserve the full bundle.
+                    # Otherwise keep as plain text execute_result.
+                    rich_types = {'text/html', 'image/png', 'image/jpeg', 'image/svg+xml', 'image/gif'}
+                    if rich_types & set(data.keys()):
+                        yield CellOutput(
+                            output_type='display_data',
+                            content=data,
+                            metadata=msg.get('metadata')
+                        )
+                    else:
+                        yield CellOutput(
+                            output_type='execute_result',
+                            content=data.get('text/plain', ''),
+                            metadata=msg.get('metadata')
+                        )
 
                 elif msg_type == 'error':
                     yield CellOutput(
