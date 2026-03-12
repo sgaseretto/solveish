@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Subdirectory Notebook Navigation & Clean URLs
+- Subdirectory notebooks now open correctly from the file explorer via `?name=path/to/notebook` query parameter URLs instead of `_`-encoded path IDs
+- Added `nbApiPath()` JS helper that uses `window.NOTEBOOK_ID` for reliable API calls regardless of URL format
+- Added `_render_notebook_page()` shared rendering function used by both `/notebook/{nb_id}` and `/notebook/?name=...` routes
+- Added `_nb_id_from_path()` and `_find_notebook_by_name()` for bidirectional path/ID resolution
+
+#### Demo Project for CRAFT/TEMPLATE
+- Created `notebooks/demo_project/` with hierarchical CRAFT and TEMPLATE examples
+- Parent-level `CRAFT.ipynb` with project banner and shared imports
+- Child `data_analysis/CRAFT.ipynb` with data science stack (numpy, pandas, matplotlib)
+- Parent and child `TEMPLATE.ipynb` files demonstrating cell prepending hierarchy
+
+### Changed
+
+- File explorer links now use `href="/notebook/?name=..."` with human-readable paths instead of `_`-encoded IDs
+- `_jupyter_to_cell()` in `document/serialization.py` now resolves cell IDs with fallback chain: `metadata.id → cell-level id → random UUID` for stable cell ID round-tripping with standard Jupyter notebooks
+
+### Fixed
+
+- **Subdirectory notebooks not opening** — `_find_notebook_path()` now uses rglob + `_nb_id_from_path()` comparison instead of searching for `{encoded_id}.ipynb` on disk
+- **Cell buttons and Shift+Enter broken after URL change** — replaced all 10 `window.location.pathname` usages in `app.js` with `nbApiPath()` helper
+- **Subdirectory notebooks connecting to wrong kernel** — `get_notebook()` and `_find_notebook_by_name()` now set `nb.id` to the `_`-encoded notebook ID after loading, preventing identity mismatch (e.g., `template_test_hello_test` vs `test`)
+- **CRAFT double execution on page load** — HTMX causes two GET requests per navigation; both would race to launch CRAFT execution. Fixed by marking all CRAFT cell IDs in `_executed_craft` synchronously before dispatching the async task
+- **CRAFT.ipynb executing its own code** — opening a CRAFT notebook no longer auto-executes its own code cells; only parent CRAFT files in the hierarchy are executed (self-exclusion via path comparison)
+- **CRAFT cell ID instability** — `_jupyter_to_cell()` previously only checked `metadata.id`, generating random UUIDs for standard Jupyter cells that store `id` at cell level. Fixed fallback chain prevents CRAFT execution tracking from breaking across reloads
+- **CRAFT not re-executing after kernel restart** — kernel restart route now calls `reset_craft_tracking()` and re-triggers CRAFT execution with the same self-exclusion and synchronous marking protections
+- **Layout broken after Titled() removal** — restored `Titled()` in `ui/layout.py` (provides `<main class="container">` wrapper needed for sidebar layout), added CSS to hide the H1
+
 #### safepyrun Integration
 - Added `pyrun` as a built-in LLM tool for safe sandboxed Python execution via [safepyrun](https://github.com/AnswerDotAI/safepyrun)
 - The AI can now execute Python code safely during prompt responses without the `&` prefix

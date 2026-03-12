@@ -124,16 +124,48 @@ sequenceDiagram
 
 When a notebook is opened (`GET /notebook/{nb_id}`), CRAFT code cells are executed in the background:
 
-1. `find_craft_files()` locates CRAFT files
-2. `get_craft_code_cells()` extracts code cell source + IDs
-3. Cells not yet executed for this notebook (tracked in `_executed_craft` dict) are run via `kernel_service.execute_cell()`
-4. Execution happens in `asyncio.create_task()` so it doesn't block page load
+1. `find_craft_files()` locates CRAFT files in the hierarchy
+2. **Self-exclusion**: If the notebook being opened is itself a `CRAFT.ipynb`, it is filtered out of the discovered CRAFT paths — only parent CRAFT files are executed, never the notebook's own code cells
+3. `get_craft_code_cells()` extracts code cell source + IDs
+4. Cells not yet executed for this notebook (tracked in `_executed_craft` dict) are identified
+5. **Synchronous marking**: All unexecuted cell IDs are added to `_executed_craft` immediately (before the async task starts) to prevent double execution from HTMX's double page loads
+6. Execution happens in `asyncio.create_task()` so it doesn't block page load
 
 This ensures that CRAFT setup code (imports, helper functions, environment config) is available in the kernel before the user starts working.
 
 ### Tracking
 
 A module-level `_executed_craft: Dict[str, Set[str]]` maps notebook IDs to sets of executed CRAFT cell IDs. This prevents re-execution on page refresh.
+
+**Cell ID stability** is critical for tracking. `_jupyter_to_cell` in `document/serialization.py` resolves cell IDs with fallback: `metadata.id → cell-level id → random UUID`. Standard Jupyter notebooks store the `id` at cell level (not in metadata), so the fallback ensures consistent IDs across loads.
+
+### Double Execution Prevention
+
+HTMX causes two GET requests per navigation (initial load + WebSocket reconnection). Both calls to `_render_notebook_page` would race to check `_executed_craft` and both could launch CRAFT execution. The fix marks all cells as executed **synchronously** before dispatching the async task:
+
+```python
+# Mark synchronously to prevent second page load from re-triggering
+_executed_craft.setdefault(nb_id, set()).update(cid for cid, _ in unexecuted)
+# Then execute asynchronously
+asyncio.create_task(_run_craft())
+```
+
+### Self-Execution Prevention
+
+When opening a CRAFT.ipynb file directly (e.g., to edit it), the notebook should not execute its own code cells. Only parent CRAFT files in the hierarchy should run. This is achieved by filtering the CRAFT paths before processing:
+
+```python
+nb_path_resolved = Path(nb_path).resolve()
+craft_paths = [cp for cp in craft_paths if Path(cp).resolve() != nb_path_resolved]
+```
+
+### Kernel Restart
+
+When a kernel is restarted (`POST /notebook/{nb_id}/kernel/restart`):
+
+1. `reset_craft_tracking(nb_id)` clears the `_executed_craft` entry for the notebook
+2. CRAFT code cells are re-discovered and re-executed with the same self-exclusion and synchronous marking protections
+3. This ensures the fresh kernel has all CRAFT setup code available
 
 ## AUTORUN Folder
 

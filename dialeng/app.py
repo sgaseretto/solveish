@@ -1119,11 +1119,18 @@ async def _render_notebook_page(nb_id: str):
     if nb_path and Path(nb_path).exists():
         from dialeng.services.craft_service import find_craft_files, get_craft_code_cells, _executed_craft
         craft_paths = find_craft_files(nb_path, NOTEBOOKS_DIR)
+        # If this notebook IS a CRAFT file, exclude it from its own CRAFT paths
+        # (only run parent CRAFT files, not self)
+        nb_path_resolved = Path(nb_path).resolve()
+        craft_paths = [cp for cp in craft_paths if Path(cp).resolve() != nb_path_resolved]
         if craft_paths:
             craft_cells = get_craft_code_cells(craft_paths)
             executed = _executed_craft.get(nb_id, set())
             unexecuted = [(cid, src) for cid, src in craft_cells if cid not in executed]
             if unexecuted:
+                # Mark all cells as executed synchronously to prevent double execution
+                # from HTMX double page loads
+                _executed_craft.setdefault(nb_id, set()).update(cid for cid, _ in unexecuted)
                 print(f"[CRAFT] Executing {len(unexecuted)} code cells for {nb_id} from {len(craft_paths)} CRAFT file(s)", flush=True)
                 for cp in craft_paths:
                     print(f"[CRAFT]   - {cp}", flush=True)
@@ -1133,7 +1140,6 @@ async def _render_notebook_page(nb_id: str):
                             cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
                             async for _ in kernel_service.execute_cell(nb_id, cell):
                                 pass
-                            _executed_craft.setdefault(nb_id, set()).add(cid)
                             print(f"[CRAFT] Executed: {cid}", flush=True)
                         except Exception as e:
                             print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
@@ -2028,6 +2034,43 @@ async def post(nb_id: str):
     """Restart the kernel for a specific notebook."""
     await broadcast_kernel_status(nb_id, "restarting")
     await kernel_service.restart_async(nb_id)
+
+    # Clear CRAFT execution tracking so CRAFT cells re-execute on next page load
+    from dialeng.services.craft_service import reset_craft_tracking
+    reset_craft_tracking(nb_id)
+    print(f"[CRAFT] Reset execution tracking for {nb_id} (kernel restart)", flush=True)
+
+    # Re-run CRAFT code cells in the fresh kernel
+    nb = notebooks.get(nb_id)
+    if nb:
+        nb_path = nb.path
+        if not nb_path:
+            found = _find_notebook_path(nb_id)
+            nb_path = found if found else NOTEBOOKS_DIR / f"{nb_id}.ipynb"
+        if nb_path and Path(nb_path).exists():
+            from dialeng.services.craft_service import find_craft_files, get_craft_code_cells, _executed_craft
+            craft_paths = find_craft_files(nb_path, NOTEBOOKS_DIR)
+            # Exclude self if this notebook is a CRAFT file
+            nb_path_resolved = Path(nb_path).resolve()
+            craft_paths = [cp for cp in craft_paths if Path(cp).resolve() != nb_path_resolved]
+            if craft_paths:
+                craft_cells = get_craft_code_cells(craft_paths)
+                if craft_cells:
+                    # Mark synchronously to prevent race conditions
+                    _executed_craft.setdefault(nb_id, set()).update(cid for cid, _ in craft_cells)
+                    print(f"[CRAFT] Re-executing {len(craft_cells)} code cells after kernel restart", flush=True)
+                    async def _run_craft():
+                        for cid, src in craft_cells:
+                            try:
+                                cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
+                                async for _ in kernel_service.execute_cell(nb_id, cell):
+                                    pass
+                                print(f"[CRAFT] Executed: {cid}", flush=True)
+                            except Exception as e:
+                                print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
+                        print(f"[CRAFT] All cells re-executed for {nb_id}", flush=True)
+                    asyncio.create_task(_run_craft())
+
     return Div("✓ Kernel restarted", cls="status success")
 
 @rt("/notebook/{nb_id}/kernel/interrupt")
