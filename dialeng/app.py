@@ -1020,15 +1020,26 @@ def get(dir: str = "", name: str = ""):
 
     # Derive URL-safe ID from path: "subfolder/test.ipynb" → "subfolder_test"
     new_id = _nb_id_from_path(file_path)
+
+    # If this notebook already exists in memory (e.g., re-creation after delete),
+    # remove the stale version so we get fresh template cells
+    notebooks.pop(new_id, None)
+
     nb = Notebook(id=new_id, title=display_name,
                   dialog_mode=DEFAULT_DIALOG_MODE, model=DEFAULT_MODEL)
 
-    # Try to load cells from TEMPLATE.ipynb
+    # Load cells from TEMPLATE.ipynb (parent-first hierarchy)
     from dialeng.services.template_service import find_templates, load_template_cells
     template_paths = find_templates(target_dir, NOTEBOOKS_DIR)
     if template_paths:
         template_cells = load_template_cells(template_paths)
-        nb.cells = template_cells if template_cells else [Cell(cell_type="note", source="# New Notebook\n\nStart writing here...")]
+        if template_cells:
+            nb.cells = template_cells
+            print(f"[TEMPLATE] Applied {len(template_cells)} cells from {len(template_paths)} template(s) to {new_id}", flush=True)
+            for tp in template_paths:
+                print(f"[TEMPLATE]   - {tp}", flush=True)
+        else:
+            nb.cells = [Cell(cell_type="note", source="# New Notebook\n\nStart writing here...")]
     else:
         nb.cells = [Cell(cell_type="note", source="# New Notebook\n\nStart writing here...")]
 
@@ -1097,7 +1108,14 @@ async def _render_notebook_page(nb_id: str):
     nb = get_notebook(nb_id)
 
     # Auto-execute CRAFT code cells (non-blocking background task)
-    nb_path = nb.path if nb.path else NOTEBOOKS_DIR / f"{nb_id}.ipynb"
+    # Determine notebook path for CRAFT discovery: use nb.path, or find on disk
+    nb_path = nb.path
+    if not nb_path:
+        found = _find_notebook_path(nb_id)
+        nb_path = found if found else NOTEBOOKS_DIR / f"{nb_id}.ipynb"
+        if found:
+            nb.path = found  # Cache for future use
+
     if nb_path and Path(nb_path).exists():
         from dialeng.services.craft_service import find_craft_files, get_craft_code_cells, _executed_craft
         craft_paths = find_craft_files(nb_path, NOTEBOOKS_DIR)
@@ -1106,6 +1124,9 @@ async def _render_notebook_page(nb_id: str):
             executed = _executed_craft.get(nb_id, set())
             unexecuted = [(cid, src) for cid, src in craft_cells if cid not in executed]
             if unexecuted:
+                print(f"[CRAFT] Executing {len(unexecuted)} code cells for {nb_id} from {len(craft_paths)} CRAFT file(s)", flush=True)
+                for cp in craft_paths:
+                    print(f"[CRAFT]   - {cp}", flush=True)
                 async def _run_craft():
                     for cid, src in unexecuted:
                         try:
@@ -1113,8 +1134,10 @@ async def _render_notebook_page(nb_id: str):
                             async for _ in kernel_service.execute_cell(nb_id, cell):
                                 pass
                             _executed_craft.setdefault(nb_id, set()).add(cid)
+                            print(f"[CRAFT] Executed: {cid}", flush=True)
                         except Exception as e:
-                            print(f"[CRAFT] Error executing cell {cid}: {e}")
+                            print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
+                    print(f"[CRAFT] All cells executed for {nb_id}", flush=True)
                 asyncio.create_task(_run_craft())
 
     nb_list = list_notebooks() or [nb_id]

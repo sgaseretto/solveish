@@ -212,9 +212,10 @@ def _jupyter_to_cell(jcell: dict, index: int = 0) -> Cell:
     if cell_type == CellType.PROMPT and output:
         outputs = [CellOutput(output_type='stream', content=output, stream_name='stdout')]
 
-    # Create cell
+    # Create cell — check both metadata.id (Dialeng convention) and cell-level id (Jupyter standard)
+    cell_id = metadata.get('id') or jcell.get('id') or uuid.uuid4().hex[:8]
     cell = Cell(
-        id=metadata.get('id', uuid.uuid4().hex[:8]),
+        id=cell_id,
         cell_type=cell_type,
         source=source,
         outputs=outputs,
