@@ -191,11 +191,15 @@ pyrun("[x**2 for x in range(10)]")
 
 Key features:
 - **Allowlist-based**: Only permitted callables are accessible (re, json, math, pathlib, etc.)
-- **State persistence**: Variables/functions ending with `_` persist across calls
+- **State persistence**: Variables/functions ending with `_` persist across calls (non-`_` names are discarded)
 - **Write policies**: The Dialeng instance allows writes relative to cwd via `ok_dests=['.']`
 - **Async-native**: Supports `await`, `async for`, `async with`
 
-See `notebooks/safepyrun_demo.ipynb` for a comprehensive walkthrough.
+Limitations:
+- **`_` suffix required**: Only names ending with `_` persist across calls and are callable. `def hello(x): ...` won't be available in subsequent calls — use `def hello_(x): ...` instead.
+- **No recursive functions**: Functions defined inside `pyrun` cannot call themselves recursively, even with the `_` suffix. This is a Python `exec()` limitation, not a safepyrun design choice. Use iterative implementations instead.
+
+See `notebooks/safepyrun_demo.ipynb` and `docs/how_it_works/18_safepyrun_integration.md` for details.
 
 ## Tool Loop
 

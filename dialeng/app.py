@@ -318,12 +318,66 @@ def _load_notebook(path: str) -> Notebook:
     return nb
 
 
+def _nb_id_from_path(path: Path) -> str:
+    """Derive a URL-safe notebook ID from a file path.
+
+    Uses the file stem for root notebooks, and dir_stem for subdirectory ones.
+    Examples: notebooks/test.ipynb → 'test'
+              notebooks/subfolder/test.ipynb → 'subfolder_test'
+              notebooks/a/b/test.ipynb → 'a_b_test'
+    """
+    try:
+        rel = path.resolve().relative_to(NOTEBOOKS_DIR.resolve())
+    except ValueError:
+        return path.stem
+    parts = list(rel.parts)
+    parts[-1] = rel.stem  # Remove .ipynb extension
+    return "_".join(parts) if len(parts) > 1 else parts[0]
+
+def _find_notebook_path(notebook_id: str) -> Optional[Path]:
+    """Find a notebook file by ID, checking root first then subdirectories."""
+    # Check root directly (most common case)
+    root_path = NOTEBOOKS_DIR / f"{notebook_id}.ipynb"
+    if root_path.exists():
+        return root_path
+    # Check if an in-memory notebook has a path set
+    if notebook_id in notebooks and notebooks[notebook_id].path:
+        p = Path(notebooks[notebook_id].path)
+        if p.exists():
+            return p
+    # Reverse the _ encoding: scan all notebooks and find the one whose
+    # _nb_id_from_path matches this notebook_id
+    for p in NOTEBOOKS_DIR.rglob("*.ipynb"):
+        if any(part.startswith('.') or part == '__pycache__' for part in p.relative_to(NOTEBOOKS_DIR).parts):
+            continue
+        if _nb_id_from_path(p) == notebook_id:
+            return p
+    return None
+
+def _find_notebook_by_name(name: str) -> Optional[str]:
+    """Find a notebook by its relative path name (e.g., 'subfolder/test').
+
+    Returns the notebook ID if found (loading it if necessary), or None.
+    """
+    target = NOTEBOOKS_DIR / f"{name}.ipynb"
+    if not target.exists() or not target.resolve().is_relative_to(NOTEBOOKS_DIR.resolve()):
+        return None
+    nb_id = _nb_id_from_path(target)
+    # Load into memory if not already
+    if nb_id not in notebooks:
+        nb = _load_notebook(target)
+        nb.id = nb_id  # Ensure ID matches the URL-safe key, not just the filename stem
+        notebooks[nb_id] = nb
+    return nb_id
+
 def get_notebook(notebook_id: str) -> Notebook:
     """Get or create a notebook - ALWAYS requires notebook_id"""
     if notebook_id not in notebooks:
-        path = NOTEBOOKS_DIR / f"{notebook_id}.ipynb"
-        if path.exists():
-            notebooks[notebook_id] = _load_notebook(path)
+        path = _find_notebook_path(notebook_id)
+        if path:
+            nb = _load_notebook(path)
+            nb.id = notebook_id  # Ensure ID matches the URL-safe key
+            notebooks[notebook_id] = nb
         else:
             nb = Notebook(id=notebook_id, title=notebook_id,
                          dialog_mode=DEFAULT_DIALOG_MODE, model=DEFAULT_MODEL)
@@ -346,8 +400,10 @@ def get_notebook(notebook_id: str) -> Notebook:
 
 def save_notebook(notebook_id: str):
     if notebook_id in notebooks:
-        path = NOTEBOOKS_DIR / f"{notebook_id}.ipynb"
-        notebooks[notebook_id].save(str(path))
+        nb = notebooks[notebook_id]
+        # Use existing path if set (preserves subdirectory location), else default to root
+        path = nb.path if nb.path else NOTEBOOKS_DIR / f"{notebook_id}.ipynb"
+        nb.save(str(path))
 
 def list_notebooks() -> List[str]:
     return [p.stem for p in NOTEBOOKS_DIR.glob("*.ipynb")]
@@ -938,19 +994,37 @@ def get():
     return RedirectResponse("/notebook/default", status_code=302)
 
 @rt("/notebook/")
-def get():
-    """Redirect /notebook/ (with trailing slash) to /notebook/default."""
+async def get(name: str = ""):
+    """Handle /notebook/ and /notebook?name=path/to/notebook.
+
+    With name param: resolve the path to a notebook ID and render directly
+    (keeps the clean URL in the browser). Supports solveit-style URLs.
+    Without: redirect to default notebook.
+    """
+    if name:
+        nb_id = _find_notebook_by_name(name)
+        if not nb_id:
+            # Notebook not found at that path — create it
+            dir_part = str(Path(name).parent) if '/' in name else ""
+            name_part = Path(name).name
+            return RedirectResponse(f"/notebook/new?dir={dir_part}&name={name_part}", status_code=302)
+        # Render the notebook page directly (same as /notebook/{nb_id})
+        return await _render_notebook_page(nb_id)
     return RedirectResponse("/notebook/default", status_code=302)
 
 @rt("/notebook/new")
 def get(dir: str = "", name: str = ""):
-    new_id = name.strip() if name.strip() else uuid.uuid4().hex[:8]
-    nb = Notebook(id=new_id, title=new_id,
+    display_name = name.strip() if name.strip() else uuid.uuid4().hex[:8]
+    target_dir = NOTEBOOKS_DIR / dir if dir else NOTEBOOKS_DIR
+    file_path = target_dir / f"{display_name}.ipynb"
+
+    # Derive URL-safe ID from path: "subfolder/test.ipynb" → "subfolder_test"
+    new_id = _nb_id_from_path(file_path)
+    nb = Notebook(id=new_id, title=display_name,
                   dialog_mode=DEFAULT_DIALOG_MODE, model=DEFAULT_MODEL)
 
     # Try to load cells from TEMPLATE.ipynb
     from dialeng.services.template_service import find_templates, load_template_cells
-    target_dir = NOTEBOOKS_DIR / dir if dir else NOTEBOOKS_DIR
     template_paths = find_templates(target_dir, NOTEBOOKS_DIR)
     if template_paths:
         template_cells = load_template_cells(template_paths)
@@ -958,9 +1032,13 @@ def get(dir: str = "", name: str = ""):
     else:
         nb.cells = [Cell(cell_type="note", source="# New Notebook\n\nStart writing here...")]
 
+    # Set path so save_notebook writes to the correct subdirectory
+    nb.path = file_path
     notebooks[new_id] = nb
     save_notebook(new_id)
-    return RedirectResponse(f"/notebook/{new_id}", status_code=302)
+    # Redirect to clean name-based URL
+    nb_name = f"{dir}/{display_name}" if dir else display_name
+    return RedirectResponse(f"/notebook/?name={nb_name}", status_code=302)
 
 # ============================================================================
 # File Explorer Routes
@@ -1014,16 +1092,13 @@ def post(path: str = ""):
 # Notebook Routes
 # ============================================================================
 
-@rt("/notebook/{nb_id}")
-async def get(nb_id: str):
-    # Guard against empty notebook_id (can happen with trailing slash routing)
-    if not nb_id or not nb_id.strip():
-        return RedirectResponse("/notebook/default", status_code=302)
+async def _render_notebook_page(nb_id: str):
+    """Render a notebook page by ID (shared by /notebook/{nb_id} and /notebook/?name=...)."""
     nb = get_notebook(nb_id)
 
     # Auto-execute CRAFT code cells (non-blocking background task)
-    nb_path = NOTEBOOKS_DIR / f"{nb_id}.ipynb"
-    if nb_path.exists():
+    nb_path = nb.path if nb.path else NOTEBOOKS_DIR / f"{nb_id}.ipynb"
+    if nb_path and Path(nb_path).exists():
         from dialeng.services.craft_service import find_craft_files, get_craft_code_cells, _executed_craft
         craft_paths = find_craft_files(nb_path, NOTEBOOKS_DIR)
         if craft_paths:
@@ -1043,9 +1118,7 @@ async def get(nb_id: str):
                 asyncio.create_task(_run_craft())
 
     nb_list = list_notebooks() or [nb_id]
-    # Pass config for settings sidebar
     config = get_config()
-    # Check kernel status for this notebook and all notebooks (for file explorer)
     nb_kernel_alive = kernel_service.kernel_is_alive(nb_id)
     kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
     return NotebookPage(nb, nb_list, AVAILABLE_DIALOG_MODES, AVAILABLE_MODELS, config,
@@ -1055,6 +1128,12 @@ async def get(nb_id: str):
                         notebooks_dir=NOTEBOOKS_DIR,
                         kernel_alive=nb_kernel_alive,
                         kernel_notebooks=kernel_nbs)
+
+@rt("/notebook/{nb_id}")
+async def get(nb_id: str):
+    if not nb_id or not nb_id.strip():
+        return RedirectResponse("/notebook/default", status_code=302)
+    return await _render_notebook_page(nb_id)
 
 @rt("/notebook/{nb_id}/save")
 def post(nb_id: str):

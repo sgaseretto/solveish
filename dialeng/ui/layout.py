@@ -89,8 +89,7 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
         btn_sm_padding = {"compact": "2px 5px", "normal": "4px 8px", "large": "6px 12px"}.get(btn_size, "4px 8px")
         display_style = f":root {{ --notebook-width: {notebook_width}px; --base-font-size: {font_size}px; --btn-padding: {btn_padding}; --btn-font-size: {btn_font}; --btn-sm-padding: {btn_sm_padding}; }}"
 
-    return Titled(
-        f"{nb.title} - Dialeng",
+    return Titled(f"{nb.title} - Dialeng",
         # Display settings as CSS custom properties
         Style(display_style) if display_style else None,
         # Lucide icon sprite sheet (must be in DOM before any <use href="#..."> references)
@@ -172,7 +171,7 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
             cls="main-layout"
         ),
         # New item modal (for file explorer)
-        NewItemModal(str(Path(nb_path).parent.relative_to(notebooks_dir)) if nb_path and notebooks_dir else ""),
+        NewItemModal(),
         # Delete confirmation modal (for file explorer)
         DeleteConfirmModal(),
         # Kernel selection modal (overlay style, hidden by default)

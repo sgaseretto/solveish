@@ -15,6 +15,14 @@
    - OOB (Out-of-Band) swap handling for collaboration
    ========================================================================== */
 
+// ==================== Notebook API Path ====================
+// Returns the base API path for the current notebook, e.g. "/notebook/myid"
+// Uses window.NOTEBOOK_ID so it works regardless of whether the URL is
+// /notebook/myid or /notebook/?name=path/to/notebook
+function nbApiPath() {
+    return `/notebook/${window.NOTEBOOK_ID}`;
+}
+
 // ==================== DialogHelper Bidirectional Data ====================
 // Used by screenshot.js and other dialoghelper event handlers to push data
 // back to Python via the /push_data_blocking_ endpoint.
@@ -406,7 +414,7 @@ function createNewCellAtEnd() {
     // container, destroying all Monaco editors and causing race conditions.
     // Instead, the server broadcasts a cell_add WS message, and the WS
     // handler inserts just the new cell (existing editors untouched).
-    fetch(`${window.location.pathname}/cell/add?pos=${position}&type=code`, {
+    fetch(`${nbApiPath()}/cell/add?pos=${position}&type=code`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
     });
@@ -423,7 +431,7 @@ function addCellAtRow(btn, nbId, cellType) {
     const pos = Array.from(allAddRows).indexOf(addRow);
     if (pos < 0) return;
 
-    fetch(`${window.location.pathname}/cell/add?pos=${pos}&type=${cellType}`, {
+    fetch(`${nbApiPath()}/cell/add?pos=${pos}&type=${cellType}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
     });
@@ -598,7 +606,7 @@ document.addEventListener('keydown', e => {
                 e.preventDefault();
                 setCollapseLevel(currentCellId, 'output', level);
                 // Also save to server
-                fetch(`${window.location.pathname}/cell/${currentCellId}/collapse-section`, {
+                fetch(`${nbApiPath()}/cell/${currentCellId}/collapse-section`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/x-www-form-urlencoded'},
                     body: `section=output&level=${level}`
@@ -608,7 +616,7 @@ document.addEventListener('keydown', e => {
                 // Alt+number: set both to same level
                 setCollapseLevel(currentCellId, 'input', level);
                 setCollapseLevel(currentCellId, 'output', level);
-                fetch(`${window.location.pathname}/cell/${currentCellId}/collapse-section`, {
+                fetch(`${nbApiPath()}/cell/${currentCellId}/collapse-section`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/x-www-form-urlencoded'},
                     body: `section=both&level=${level}`
@@ -673,23 +681,22 @@ document.addEventListener('keydown', e => {
     if (!inInput && !inMonaco) {
         if (mod && e.shiftKey && e.key === 'C') {
             e.preventDefault();
-            htmx.ajax('POST', window.location.pathname + '/cell/add?type=code', {target: '#cells'});
+            htmx.ajax('POST', nbApiPath() + '/cell/add?type=code', {target: '#cells'});
         }
         if (mod && e.shiftKey && e.key === 'N') {
             e.preventDefault();
-            htmx.ajax('POST', window.location.pathname + '/cell/add?type=note', {target: '#cells'});
+            htmx.ajax('POST', nbApiPath() + '/cell/add?type=note', {target: '#cells'});
         }
         if (mod && e.shiftKey && e.key === 'P') {
             e.preventDefault();
-            htmx.ajax('POST', window.location.pathname + '/cell/add?type=prompt', {target: '#cells'});
+            htmx.ajax('POST', nbApiPath() + '/cell/add?type=prompt', {target: '#cells'});
         }
     }
 });
 
 // Toggle cell state (skipped, pinned, is_exported) via server endpoint
 function toggleCellState(cellId, property) {
-    const nbPath = window.location.pathname;
-    fetch(`${nbPath}/cell/${cellId}/toggle/${property}`, {
+    fetch(`${nbApiPath()}/cell/${cellId}/toggle/${property}`, {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'}
     });
@@ -1413,7 +1420,7 @@ function toggleCollapse(cellId) {
         cell.classList.toggle('collapsed');
         // Send update to server
         const isCollapsed = cell.classList.contains('collapsed');
-        fetch(`${window.location.pathname}/cell/${cellId}/collapse`, {
+        fetch(`${nbApiPath()}/cell/${cellId}/collapse`, {
             method: 'POST',
             headers: {'Content-Type': 'application/x-www-form-urlencoded'},
             body: `collapsed=${isCollapsed}`
@@ -1466,7 +1473,7 @@ function cycleCollapseLevel(cellId, section) {
     }
 
     // Send update to server
-    fetch(`${window.location.pathname}/cell/${cellId}/collapse-section`, {
+    fetch(`${nbApiPath()}/cell/${cellId}/collapse-section`, {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: `section=${section}&level=${nextLevel}`
@@ -3023,6 +3030,11 @@ function toggleFileExplorer() {
     }
 }
 
+function refreshFileExplorer() {
+    const currentPath = document.getElementById('current-explorer-path')?.value || '';
+    htmx.ajax('GET', `/files?path=${encodeURIComponent(currentPath)}`, '#file-list-content');
+}
+
 function toggleNewItemModal() {
     const modal = document.getElementById('new-item-modal');
     if (modal) {
@@ -3046,10 +3058,13 @@ function selectNewItemType(type) {
     if (folderBtn) folderBtn.classList.toggle('active', type === 'folder');
 }
 
-function createNewItem(currentPath) {
+function createNewItem() {
     const name = document.getElementById('new-item-name')?.value?.trim();
     const type = document.getElementById('new-item-type')?.value || 'dialog';
     if (!name) return;
+
+    // Read current path from hidden input updated by HTMX folder navigation
+    const currentPath = document.getElementById('current-explorer-path')?.value || '';
 
     if (type === 'folder') {
         // Create folder via HTMX-style fetch
