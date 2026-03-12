@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extracted `ansi_to_html()` from `app.py` into shared `dialeng/ui/mime.py` module, used by both server-side OOB rendering and WebSocket streaming
 - Extracted `render_mime_bundle()` from `app.py` into same shared module for MIME bundle → HTML conversion (text/html, images, SVG, markdown, LaTeX, JSON)
 
+#### Prompt Cell Streaming Feedback
+- Added `prompt_stream_start` WebSocket message sent when a prompt cell begins LLM generation
+- Provides visual "Generating..." indicator and cancel button for prompt cells created programmatically (e.g., via `_add_msg_unsafe` with `run_mode='run'`), where no UI button click would otherwise trigger the streaming state
+
 ### Changed
 
 - `CellOutputOOB` now uses `_render_cell_outputs()` for structured output rendering (display_data, stream, error) instead of wrapping `cell.output` in a single `<pre>` tag

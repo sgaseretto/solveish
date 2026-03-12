@@ -1650,6 +1650,17 @@ async def post(nb_id: str, cid: str, source: str = None):
         pre_tool_text = []  # Text before first tool call
         post_tool_text = []  # Text after last tool_result (potential final response or more reasoning)
 
+        # Notify clients that this prompt cell is now generating.
+        # This is needed for cells created programmatically (e.g., via _add_msg_unsafe
+        # with run_mode='run') where no UI button click triggers startStreaming().
+        if nb_id in ws_connections and ws_connections[nb_id]:
+            msg = json.dumps({"type": "prompt_stream_start", "cell_id": cid})
+            for send in list(ws_connections[nb_id]):
+                try:
+                    await send(msg)
+                except:
+                    pass
+
         try:
             async for item in stream_func:
                 # Check if cancelled

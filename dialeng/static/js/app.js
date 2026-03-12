@@ -1593,6 +1593,11 @@ function connectWebSocket(notebookId) {
             console.log('[WS] stream_end received for cell:', data.cell_id);
             cancelledCells.delete(data.cell_id);
             finishStreaming(data.cell_id);
+        } else if (data.type === 'prompt_stream_start') {
+            // Prompt cell LLM generation started (e.g., from _add_msg_unsafe with run_mode='run').
+            // Shows "Generating..." indicator so the user knows the LLM is working.
+            console.log('[WS] prompt_stream_start received for cell:', data.cell_id);
+            startStreaming(data.cell_id, false);
         } else if (data.type === 'thinking_start') {
             showThinkingIndicator(data.cell_id);
             resetStreamingTimeout();
