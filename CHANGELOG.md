@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Output Rendering Utilities (`dialeng/ui/mime.py`)
+- Extracted `ansi_to_html()` from `app.py` into shared `dialeng/ui/mime.py` module, used by both server-side OOB rendering and WebSocket streaming
+- Extracted `render_mime_bundle()` from `app.py` into same shared module for MIME bundle → HTML conversion (text/html, images, SVG, markdown, LaTeX, JSON)
+
+### Changed
+
+- `CellOutputOOB` now uses `_render_cell_outputs()` for structured output rendering (display_data, stream, error) instead of wrapping `cell.output` in a single `<pre>` tag
+- `finalize_cell_execution()` no longer flattens `cell.outputs` to a string — preserves structured `CellOutput` objects (display_data with MIME bundles, etc.)
+- Monaco editor height auto-resize now uses `requestAnimationFrame` debouncing to prevent layout feedback loops when typing bracket-completing characters
+
+### Fixed
+
+- **`IPython.display.HTML()` producing empty output cells** — `finalize_cell_execution()` was using `cell.output =` setter which destroyed structured `CellOutput` objects (display_data, MIME bundles) by replacing them with a single stream output. The OOB swap then re-rendered the destroyed state. Fixed by preserving the original `cell.outputs` list and using `_render_cell_outputs()` in both `CellOutputOOB` and `CodeCellView`
+- **`execute_result` with rich MIME types not rendering** — `subprocess_kernel.py` now promotes `execute_result` containing rich types (text/html, image/png, etc.) to `display_data`, ensuring objects returned by `IPython.display.HTML()`, pandas DataFrames, and PIL Images render inline
+- **tqdm progress bar showing full history in final output** — Added `_process_carriage_returns()` that processes `\r` (carriage return) to collapse intermediate progress updates, showing only the final completed bar
+- **tqdm/stderr output appearing in red during streaming** — Removed incorrect `error` CSS class addition on stderr stream chunks; many tools (tqdm, warnings, logging) write to stderr without it being an error
+- **Monaco editor visual glitch when typing `"`** — Auto-bracket completion triggered a layout feedback loop (resize → automaticLayout → word-wrap recalc → content size change → resize). Fixed by debouncing `updateEditorHeight` via `requestAnimationFrame` and skipping no-op height changes
+
 #### Subdirectory Notebook Navigation & Clean URLs
 - Subdirectory notebooks now open correctly from the file explorer via `?name=path/to/notebook` query parameter URLs instead of `_`-encoded path IDs
 - Added `nbApiPath()` JS helper that uses `window.NOTEBOOK_ID` for reliable API calls regardless of URL format

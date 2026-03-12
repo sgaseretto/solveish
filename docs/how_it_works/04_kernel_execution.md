@@ -367,6 +367,61 @@ CellOutput(
 )
 ```
 
+## Output Rendering Pipeline
+
+Cell outputs go through two rendering paths: **real-time streaming** (WebSocket) and **final rendering** (OOB swap / page load).
+
+### Real-Time Streaming (Browser)
+
+During execution, output chunks are sent via WebSocket and rendered by JavaScript:
+
+```mermaid
+graph LR
+    KW[Kernel Worker] -->|"CellOutput"| SK[SubprocessKernel]
+    SK -->|"WebSocket JSON"| JS[app.js]
+    JS -->|"code_stream_chunk"| AO["appendCodeOutput()"]
+    JS -->|"code_display_data"| AD["appendDisplayData()"]
+    AO -->|"handles \\r"| DOM[Output DOM]
+    AD --> DOM
+```
+
+- **Stream chunks** go through `appendCodeOutput()` which handles `\r` (carriage return) for progress bars like tqdm — each `\r` overwrites the current line
+- **Display data** (HTML, images) is appended as separate `<div class="display-data">` elements
+- **ANSI codes** are converted to HTML spans with colored styles via `ansiToHtml()` (JS)
+
+### Final Rendering (Server-Side OOB Swap)
+
+When execution completes, `finalize_cell_execution()` broadcasts an OOB swap that replaces the output div:
+
+```mermaid
+graph LR
+    FC["finalize_cell_execution()"] -->|"preserves"| CO["cell.outputs (structured)"]
+    CO --> OOB["CellOutputOOB(cell)"]
+    OOB --> RCO["_render_cell_outputs(cell)"]
+    RCO -->|"stream/execute_result"| PRE["Pre(ansi_to_html(text))"]
+    RCO -->|"display_data"| DIV["Div(render_mime_bundle(data))"]
+    RCO -->|"error"| ERR["Pre(traceback)"]
+```
+
+Key design decisions:
+
+1. **Structured outputs are preserved** — `finalize_cell_execution()` does NOT flatten `cell.outputs` to a string. Previously, `cell.output = ''.join(output_parts)` used the setter which replaced all structured `CellOutput` objects with a single stream output, destroying `display_data` (HTML, images, etc.)
+
+2. **Carriage returns are collapsed** — `_process_carriage_returns()` processes `\r` to show only the final state of each line, matching terminal behavior. Without this, tools like tqdm would show 100+ intermediate progress lines instead of just the final completed bar.
+
+3. **ANSI conversion is shared** — `ansi_to_html()` lives in `dialeng/ui/mime.py` and is used by both `_render_cell_outputs()` (server-side) and the WebSocket streaming path.
+
+4. **stderr is not an error** — Many tools (tqdm, warnings, logging) write to stderr. The `error` CSS class is only applied when the cell actually has an error (`has_error` from `code_stream_end`), not when stderr output is received.
+
+### Shared Rendering Module (`dialeng/ui/mime.py`)
+
+Output rendering utilities are centralized to avoid duplication:
+
+| Function | Used By | Purpose |
+|----------|---------|---------|
+| `ansi_to_html()` | `_render_cell_outputs()` | Convert ANSI escape codes to colored HTML spans |
+| `render_mime_bundle()` | `_render_cell_outputs()`, WebSocket streaming in `app.py` | Convert Jupyter MIME bundles to HTML (priority: text/html > image/svg+xml > image/png > text/markdown > text/plain) |
+
 ## Integration Points
 
 ### Integrating with app.py

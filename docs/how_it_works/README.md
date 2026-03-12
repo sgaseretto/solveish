@@ -50,6 +50,7 @@ These documents are intended for developers who want to:
 | Add new storage backend | [01_state_management.md](01_state_management.md) |
 | Debug code execution | [04_kernel_execution.md](04_kernel_execution.md) |
 | Add streaming outputs | [04_kernel_execution.md](04_kernel_execution.md) |
+| Fix output rendering (MIME, ANSI, progress bars) | [04_kernel_execution.md](04_kernel_execution.md) (Output Rendering Pipeline) |
 | Implement cell queue | [04_kernel_execution.md](04_kernel_execution.md) |
 | Colab kernel internals | [12_colab_kernel.md](12_colab_kernel.md) |
 | Add remote kernel backend | [12_colab_kernel.md](12_colab_kernel.md) → [15_extension_registries.md](15_extension_registries.md) |

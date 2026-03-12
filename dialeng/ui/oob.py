@@ -88,10 +88,12 @@ def CellOutputOOB(cell):
     Only replaces the output div — the Monaco editor DOM is untouched.
     This eliminates FOUST (Flash of Unstyled Text) after execution.
     """
+    from .cells.code_cell import _render_cell_outputs
+
     output_collapse_cls = get_collapse_class(cell.output_collapse)
-    has_error = cell.output and ('Error' in cell.output or 'Traceback' in cell.output)
+    output_elements, has_error = _render_cell_outputs(cell)
     return Div(
-        Pre(NotStr(cell.output), cls="stream-output") if cell.output else "",
+        *output_elements,
         id=f"output-{cell.id}",
         cls=f"cell-output{' error' if has_error else ''} {output_collapse_cls}".strip(),
         data_collapse_section="output",
