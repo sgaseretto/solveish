@@ -24,7 +24,7 @@ A comprehensive guide for developers who want to extend, customize, or contribut
 flowchart TB
     subgraph FastHTML["FastHTML App"]
         subgraph Routes["Routes"]
-            r1["/notebook/{id}"]
+            r1["/dialeng/{id}"]
             r2["/cell/{id}/run"]
             r3["/cell/add"]
             r4["..."]
@@ -240,7 +240,7 @@ def to_html_string(component) -> str:
 
 ```python
 # Example: Adding broadcast to a new route
-@rt("/notebook/{nb_id}/cell/{cid}/custom-action")
+@rt("/dialeng/{nb_id}/cell/{cid}/custom-action")
 async def post(nb_id: str, cid: str):
     nb = get_notebook(nb_id)
     cell = find_cell(nb, cid)
@@ -836,8 +836,8 @@ Dialeng includes comprehensive test notebooks for verifying DialogHelper compati
    ```
 
 2. **Open the test notebooks** in the browser:
-   - Basic tests: `http://localhost:8000/notebook/test_dialoghelper`
-   - Advanced tests: `http://localhost:8000/notebook/test_dialoghelper_advanced`
+   - Basic tests: `http://localhost:8000/dialeng/test_dialoghelper`
+   - Advanced tests: `http://localhost:8000/dialeng/test_dialoghelper_advanced`
 
 3. **Run cells sequentially** (some tests depend on previous cells):
    - The first cell (`setup`) configures the port
@@ -946,10 +946,10 @@ client = Client(app)
 def test_home_redirects():
     response = client.get("/")
     assert response.status_code == 302
-    assert "/notebook/" in response.headers["location"]
+    assert "/dialeng/" in response.headers["location"]
 
 def test_create_notebook():
-    response = client.get("/notebook/new", follow_redirects=False)
+    response = client.get("/dialeng/new", follow_redirects=False)
     assert response.status_code == 302
 
 def test_add_cell():

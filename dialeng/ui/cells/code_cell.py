@@ -96,7 +96,7 @@ def CodeCellView(cell, notebook_id: str):
         # Hidden textarea for form submission - Monaco reads from this
         Textarea(cell.source, name="source", id=f"source-{cell.id}",
                  style="display: none;",
-                 hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/source",
+                 hx_post=f"/dialeng/{notebook_id}/cell/{cell.id}/source",
                  hx_trigger="blur changed", hx_swap="none"),
         # Monaco Editor container - with collapse support
         Div(

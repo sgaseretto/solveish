@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Kernel-First Dialog Opening
+- Kernel selection modal now shows automatically when opening a notebook without an attached kernel
+- Users can browse notebook content without selecting a kernel (view-only mode)
+- Attempting to run a code or prompt cell without a kernel triggers the modal; after selection, CRAFT code cells execute first, then the pending cell runs
+- Kernel status dot (next to notebook title) now reflects initialization state: grey (no kernel), yellow (initializing/CRAFT running), green (connected), red (error)
+- New `POST /dialeng/{nb_id}/kernel/craft-init` endpoint for on-demand CRAFT code cell execution after kernel selection
+- Server-side guard on cell run endpoint returns `HX-Trigger: kernel-required` if no kernel is attached
+
+### Changed
+
+#### URL Path Rename
+- All routes changed from `/notebook/` to `/dialeng/` (e.g., `http://localhost:8000/dialeng/?name=test_capture`)
+
+#### Kernel Selection UX
+- Kernel modal closes immediately on Apply (optimistic UI) — kernel setup runs in background
+- Removed "Kernel: Local Python" status bar message after kernel selection (redundant with toolbar indicator)
+- Kernel status dot increased from 8px to 12px for better visibility
+- CRAFT code cells are no longer auto-executed on page load; deferred until explicit kernel selection
+
+### Added (previous)
+
 #### Output Rendering Utilities (`dialeng/ui/mime.py`)
 - Extracted `ansi_to_html()` from `app.py` into shared `dialeng/ui/mime.py` module, used by both server-side OOB rendering and WebSocket streaming
 - Extracted `render_mime_bundle()` from `app.py` into same shared module for MIME bundle → HTML conversion (text/html, images, SVG, markdown, LaTeX, JSON)
@@ -34,7 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Subdirectory Notebook Navigation & Clean URLs
 - Subdirectory notebooks now open correctly from the file explorer via `?name=path/to/notebook` query parameter URLs instead of `_`-encoded path IDs
 - Added `nbApiPath()` JS helper that uses `window.NOTEBOOK_ID` for reliable API calls regardless of URL format
-- Added `_render_notebook_page()` shared rendering function used by both `/notebook/{nb_id}` and `/notebook/?name=...` routes
+- Added `_render_notebook_page()` shared rendering function used by both `/dialeng/{nb_id}` and `/dialeng/?name=...` routes
 - Added `_nb_id_from_path()` and `_find_notebook_by_name()` for bidirectional path/ID resolution
 
 #### Demo Project for CRAFT/TEMPLATE
@@ -45,7 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- File explorer links now use `href="/notebook/?name=..."` with human-readable paths instead of `_`-encoded IDs
+- File explorer links now use `href="/dialeng/?name=..."` with human-readable paths instead of `_`-encoded IDs
 - `_jupyter_to_cell()` in `document/serialization.py` now resolves cell IDs with fallback chain: `metadata.id → cell-level id → random UUID` for stable cell ID round-tripping with standard Jupyter notebooks
 
 ### Fixed
@@ -209,7 +230,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Phase 3: TEMPLATE.ipynb Support**
 - **`services/template_service.py`** — `find_templates()` walks up directory tree collecting `TEMPLATE.ipynb` files (parent-first). `load_template_cells()` loads cells with fresh UUIDs.
-- **New notebook creation** — `/notebook/new?dir=` uses template cells when available.
+- **New notebook creation** — `/dialeng/new?dir=` uses template cells when available.
 
 **Phase 4: CRAFT.ipynb Support**
 - **`services/craft_service.py`** — `find_craft_files()` walks up directory tree. `get_craft_context()` extracts note/prompt cells as LLM messages. `get_craft_code_cells()` extracts code cells for kernel execution.
@@ -229,7 +250,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Phase 7: Kernel Selection Redesign**
 - **`ui/kernel_modal.py`** — `KernelStatusBar` (bottom of page, shows kernel type and connection state) and `KernelModal` (overlay with all registered kernels, runtime options, auth status).
-- **New routes** — `GET /notebook/{nb_id}/kernel/info` (status bar refresh), `GET /notebook/{nb_id}/kernel/modal` (modal content).
+- **New routes** — `GET /dialeng/{nb_id}/kernel/info` (status bar refresh), `GET /dialeng/{nb_id}/kernel/modal` (modal content).
 - **Removed old toolbar dropdown** — Kernel type/runtime select removed from toolbar in favor of status bar + modal.
 - **kernel-connected event** — WebSocket broadcasts `kernel_connected` after first successful execution; client refreshes status bar.
 
@@ -567,9 +588,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Empty notebook ID routing** - Fixed `/notebook/` (with trailing slash) matching `/notebook/{nb_id}` with empty string
-  - Added explicit `/notebook/` redirect route to `/notebook/default`
-  - Added guard in `/notebook/{nb_id}` route to redirect empty notebook IDs
+- **Empty notebook ID routing** - Fixed `/dialeng/` (with trailing slash) matching `/dialeng/{nb_id}` with empty string
+  - Added explicit `/dialeng/` redirect route to `/dialeng/default`
+  - Added guard in `/dialeng/{nb_id}` route to redirect empty notebook IDs
 
 - **Cell `clear_outputs()` method** - Added missing method to Cell class in `app.py`
   - Clears `output`, `execution_count`, and `time_run` when source changes
@@ -1005,7 +1026,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Backend Changes
 - **ExecutionQueue integration** - The previously unused `services/kernel/execution_queue.py` is now active
 - **New helper method** - Added `is_cell_queued(nb_id, cell_id)` to ExecutionQueue
-- **New endpoint** - `POST /notebook/{nb_id}/queue/cancel_all` - cancels running + clears queue
+- **New endpoint** - `POST /dialeng/{nb_id}/queue/cancel_all` - cancels running + clears queue
 - **Broadcast functions** - Added `broadcast_queue_state()`, `broadcast_cell_state()`, `broadcast_cell_output()`
 - **State callback system** - Queue emits callbacks for output chunks and state changes, enabling WebSocket broadcasting
 - **Cancel flag for queue** - Added `_cancelled` flag to ExecutionQueue to properly stop entire queue when Cancel All is triggered
@@ -1203,8 +1224,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated `requirements.txt` to include `fastcore>=1.5.0`
 - Added WebSocket message types: `code_stream_start`, `code_stream_chunk`, `code_stream_end`
 - Added JavaScript handlers for code cell streaming UI updates
-- Added `/notebook/{nb_id}/kernel/interrupt` route for hard interrupt
-- Updated `/notebook/{nb_id}/kernel/restart` route (was `/kernel/restart`)
+- Added `/dialeng/{nb_id}/kernel/interrupt` route for hard interrupt
+- Updated `/dialeng/{nb_id}/kernel/restart` route (was `/kernel/restart`)
 
 ### Documentation
 
@@ -1268,13 +1289,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `renderAllPreviews()` - Re-renders all markdown previews after collaborative update
   - `renderCellPreviews()` - Re-renders previews for a specific cell
 - Updated routes to async and added broadcast calls:
-  - `/notebook/{nb_id}/cell/add` - Broadcasts cells_updated
-  - `/notebook/{nb_id}/cell/{cid}` (DELETE) - Broadcasts cells_updated
-  - `/notebook/{nb_id}/cell/{cid}/move/{direction}` - Broadcasts cells_updated
-  - `/notebook/{nb_id}/cell/{cid}/type` - Broadcasts cell_updated
-  - `/notebook/{nb_id}/cell/{cid}/collapse` - Broadcasts cell_updated
-  - `/notebook/{nb_id}/cell/{cid}/collapse-section` - Broadcasts cell_updated
-  - `/notebook/{nb_id}/cell/{cid}/run` - Broadcasts cell_updated (for code cells and final prompt state)
+  - `/dialeng/{nb_id}/cell/add` - Broadcasts cells_updated
+  - `/dialeng/{nb_id}/cell/{cid}` (DELETE) - Broadcasts cells_updated
+  - `/dialeng/{nb_id}/cell/{cid}/move/{direction}` - Broadcasts cells_updated
+  - `/dialeng/{nb_id}/cell/{cid}/type` - Broadcasts cell_updated
+  - `/dialeng/{nb_id}/cell/{cid}/collapse` - Broadcasts cell_updated
+  - `/dialeng/{nb_id}/cell/{cid}/collapse-section` - Broadcasts cell_updated
+  - `/dialeng/{nb_id}/cell/{cid}/run` - Broadcasts cell_updated (for code cells and final prompt state)
 - Smart conflict avoidance: Cell updates are skipped if user is actively editing that cell or if it's currently streaming
 
 ## [0.3.1] - 2024-12-09
@@ -1302,7 +1323,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added CSS classes: `.collapse-scrollable`, `.collapse-summary`
 - Added CSS for section collapse buttons with level indicators
 - Added JavaScript functions: `cycleCollapseLevel()`, `setCollapseLevel()`
-- Added new route `/notebook/{nb_id}/cell/{cid}/collapse-section` for updating section collapse state
+- Added new route `/dialeng/{nb_id}/cell/{cid}/collapse-section` for updating section collapse state
 - Updated `CellView()` to include collapse controls and data attributes
 - Updated `to_jupyter_cell()` and `from_jupyter_cell()` to serialize/deserialize collapse levels
 - New code cells default to `output_collapse=1` (scrollable output)
@@ -1346,7 +1367,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `cancelled_cells` global set for tracking cancelled generations
 - Updated `mock_llm_stream()` to yield dictionaries with `type` field for different message types
 - Added WebSocket message handler for `cancel` type messages
-- Added new route `/notebook/{nb_id}/cell/{cid}/collapse` for toggling cell collapse state
+- Added new route `/dialeng/{nb_id}/cell/{cid}/collapse` for toggling cell collapse state
 - Added Chrome theme CDN for Ace Editor (light mode)
 - Added responsive CSS media queries for 768px and 480px breakpoints
 - Added JavaScript functions: `toggleTheme()`, `loadTheme()`, `toggleCollapse()`, `cancelStreaming()`, `showThinkingIndicator()`, `hideThinkingIndicator()`

@@ -705,7 +705,7 @@ sequenceDiagram
     participant Server as Dialeng Server
     participant Kernel as Python Kernel
 
-    Browser->>Server: GET /notebook/{name}
+    Browser->>Server: GET /dialeng/{name}
     Server-->>Browser: HTML + JS
     Browser->>Server: WebSocket /ws/{name}
     Server-->>Browser: Connection accepted

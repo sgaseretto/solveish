@@ -220,7 +220,7 @@ except ImportError:
 ### Safe Mode Toggle Route (`app.py`)
 
 ```python
-@rt("/notebook/{nb_id}/safe_mode")
+@rt("/dialeng/{nb_id}/safe_mode")
 def post(nb_id: str, safe_mode: str = "false"):
     """Toggle safe mode for a notebook."""
     nb = get_notebook(nb_id)

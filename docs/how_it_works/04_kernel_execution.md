@@ -22,6 +22,10 @@ The kernel execution system uses a **subprocess-based architecture** to enable:
 - Rich output support (images, plots, HTML)
 - One kernel per notebook with persistent namespace
 
+### Kernel Selection (Kernel-First Flow)
+
+Kernels are **not** created automatically when a notebook opens. Instead, when a notebook without an attached kernel is opened, the kernel selection modal is shown automatically. The user must select a kernel before any code or prompt cells can execute. If the user dismisses the modal, the notebook is in view-only mode — they can browse content but cannot run cells. Attempting to run a cell without a kernel re-opens the modal, and after selection, CRAFT code cells are executed first, then the pending cell runs. The kernel status dot next to the notebook title reflects the state: grey (no kernel), yellow (initializing), green (connected), red (error).
+
 ```mermaid
 graph TB
     subgraph "Main Process (FastHTML)"
@@ -438,7 +442,7 @@ from dialeng.services.kernel import KernelService
 
 kernel_service = KernelService()
 
-@app.route('/notebook/{nb_id}/cell/{cid}/run')
+@app.route('/dialeng/{nb_id}/cell/{cid}/run')
 async def run_cell(nb_id: str, cid: str):
     cell = get_cell(nb_id, cid)
 

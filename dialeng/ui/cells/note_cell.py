@@ -27,7 +27,7 @@ def NoteCellView(cell, notebook_id: str):
         # Hidden textarea for editing (shown on double-click)
         Textarea(cell.source, cls="source", name="source", id=f"source-{cell.id}",
                  placeholder="# Markdown notes...",
-                 hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/source",
+                 hx_post=f"/dialeng/{notebook_id}/cell/{cell.id}/source",
                  hx_trigger="blur changed", hx_swap="none",
                  style="display: none;",
                  onblur=f"switchToPreview('{cell.id}', 'source')"),

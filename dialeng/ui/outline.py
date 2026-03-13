@@ -226,7 +226,7 @@ def OutlineSidebar(notebook_id: str, headings: List[Dict] = None,
         sprites,
         id="outline-sidebar",
         cls=f"outline-sidebar {'outline-open' if is_open else ''}",
-        hx_get=f"/notebook/{notebook_id}/outline",
+        hx_get=f"/dialeng/{notebook_id}/outline",
         hx_trigger="outline-refresh from:body",
         hx_target="#outline-sidebar",
         hx_swap="outerHTML"

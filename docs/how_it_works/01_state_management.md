@@ -62,7 +62,7 @@ flowchart TB
     end
 
     subgraph HTMX["HTMX Layer"]
-        post["POST /notebook/{id}/cell/..."]
+        post["POST /dialeng/{id}/cell/..."]
     end
 
     subgraph Route["FastHTML Route"]
@@ -197,12 +197,12 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant User
-    participant Route as GET /notebook/{id}
+    participant Route as GET /dialeng/{id}
     participant Fn as get_notebook()
     participant Dict as notebooks dict
     participant Disk as notebooks/*.ipynb
 
-    User->>Route: Visit /notebook/demo
+    User->>Route: Visit /dialeng/demo
     Route->>Fn: get_notebook("demo")
     Fn->>Dict: Check if "demo" exists
     alt Not in memory
@@ -241,7 +241,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant User
-    participant Route as POST /notebook/{id}/save
+    participant Route as POST /dialeng/{id}/save
     participant Fn as save_notebook()
     participant Nb as Notebook
     participant Disk as demo.ipynb
@@ -261,7 +261,7 @@ sequenceDiagram
 ### Create Cell (`app.py:2234-2248`)
 
 ```python
-@rt("/notebook/{nb_id}/cell/add")
+@rt("/dialeng/{nb_id}/cell/add")
 async def post(nb_id: str, pos: int = -1, type: str = "code"):
     nb = get_notebook(nb_id)
     if pos < 0:
@@ -299,7 +299,7 @@ def CellView(cell: Cell, notebook_id: str):
 ### Update Cell Source (`app.py:2260-2267`)
 
 ```python
-@rt("/notebook/{nb_id}/cell/{cid}/source")
+@rt("/dialeng/{nb_id}/cell/{cid}/source")
 def post(nb_id: str, cid: str, source: str):
     nb = get_notebook(nb_id)
     for c in nb.cells:
@@ -317,7 +317,7 @@ def post(nb_id: str, cid: str, source: str):
 ### Update Cell Output (`app.py:2269-2276`)
 
 ```python
-@rt("/notebook/{nb_id}/cell/{cid}/output")
+@rt("/dialeng/{nb_id}/cell/{cid}/output")
 def post(nb_id: str, cid: str, output: str):
     nb = get_notebook(nb_id)
     for c in nb.cells:
@@ -332,7 +332,7 @@ def post(nb_id: str, cid: str, output: str):
 ### Delete Cell (`app.py:2250-2258`)
 
 ```python
-@rt("/notebook/{nb_id}/cell/{cid}")
+@rt("/dialeng/{nb_id}/cell/{cid}")
 async def delete(nb_id: str, cid: str):
     nb = get_notebook(nb_id)
     nb.cells = [c for c in nb.cells if c.id != cid]
@@ -346,7 +346,7 @@ async def delete(nb_id: str, cid: str):
 ### Move Cell (`app.py:2293-2307`)
 
 ```python
-@rt("/notebook/{nb_id}/cell/{cid}/move/{direction}")
+@rt("/dialeng/{nb_id}/cell/{cid}/move/{direction}")
 async def post(nb_id: str, cid: str, direction: str):
     nb = get_notebook(nb_id)
     for i, c in enumerate(nb.cells):
@@ -364,7 +364,7 @@ async def post(nb_id: str, cid: str, direction: str):
 ### Change Cell Type (`app.py:2278-2291`)
 
 ```python
-@rt("/notebook/{nb_id}/cell/{cid}/type")
+@rt("/dialeng/{nb_id}/cell/{cid}/type")
 async def post(nb_id: str, cid: str, cell_type: str):
     nb = get_notebook(nb_id)
     for c in nb.cells:
@@ -451,7 +451,7 @@ def list_notebooks() -> List[str]:
 Routes that modify state follow this pattern:
 
 ```python
-@rt("/notebook/{nb_id}/cell/{cid}/some-action")
+@rt("/dialeng/{nb_id}/cell/{cid}/some-action")
 async def post(nb_id: str, cid: str, ...):
     nb = get_notebook(nb_id)
 
@@ -516,7 +516,7 @@ async def post(nb_id: str, cid: str, ...):
 
 4. **Add route if needed**:
    ```python
-   @rt("/notebook/{nb_id}/cell/{cid}/new-field")
+   @rt("/dialeng/{nb_id}/cell/{cid}/new-field")
    async def post(nb_id: str, cid: str, value: str):
        nb = get_notebook(nb_id)
        for c in nb.cells:

@@ -265,7 +265,7 @@ Prompt cells use a two-textarea pattern:
 
 <!-- Visible textarea with name="prompt_source" (for editing) -->
 <textarea name="prompt_source" id="prompt-{cell.id}"
-          hx-post="/notebook/{nb_id}/cell/{cid}/source"
+          hx-post="/dialeng/{nb_id}/cell/{cid}/source"
           hx-include="#source-{cell.id}"
           hx-trigger="blur changed"
           oninput="document.getElementById('source-{cell.id}').value = this.value">
@@ -301,7 +301,7 @@ class Cell:
 The `/cell/{cid}/source` endpoint enforces this:
 
 ```python
-@rt("/notebook/{nb_id}/cell/{cid}/source")
+@rt("/dialeng/{nb_id}/cell/{cid}/source")
 def post(nb_id: str, cid: str, source: str):
     for c in nb.cells:
         if c.id == cid:

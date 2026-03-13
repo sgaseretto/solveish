@@ -317,12 +317,12 @@ app, rt = fast_app(hdrs=(...))
 
 # Routes
 @rt("/")
-@rt("/notebook/{nb_id}")
-@rt("/notebook/{nb_id}/cell/{cid}/run")
+@rt("/dialeng/{nb_id}")
+@rt("/dialeng/{nb_id}/cell/{cid}/run")
 # ... many more routes
 
 # WebSocket Handler
-@app.ws("/notebook/{nb_id}/ws")
+@app.ws("/dialeng/{nb_id}/ws")
 
 # Server
 if __name__ == "__main__":
@@ -333,7 +333,7 @@ if __name__ == "__main__":
 
 **1. Route Handlers:**
 ```python
-@rt("/notebook/{nb_id}/cell/{cid}/run")
+@rt("/dialeng/{nb_id}/cell/{cid}/run")
 async def post(nb_id: str, cid: str, source: str = None):
     nb = get_notebook(nb_id)
     cell = next((c for c in nb.cells if c.id == cid), None)
@@ -370,7 +370,7 @@ await broadcast_to_notebook(nb_id, AllCellsOOB(nb))
 User clicks Run → Button onclick → prepareCodeRun()
                                         │
                                         ▼
-                           POST /notebook/{id}/cell/{cid}/run
+                           POST /dialeng/{id}/cell/{cid}/run
                                         │
                                         ▼
                               ExecutionQueue.add(cell)
@@ -395,7 +395,7 @@ User clicks Run → Button onclick → prepareCodeRun()
 User clicks Run → Button onclick → startStreaming()
                                         │
                                         ▼
-                           POST /notebook/{id}/cell/{cid}/run
+                           POST /dialeng/{id}/cell/{cid}/run
                                         │
                                         ▼
                               llm_service.stream_response()
@@ -505,14 +505,14 @@ Route handler saves + broadcasts
    function duplicateFocusedCell() {
        const cellId = getFocusedCellId();
        if (cellId) {
-           htmx.ajax('POST', `/notebook/${window.NOTEBOOK_ID}/cell/${cellId}/duplicate`);
+           htmx.ajax('POST', `/dialeng/${window.NOTEBOOK_ID}/cell/${cellId}/duplicate`);
        }
    }
    ```
 
 3. **Add route** in `app.py`:
    ```python
-   @rt("/notebook/{nb_id}/cell/{cid}/duplicate")
+   @rt("/dialeng/{nb_id}/cell/{cid}/duplicate")
    async def post(nb_id: str, cid: str):
        # ... duplication logic
    ```

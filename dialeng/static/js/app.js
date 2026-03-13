@@ -16,11 +16,11 @@
    ========================================================================== */
 
 // ==================== Notebook API Path ====================
-// Returns the base API path for the current notebook, e.g. "/notebook/myid"
+// Returns the base API path for the current notebook, e.g. "/dialeng/myid"
 // Uses window.NOTEBOOK_ID so it works regardless of whether the URL is
-// /notebook/myid or /notebook/?name=path/to/notebook
+// /dialeng/myid or /dialeng/?name=path/to/notebook
 function nbApiPath() {
-    return `/notebook/${window.NOTEBOOK_ID}`;
+    return `/dialeng/${window.NOTEBOOK_ID}`;
 }
 
 // ==================== DialogHelper Bidirectional Data ====================
@@ -1270,7 +1270,7 @@ function toggleSafeMode(nbId) {
     if (use) use.setAttribute('href', newState ? '#shield-check' : '#shield-off');
 
     // Send to server
-    fetch(`/notebook/${nbId}/safe_mode`, {
+    fetch(`/dialeng/${nbId}/safe_mode`, {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: `safe_mode=${newState}`
@@ -2314,7 +2314,7 @@ async function cancelAllExecution() {
     }
     try {
         console.log('[Queue] Cancelling all execution for notebook:', currentNotebookId);
-        await fetch(`/notebook/${currentNotebookId}/queue/cancel_all`, { method: 'POST' });
+        await fetch(`/dialeng/${currentNotebookId}/queue/cancel_all`, { method: 'POST' });
     } catch (e) {
         console.error('[Queue] Failed to cancel all:', e);
     }
@@ -2932,10 +2932,19 @@ const ToolConfirmation = (function() {
 })();
 
 // ==================== Kernel Selection Modal ====================
+
+// Track pending cell execution when kernel is not yet selected
+let pendingCellRunId = null;
+
 function toggleKernelModal(nbId) {
     const overlay = document.getElementById('kernel-modal-overlay');
     if (!overlay) return;
+    const wasVisible = overlay.classList.contains('visible');
     overlay.classList.toggle('visible');
+    // If closing the modal, clear any pending cell run
+    if (wasVisible) {
+        pendingCellRunId = null;
+    }
 }
 
 function selectKernelOption(el, kernelType) {
@@ -2981,6 +2990,18 @@ function selectKernelRuntime(btn, runtime) {
     event.stopPropagation();
 }
 
+// Helper: run a pending cell after kernel + CRAFT init
+function _runPendingCell() {
+    if (!pendingCellRunId) return;
+    const cellId = pendingCellRunId;
+    pendingCellRunId = null;
+    const cell = document.getElementById(`cell-${cellId}`);
+    if (cell) {
+        const btn = cell.querySelector('.btn-run');
+        if (btn) btn.click();
+    }
+}
+
 function applyKernelSelection(nbId) {
     const typeInput = document.getElementById('kernel-modal-selected-type');
     const rtInput = document.getElementById('kernel-modal-selected-runtime');
@@ -2988,27 +3009,58 @@ function applyKernelSelection(nbId) {
     const kernelType = typeInput.value;
     const runtimeType = rtInput ? rtInput.value : 'cpu';
 
-    // Send kernel type change
-    fetch(`/notebook/${nbId}/kernel/type`, {
+    console.log('[Kernel] applyKernelSelection:', kernelType, runtimeType);
+
+    // Close modal immediately and show initializing state (yellow dot)
+    const savedPendingCell = pendingCellRunId;
+    toggleKernelModal();
+    pendingCellRunId = savedPendingCell;
+    window.KERNEL_ALIVE = true;
+    updateKernelDot('busy');
+
+    // Send kernel type change in background
+    fetch(`/dialeng/${nbId}/kernel/type`, {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: `kernel_type=${encodeURIComponent(kernelType)}`
-    }).then(response => response.text()).then(html => {
-        const statusEl = document.getElementById('status');
-        if (statusEl) statusEl.innerHTML = html;
-
+    }).then(response => {
+        console.log('[Kernel] kernel/type response:', response.status);
+        if (!response.ok) throw new Error(`kernel/type failed: ${response.status}`);
+        return response.text();
+    }).then(() => {
         // If Colab, also set runtime type
         if (runtimeType && kernelType === 'colab') {
-            fetch(`/notebook/${nbId}/kernel/runtime`, {
+            fetch(`/dialeng/${nbId}/kernel/runtime`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/x-www-form-urlencoded'},
                 body: `runtime_type=${encodeURIComponent(runtimeType)}`
             });
         }
 
-        toggleKernelModal();
         // Refresh kernel toolbar button
-        htmx.ajax('GET', `/notebook/${nbId}/kernel/info`, {target: '#kernel-status-bar', swap: 'outerHTML'});
+        htmx.ajax('GET', `/dialeng/${nbId}/kernel/info`, {target: '#kernel-status-bar', swap: 'outerHTML'});
+
+        // Execute CRAFT code cells now that kernel is selected
+        if (window.HAS_CRAFT_CODE) {
+            console.log('[Kernel] Triggering CRAFT init');
+            fetch(`/dialeng/${nbId}/kernel/craft-init`, { method: 'POST' })
+                .then(resp => {
+                    if (!resp.ok) throw new Error(`craft-init failed: ${resp.status}`);
+                    window.HAS_CRAFT_CODE = false;
+                    updateKernelDot('connected');
+                    _runPendingCell();
+                })
+                .catch(err => {
+                    console.error('[Kernel] CRAFT init error:', err);
+                    updateKernelDot('error');
+                });
+        } else {
+            updateKernelDot('connected');
+            _runPendingCell();
+        }
+    }).catch(err => {
+        console.error('[Kernel] applyKernelSelection error:', err);
+        updateKernelDot('error');
     });
 }
 
@@ -3016,7 +3068,7 @@ function applyKernelSelection(nbId) {
 document.body.addEventListener('kernel-connected', function(e) {
     const nbId = window.NOTEBOOK_ID;
     if (nbId) {
-        htmx.ajax('GET', `/notebook/${nbId}/kernel/info`, {target: '#kernel-status-bar', swap: 'outerHTML'});
+        htmx.ajax('GET', `/dialeng/${nbId}/kernel/info`, {target: '#kernel-status-bar', swap: 'outerHTML'});
     }
 });
 
@@ -3028,6 +3080,68 @@ document.addEventListener('keydown', function(e) {
             toggleKernelModal();
             return;
         }
+    }
+});
+
+// Intercept cell run requests when no kernel is selected
+document.body.addEventListener('htmx:beforeRequest', function(e) {
+    // Get request path from HTMX element or requestConfig
+    const elt = e.detail.elt;
+    const path = elt?.getAttribute('hx-post') || e.detail.requestConfig?.path || e.detail.pathInfo?.requestPath || '';
+    if (!path.match(/\/cell\/[^/]+\/run$/) || window.KERNEL_ALIVE) return;
+
+    // Cancel the HTMX request
+    e.preventDefault();
+
+    // Extract cell ID from URL
+    const match = path.match(/\/cell\/([^/]+)\/run$/);
+    const cellId = match ? match[1] : null;
+
+    // Revert UI state that was set by prepareCodeRun() or startStreaming()
+    if (cellId) {
+        const cell = document.getElementById(`cell-${cellId}`);
+        if (cell) {
+            cell.classList.remove('streaming');
+            const cancelBtn = cell.querySelector('.btn-cancel');
+            const runBtn = cell.querySelector('.btn-run');
+            if (cancelBtn) cancelBtn.style.display = 'none';
+            if (runBtn) runBtn.style.display = '';
+        }
+        const outputEl = document.getElementById(`output-${cellId}`);
+        if (outputEl) outputEl.innerHTML = '';
+        clearCodeStreamingTimeout(cellId);
+    }
+
+    // Store pending cell and show kernel modal
+    pendingCellRunId = cellId;
+    const overlay = document.getElementById('kernel-modal-overlay');
+    if (overlay && !overlay.classList.contains('visible')) {
+        overlay.classList.add('visible');
+    }
+});
+
+// Server-side safety net: kernel-required HX-Trigger
+document.body.addEventListener('kernel-required', function(e) {
+    const detail = e.detail || {};
+    const cellId = detail.cellId || null;
+
+    // Revert UI state
+    if (cellId) {
+        const cell = document.getElementById(`cell-${cellId}`);
+        if (cell) {
+            cell.classList.remove('streaming');
+            const cancelBtn = cell.querySelector('.btn-cancel');
+            const runBtn = cell.querySelector('.btn-run');
+            if (cancelBtn) cancelBtn.style.display = 'none';
+            if (runBtn) runBtn.style.display = '';
+        }
+        clearCodeStreamingTimeout(cellId);
+    }
+
+    pendingCellRunId = cellId;
+    const overlay = document.getElementById('kernel-modal-overlay');
+    if (overlay && !overlay.classList.contains('visible')) {
+        overlay.classList.add('visible');
     }
 });
 
@@ -3102,7 +3216,7 @@ function createNewItem() {
     } else {
         // Navigate to create new notebook with name
         toggleNewItemModal();
-        window.location.href = `/notebook/new?dir=${encodeURIComponent(currentPath)}&name=${encodeURIComponent(name)}`;
+        window.location.href = `/dialeng/new?dir=${encodeURIComponent(currentPath)}&name=${encodeURIComponent(name)}`;
     }
 }
 
