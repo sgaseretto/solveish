@@ -351,7 +351,7 @@ if (element.tagName === 'SCRIPT') {
 4. On completion, targeted OOB swaps update only output and header
 5. Monaco editor DOM is **preserved** — no FOUST
 
-**Route:** `POST /notebook/{nb_id}/cell/{cid}/run`
+**Route:** `POST /dialeng/{nb_id}/cell/{cid}/run`
 
 ```python
 # Code cell execution — returns immediately, runs in background
@@ -374,7 +374,7 @@ async def finalize_cell_execution(nb_id, cell, has_error):
 - The "run" action simply moves focus to the next cell
 - Collaborators see updates when markdown source changes (on blur)
 
-**Route:** `POST /notebook/{nb_id}/cell/{cid}/source`
+**Route:** `POST /dialeng/{nb_id}/cell/{cid}/source`
 - Updates source on blur
 - No broadcast needed (collaborators don't see typing in real-time)
 
@@ -575,7 +575,7 @@ Currently, prompt streaming goes to ALL clients. To stream only to the initiator
 # This requires correlating HTTP requests with WebSocket connections
 
 # Option 2: Use a unique request ID
-@rt("/notebook/{nb_id}/cell/{cid}/run")
+@rt("/dialeng/{nb_id}/cell/{cid}/run")
 async def post(nb_id: str, cid: str, request_id: str = None):
     # Mark which request ID should receive streaming
     streaming_requests[cid] = request_id
@@ -636,7 +636,7 @@ To test collaboration locally:
 
 For multi-machine testing:
 1. Find your local IP: `ipconfig` (Windows) or `ifconfig` (Mac/Linux)
-2. Share URL like `http://192.168.1.100:8000/notebook/mynotebook`
+2. Share URL like `http://192.168.1.100:8000/dialeng/mynotebook`
 3. Other devices on the same network can collaborate
 
 ### Debugging Tips

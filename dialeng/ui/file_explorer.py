@@ -112,13 +112,13 @@ def FileItem(name: str, path: str, is_active: bool, nb_id: str,
     if has_kernel:
         cls_parts.append("has-kernel")
     file_path = f"{path}/{name}" if path and path != "." else name
-    # Use query param approach: /notebook/?name=subfolder/test
+    # Use query param approach: /dialeng/?name=subfolder/test
     nb_name_param = f"{path}/{name}" if path and path != "." else name
     return Div(
         A(
             icon_sprites(icon_name, sz=16),
             Span(name, cls="file-explorer-item-name"),
-            href=f"/notebook/?name={nb_name_param}",
+            href=f"/dialeng/?name={nb_name_param}",
             cls="file-explorer-item-link",
         ),
         Button(

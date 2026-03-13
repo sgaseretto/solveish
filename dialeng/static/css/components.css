@@ -43,7 +43,7 @@ main.container > h1 { display: none; }
 
 /* Kernel status dot — shows kernel connection state next to notebook title */
 .kernel-dot {
-    width: 8px; height: 8px;
+    width: 12px; height: 12px;
     border-radius: 50%;
     background: var(--text-muted, #888);
     flex-shrink: 0;

@@ -141,7 +141,7 @@ if cell.cell_type == "code":
         # Hidden textarea for form submission - Ace reads from this
         Textarea(cell.source, name="source", id=f"source-{cell.id}",
                 style="display: none;",
-                hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/source",
+                hx_post=f"/dialeng/{notebook_id}/cell/{cell.id}/source",
                 hx_trigger="blur changed", hx_swap="none"),
         # Ace Editor container
         Div(
@@ -275,7 +275,7 @@ elif cell.cell_type == "note":
     body = Div(
         Textarea(cell.source, cls="source", name="source", id=f"source-{cell.id}",
                 placeholder="# Markdown notes...",
-                hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/source",
+                hx_post=f"/dialeng/{notebook_id}/cell/{cell.id}/source",
                 hx_trigger="blur changed", hx_swap="none",
                 style="display: none;",
                 onblur=f"switchToPreview('{cell.id}', 'source')"),
@@ -731,7 +731,7 @@ if metadata.get("custom_type") == "image":
 
 ```python
 Button("+ Image", cls="btn btn-sm",
-       hx_post=f"/notebook/{nb_id}/cell/add?pos={pos}&type=image",
+       hx_post=f"/dialeng/{nb_id}/cell/add?pos={pos}&type=image",
        hx_target="#cells", hx_swap="outerHTML"),
 ```
 

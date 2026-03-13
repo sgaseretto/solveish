@@ -42,7 +42,7 @@ def TypeSelect(cell_id: str, current: str, nb_id: str):
         *options,
         cls="type-select",
         name="cell_type",
-        hx_post=f"/notebook/{nb_id}/cell/{cell_id}/type",
+        hx_post=f"/dialeng/{nb_id}/cell/{cell_id}/type",
         hx_target=f"#cell-{cell_id}",
         hx_swap="outerHTML"
     )

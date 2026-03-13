@@ -360,7 +360,7 @@ Share your notebook URL with others to collaborate in real-time. All connected u
 
 ### How it works
 
-1. Open a notebook at `http://localhost:8000/notebook/mynotebook`
+1. Open a notebook at `http://localhost:8000/dialeng/mynotebook`
 2. Share the URL with collaborators
 3. Everyone with the URL sees changes in real-time
 

@@ -70,7 +70,7 @@ found.reverse()  # Parent-first order
 
 ### How it works
 
-1. User creates a new notebook (via `GET /notebook/new?dir=<path>`)
+1. User creates a new notebook (via `GET /dialeng/new?dir=<path>`)
 2. `find_templates(target_dir, root)` walks up from `target_dir` collecting `TEMPLATE.ipynb` files
 3. `load_template_cells(template_paths)` loads cells from all templates (parent-first), generating fresh UUIDs for each cell
 4. The new notebook is initialized with these cells instead of the default empty cell
@@ -120,18 +120,51 @@ sequenceDiagram
 
 **Where it happens**: In `services/dialoghelper_service.py` → `build_context_messages()`, after building the notebook's own context, CRAFT messages are prepended.
 
-### Code Auto-Execution
+### Code Auto-Execution (Kernel-First Flow)
 
-When a notebook is opened (`GET /notebook/{nb_id}`), CRAFT code cells are executed in the background:
+CRAFT code cells are **not** executed automatically on page load. Instead, they are deferred until the user explicitly selects a kernel:
 
-1. `find_craft_files()` locates CRAFT files in the hierarchy
-2. **Self-exclusion**: If the notebook being opened is itself a `CRAFT.ipynb`, it is filtered out of the discovered CRAFT paths — only parent CRAFT files are executed, never the notebook's own code cells
-3. `get_craft_code_cells()` extracts code cell source + IDs
-4. Cells not yet executed for this notebook (tracked in `_executed_craft` dict) are identified
-5. **Synchronous marking**: All unexecuted cell IDs are added to `_executed_craft` immediately (before the async task starts) to prevent double execution from HTMX's double page loads
-6. Execution happens in `asyncio.create_task()` so it doesn't block page load
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant UI as Browser
+    participant App as app.py
+    participant CS as Craft Service
+    participant KS as Kernel Service
 
-This ensures that CRAFT setup code (imports, helper functions, environment config) is available in the kernel before the user starts working.
+    U->>UI: Open notebook
+    UI->>App: GET /dialeng/{nb_id}
+    App->>CS: find_craft_files() + get_craft_code_cells()
+    App-->>UI: Page with kernel modal (auto-shown)
+    Note over UI: User sees notebook content + kernel selection modal
+
+    alt User selects kernel
+        U->>UI: Click Apply
+        UI->>App: POST /dialeng/{nb_id}/kernel/type
+        App->>KS: set_kernel_type()
+        UI->>App: POST /dialeng/{nb_id}/kernel/craft-init
+        App->>CS: get_craft_code_cells()
+        App->>KS: execute_cell() for each CRAFT code cell
+        Note over KS: CRAFT setup code runs in kernel
+    else User dismisses modal
+        Note over UI: View-only mode — no kernel, no CRAFT execution
+    end
+```
+
+**Flow details:**
+
+1. On page load, `_render_notebook_page()` computes `has_craft_code` (boolean) but does **not** execute CRAFT cells
+2. If no kernel is attached, the kernel selection modal is shown automatically
+3. If the user selects a kernel and clicks Apply:
+   - The kernel is created via `POST /dialeng/{nb_id}/kernel/type`
+   - CRAFT code cells are executed via `POST /dialeng/{nb_id}/kernel/craft-init`
+   - The kernel dot turns yellow (busy) during init, green on success, red on failure
+4. If the user dismisses the modal, no kernel is started — the notebook is in view-only mode
+5. If the user tries to run a cell without a kernel, the modal is shown again with the cell queued as pending
+
+**Self-exclusion**: If the notebook being opened is itself a `CRAFT.ipynb`, it is filtered out of the discovered CRAFT paths — only parent CRAFT files are executed, never the notebook's own code cells.
+
+This ensures that CRAFT setup code (imports, helper functions, environment config) is available in the kernel before the user starts working, while allowing users to browse notebooks without starting a kernel.
 
 ### Tracking
 
@@ -161,7 +194,7 @@ craft_paths = [cp for cp in craft_paths if Path(cp).resolve() != nb_path_resolve
 
 ### Kernel Restart
 
-When a kernel is restarted (`POST /notebook/{nb_id}/kernel/restart`):
+When a kernel is restarted (`POST /dialeng/{nb_id}/kernel/restart`):
 
 1. `reset_craft_tracking(nb_id)` clears the `_executed_craft` entry for the notebook
 2. CRAFT code cells are re-discovered and re-executed with the same self-exclusion and synchronous marking protections

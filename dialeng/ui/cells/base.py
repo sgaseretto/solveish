@@ -84,13 +84,13 @@ def CellHeader(cell, notebook_id: str, collapse_controls: list = None):
             _run_button(cell, notebook_id),
             _cancel_button(cell, notebook_id),
             Button(ss('arrow-up', sz=14), cls="btn btn-sm btn-icon",
-                   hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/move/up",
+                   hx_post=f"/dialeng/{notebook_id}/cell/{cell.id}/move/up",
                    hx_swap="none", title="Move up"),
             Button(ss('arrow-down', sz=14), cls="btn btn-sm btn-icon",
-                   hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/move/down",
+                   hx_post=f"/dialeng/{notebook_id}/cell/{cell.id}/move/down",
                    hx_swap="none", title="Move down"),
             Button(ss('trash-2', sz=14), cls="btn btn-sm btn-icon btn-delete",
-                   hx_delete=f"/notebook/{notebook_id}/cell/{cell.id}",
+                   hx_delete=f"/dialeng/{notebook_id}/cell/{cell.id}",
                    hx_swap="none", title="Delete (D D)"),
             cls="cell-actions"
         ),
@@ -112,7 +112,7 @@ def _run_button(cell, notebook_id: str):
         onclick = f"syncMonacoToTextarea('{cell.id}'); prepareCodeRun('{cell.id}');"
 
     return Button(ss('play', sz=14), cls="btn btn-sm btn-run",
-                  hx_post=f"/notebook/{notebook_id}/cell/{cell.id}/run",
+                  hx_post=f"/dialeng/{notebook_id}/cell/{cell.id}/run",
                   hx_target=f"#cell-{cell.id}",
                   hx_swap="none" if cell.cell_type == "code" else "outerHTML",
                   hx_vals=f"js:{{source: document.getElementById('source-{cell.id}')?.value || ''}}",

@@ -848,11 +848,11 @@ async def get(path: str):
 
 @rt("/")
 def get():
-    return RedirectResponse("/notebook/default", status_code=302)
+    return RedirectResponse("/dialeng/default", status_code=302)
 
-@rt("/notebook/")
+@rt("/dialeng/")
 async def get(name: str = ""):
-    """Handle /notebook/ and /notebook?name=path/to/notebook.
+    """Handle /dialeng/ and /notebook?name=path/to/notebook.
 
     With name param: resolve the path to a notebook ID and render directly
     (keeps the clean URL in the browser). Supports solveit-style URLs.
@@ -864,12 +864,12 @@ async def get(name: str = ""):
             # Notebook not found at that path — create it
             dir_part = str(Path(name).parent) if '/' in name else ""
             name_part = Path(name).name
-            return RedirectResponse(f"/notebook/new?dir={dir_part}&name={name_part}", status_code=302)
-        # Render the notebook page directly (same as /notebook/{nb_id})
+            return RedirectResponse(f"/dialeng/new?dir={dir_part}&name={name_part}", status_code=302)
+        # Render the notebook page directly (same as /dialeng/{nb_id})
         return await _render_notebook_page(nb_id)
-    return RedirectResponse("/notebook/default", status_code=302)
+    return RedirectResponse("/dialeng/default", status_code=302)
 
-@rt("/notebook/new")
+@rt("/dialeng/new")
 def get(dir: str = "", name: str = ""):
     display_name = name.strip() if name.strip() else uuid.uuid4().hex[:8]
     target_dir = NOTEBOOKS_DIR / dir if dir else NOTEBOOKS_DIR
@@ -906,7 +906,7 @@ def get(dir: str = "", name: str = ""):
     save_notebook(new_id)
     # Redirect to clean name-based URL
     nb_name = f"{dir}/{display_name}" if dir else display_name
-    return RedirectResponse(f"/notebook/?name={nb_name}", status_code=302)
+    return RedirectResponse(f"/dialeng/?name={nb_name}", status_code=302)
 
 # ============================================================================
 # File Explorer Routes
@@ -961,10 +961,9 @@ def post(path: str = ""):
 # ============================================================================
 
 async def _render_notebook_page(nb_id: str):
-    """Render a notebook page by ID (shared by /notebook/{nb_id} and /notebook/?name=...)."""
+    """Render a notebook page by ID (shared by /dialeng/{nb_id} and /dialeng/?name=...)."""
     nb = get_notebook(nb_id)
 
-    # Auto-execute CRAFT code cells (non-blocking background task)
     # Determine notebook path for CRAFT discovery: use nb.path, or find on disk
     nb_path = nb.path
     if not nb_path:
@@ -973,35 +972,18 @@ async def _render_notebook_page(nb_id: str):
         if found:
             nb.path = found  # Cache for future use
 
+    # Check for unexecuted CRAFT code cells (but don't execute yet — wait for kernel selection)
+    has_craft_code = False
     if nb_path and Path(nb_path).exists():
         from dialeng.services.craft_service import find_craft_files, get_craft_code_cells, _executed_craft
         craft_paths = find_craft_files(nb_path, NOTEBOOKS_DIR)
-        # If this notebook IS a CRAFT file, exclude it from its own CRAFT paths
-        # (only run parent CRAFT files, not self)
         nb_path_resolved = Path(nb_path).resolve()
         craft_paths = [cp for cp in craft_paths if Path(cp).resolve() != nb_path_resolved]
         if craft_paths:
             craft_cells = get_craft_code_cells(craft_paths)
             executed = _executed_craft.get(nb_id, set())
             unexecuted = [(cid, src) for cid, src in craft_cells if cid not in executed]
-            if unexecuted:
-                # Mark all cells as executed synchronously to prevent double execution
-                # from HTMX double page loads
-                _executed_craft.setdefault(nb_id, set()).update(cid for cid, _ in unexecuted)
-                print(f"[CRAFT] Executing {len(unexecuted)} code cells for {nb_id} from {len(craft_paths)} CRAFT file(s)", flush=True)
-                for cp in craft_paths:
-                    print(f"[CRAFT]   - {cp}", flush=True)
-                async def _run_craft():
-                    for cid, src in unexecuted:
-                        try:
-                            cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
-                            async for _ in kernel_service.execute_cell(nb_id, cell):
-                                pass
-                            print(f"[CRAFT] Executed: {cid}", flush=True)
-                        except Exception as e:
-                            print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
-                    print(f"[CRAFT] All cells executed for {nb_id}", flush=True)
-                asyncio.create_task(_run_craft())
+            has_craft_code = bool(unexecuted)
 
     nb_list = list_notebooks() or [nb_id]
     config = get_config()
@@ -1013,32 +995,33 @@ async def _render_notebook_page(nb_id: str):
                         colab_authenticated=colab_auth_service.is_authenticated if colab_auth_service else False,
                         notebooks_dir=NOTEBOOKS_DIR,
                         kernel_alive=nb_kernel_alive,
-                        kernel_notebooks=kernel_nbs)
+                        kernel_notebooks=kernel_nbs,
+                        has_craft_code=has_craft_code)
 
-@rt("/notebook/{nb_id}")
+@rt("/dialeng/{nb_id}")
 async def get(nb_id: str):
     if not nb_id or not nb_id.strip():
-        return RedirectResponse("/notebook/default", status_code=302)
+        return RedirectResponse("/dialeng/default", status_code=302)
     return await _render_notebook_page(nb_id)
 
-@rt("/notebook/{nb_id}/save")
+@rt("/dialeng/{nb_id}/save")
 def post(nb_id: str):
     save_notebook(nb_id)
     return Div("✓ Saved", cls="status success")
 
-@rt("/notebook/{nb_id}/mode")
+@rt("/dialeng/{nb_id}/mode")
 def post(nb_id: str, mode: str):
     nb = get_notebook(nb_id)
     nb.dialog_mode = mode
     return ""
 
-@rt("/notebook/{nb_id}/model")
+@rt("/dialeng/{nb_id}/model")
 def post(nb_id: str, model: str):
     nb = get_notebook(nb_id)
     nb.model = model
     return ""
 
-@rt("/notebook/{nb_id}/safe_mode")
+@rt("/dialeng/{nb_id}/safe_mode")
 def post(nb_id: str, safe_mode: str = "false"):
     """Toggle safe mode for shell commands in this notebook."""
     nb = get_notebook(nb_id)
@@ -1050,7 +1033,7 @@ def post(nb_id: str, safe_mode: str = "false"):
 # Kernel Management Routes
 # ============================================================================
 
-@rt("/notebook/{nb_id}/kernel/type")
+@rt("/dialeng/{nb_id}/kernel/type")
 async def post(nb_id: str, kernel_type: str):
     """Change the kernel type for a notebook."""
     nb = get_notebook(nb_id)
@@ -1078,7 +1061,7 @@ async def post(nb_id: str, kernel_type: str):
 
     return Div(f"Kernel: {reg.label}", cls="status success")
 
-@rt("/notebook/{nb_id}/kernel/runtime")
+@rt("/dialeng/{nb_id}/kernel/runtime")
 async def post(nb_id: str, runtime_type: str):
     """Change the Colab runtime type (cpu/gpu/tpu) for a notebook."""
     nb = get_notebook(nb_id)
@@ -1098,7 +1081,7 @@ async def post(nb_id: str, runtime_type: str):
     labels = {"cpu": "CPU", "gpu": "GPU (T4)", "tpu": "TPU"}
     return Div(f"Runtime: {labels.get(runtime_type, runtime_type)}", cls="status success")
 
-@rt("/notebook/{nb_id}/kernel/status")
+@rt("/dialeng/{nb_id}/kernel/status")
 def get(nb_id: str):
     """Get current kernel status for the notebook."""
     if kernel_service.has_kernel(nb_id):
@@ -1108,7 +1091,7 @@ def get(nb_id: str):
     nb = get_notebook(nb_id)
     return {"is_alive": False, "kernel_type": nb.kernel_type}
 
-@rt("/notebook/{nb_id}/kernel/info")
+@rt("/dialeng/{nb_id}/kernel/info")
 def get(nb_id: str):
     """Get kernel toolbar button with connection info (for HTMX swap)."""
     from dialeng.ui.kernel_modal import KernelToolbarButton
@@ -1125,13 +1108,63 @@ def get(nb_id: str):
             }
     return KernelToolbarButton(nb, kernel_info)
 
-@rt("/notebook/{nb_id}/kernel/modal")
+@rt("/dialeng/{nb_id}/kernel/modal")
 def get(nb_id: str):
     """Get the kernel selection modal (for HTMX swap)."""
     from dialeng.ui.kernel_modal import KernelModal
     nb = get_notebook(nb_id)
     colab_auth = colab_auth_service.is_authenticated if colab_auth_service else False
     return KernelModal(nb.id, nb.kernel_type, colab_auth, nb.colab_runtime_type)
+
+@rt("/dialeng/{nb_id}/kernel/craft-init")
+async def post(nb_id: str):
+    """Execute CRAFT code cells after kernel selection.
+
+    Called by the client after the user selects a kernel, so CRAFT setup
+    code runs before any manual cell execution.
+    """
+    nb = get_notebook(nb_id)
+    nb_path = nb.path
+    if not nb_path:
+        found = _find_notebook_path(nb_id)
+        nb_path = found if found else NOTEBOOKS_DIR / f"{nb_id}.ipynb"
+        if found:
+            nb.path = found
+
+    if not nb_path or not Path(nb_path).exists():
+        return ""
+
+    from dialeng.services.craft_service import find_craft_files, get_craft_code_cells, _executed_craft
+    craft_paths = find_craft_files(nb_path, NOTEBOOKS_DIR)
+    nb_path_resolved = Path(nb_path).resolve()
+    craft_paths = [cp for cp in craft_paths if Path(cp).resolve() != nb_path_resolved]
+    if not craft_paths:
+        return ""
+
+    craft_cells = get_craft_code_cells(craft_paths)
+    executed = _executed_craft.get(nb_id, set())
+    unexecuted = [(cid, src) for cid, src in craft_cells if cid not in executed]
+    if not unexecuted:
+        return ""
+
+    # Mark all cells as executed synchronously to prevent double execution
+    _executed_craft.setdefault(nb_id, set()).update(cid for cid, _ in unexecuted)
+    print(f"[CRAFT] Executing {len(unexecuted)} code cells for {nb_id} from {len(craft_paths)} CRAFT file(s)", flush=True)
+    for cp in craft_paths:
+        print(f"[CRAFT]   - {cp}", flush=True)
+
+    async def _run_craft():
+        for cid, src in unexecuted:
+            try:
+                cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
+                async for _ in kernel_service.execute_cell(nb_id, cell):
+                    pass
+                print(f"[CRAFT] Executed: {cid}", flush=True)
+            except Exception as e:
+                print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
+        print(f"[CRAFT] All cells executed for {nb_id}", flush=True)
+    asyncio.create_task(_run_craft())
+    return ""
 
 # ============================================================================
 # Google OAuth Routes (for Colab integration)
@@ -1201,7 +1234,7 @@ def get():
         return {"authenticated": False, "enabled": False}
     return {"authenticated": colab_auth_service.is_authenticated, "enabled": True}
 
-@rt("/notebook/{nb_id}/export")
+@rt("/dialeng/{nb_id}/export")
 def get(nb_id: str):
     nb = get_notebook(nb_id)
     content = json.dumps(nb.to_ipynb(), indent=2)
@@ -1223,7 +1256,7 @@ async def post(nb_id: str, code: str, cursor_pos: int):
 # Outline Sidebar Endpoints
 # ============================================================================
 
-@rt("/notebook/{nb_id}/outline")
+@rt("/dialeng/{nb_id}/outline")
 async def get(nb_id: str):
     """Get notebook outline for the sidebar.
 
@@ -1384,7 +1417,7 @@ async def post(request):
         )
 
 # Cell operations - now include notebook ID in path
-@rt("/notebook/{nb_id}/cell/add")
+@rt("/dialeng/{nb_id}/cell/add")
 async def post(nb_id: str, pos: int = -1, type: str = "code"):
     nb = get_notebook(nb_id)
     if pos < 0:
@@ -1415,7 +1448,7 @@ async def post(nb_id: str, pos: int = -1, type: str = "code"):
 
     return AllCells(nb)
 
-@rt("/notebook/{nb_id}/cell/{cid}")
+@rt("/dialeng/{nb_id}/cell/{cid}")
 async def delete(nb_id: str, cid: str):
     nb = get_notebook(nb_id)
 
@@ -1435,7 +1468,7 @@ async def delete(nb_id: str, cid: str):
 
     return AllCells(nb)
 
-@rt("/notebook/{nb_id}/cell/{cid}/source")
+@rt("/dialeng/{nb_id}/cell/{cid}/source")
 def post(nb_id: str, cid: str, source: str):
     nb = get_notebook(nb_id)
     for c in nb.cells:
@@ -1451,7 +1484,7 @@ def post(nb_id: str, cid: str, source: str):
             break
     return ""
 
-@rt("/notebook/{nb_id}/cell/{cid}/output")
+@rt("/dialeng/{nb_id}/cell/{cid}/output")
 def post(nb_id: str, cid: str, output: str):
     nb = get_notebook(nb_id)
     for c in nb.cells:
@@ -1460,7 +1493,7 @@ def post(nb_id: str, cid: str, output: str):
             break
     return ""
 
-@rt("/notebook/{nb_id}/cell/{cid}/type")
+@rt("/dialeng/{nb_id}/cell/{cid}/type")
 async def post(nb_id: str, cid: str, cell_type: str):
     nb = get_notebook(nb_id)
     for c in nb.cells:
@@ -1477,7 +1510,7 @@ async def post(nb_id: str, cid: str, cell_type: str):
             return CellView(c, nb.id)
     return ""
 
-@rt("/notebook/{nb_id}/cell/{cid}/move/{direction}")
+@rt("/dialeng/{nb_id}/cell/{cid}/move/{direction}")
 async def post(nb_id: str, cid: str, direction: str):
     nb = get_notebook(nb_id)
     for i, c in enumerate(nb.cells):
@@ -1495,7 +1528,7 @@ async def post(nb_id: str, cid: str, direction: str):
 
     return AllCells(nb)
 
-@rt("/notebook/{nb_id}/cell/{cid}/collapse")
+@rt("/dialeng/{nb_id}/cell/{cid}/collapse")
 async def post(nb_id: str, cid: str, collapsed: str):
     nb = get_notebook(nb_id)
     cell = None
@@ -1512,7 +1545,7 @@ async def post(nb_id: str, cid: str, collapsed: str):
 
     return ""
 
-@rt("/notebook/{nb_id}/cell/{cid}/collapse-section")
+@rt("/dialeng/{nb_id}/cell/{cid}/collapse-section")
 async def post(nb_id: str, cid: str, section: str, level: int):
     """Update collapse level for input or output section"""
     nb = get_notebook(nb_id)
@@ -1543,8 +1576,16 @@ async def post(nb_id: str, cid: str, section: str, level: int):
 
     return ""
 
-@rt("/notebook/{nb_id}/cell/{cid}/run")
+@rt("/dialeng/{nb_id}/cell/{cid}/run")
 async def post(nb_id: str, cid: str, source: str = None):
+    # Guard: require explicit kernel selection before any cell execution
+    if not kernel_service.has_kernel(nb_id):
+        from starlette.responses import Response
+        resp = Response("", status_code=200, headers={
+            "HX-Trigger": json.dumps({"kernel-required": {"cellId": cid}})
+        })
+        return resp
+
     nb = get_notebook(nb_id)
     cell_index = None
     target_cell = None
@@ -1897,7 +1938,7 @@ async def post(nb_id: str, cid: str, source: str = None):
         Script(f"setTimeout(() => focusNextCell('{next_cell_id}'), 50);")
     )
 
-@rt("/notebook/{nb_id}/kernel/restart")
+@rt("/dialeng/{nb_id}/kernel/restart")
 async def post(nb_id: str):
     """Restart the kernel for a specific notebook."""
     await broadcast_kernel_status(nb_id, "restarting")
@@ -1941,7 +1982,7 @@ async def post(nb_id: str):
 
     return Div("✓ Kernel restarted", cls="status success")
 
-@rt("/notebook/{nb_id}/kernel/interrupt")
+@rt("/dialeng/{nb_id}/kernel/interrupt")
 async def post(nb_id: str):
     """Interrupt currently running code in the notebook's kernel."""
     success = await kernel_service.interrupt_async(nb_id)
@@ -1950,7 +1991,7 @@ async def post(nb_id: str):
     else:
         return Div("No kernel to interrupt", cls="status warning")
 
-@rt("/notebook/{nb_id}/queue/cancel_all")
+@rt("/dialeng/{nb_id}/queue/cancel_all")
 async def post(nb_id: str):
     """Cancel running cell AND clear entire queue."""
     print(f"[CANCEL_ALL] Received cancel_all request for notebook {nb_id}")
@@ -2136,7 +2177,7 @@ async def post(dlg_name: str, content: str, placement: str = "add_after", id_: s
                 async with httpx.AsyncClient() as client:
                     try:
                         await client.post(
-                            f'http://localhost:8000/notebook/{dlg_name}/cell/{new_cell.id}/run',
+                            f'http://localhost:8000/dialeng/{dlg_name}/cell/{new_cell.id}/run',
                             timeout=300.0
                         )
                     except Exception as e:
@@ -2483,7 +2524,7 @@ async def post(dlg_name: str, id_: str):
     await broadcast_to_notebook(dlg_name, CellHeaderOOB(cell, dlg_name))
     return {"status": "ok", "heading_collapsed": cell.heading_collapsed}
 
-@rt("/notebook/{nb_id}/cell/{cell_id}/toggle/{prop}")
+@rt("/dialeng/{nb_id}/cell/{cell_id}/toggle/{prop}")
 async def post(nb_id: str, cell_id: str, prop: str):
     """Toggle a boolean cell property (skipped, pinned, is_exported)."""
     allowed = {'skipped', 'pinned', 'is_exported'}

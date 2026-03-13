@@ -52,7 +52,7 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                  config: Optional[DialengConfig] = None, shfmt_available: bool = True,
                  colab_enabled: bool = False, colab_authenticated: bool = False,
                  notebooks_dir: Optional[Path] = None, kernel_alive: bool = False,
-                 kernel_notebooks: Optional[set] = None):
+                 kernel_notebooks: Optional[set] = None, has_craft_code: bool = False):
     """Render the complete notebook page.
 
     Args:
@@ -122,14 +122,14 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                             *[Option(label, value=mode_id, selected=nb.dialog_mode == mode_id)
                               for mode_id, label in available_dialog_modes],
                             cls="mode-select", name="mode", id="mode-select",
-                            hx_post=f"/notebook/{nb.id}/mode", hx_swap="none", title="AI Mode",
+                            hx_post=f"/dialeng/{nb.id}/mode", hx_swap="none", title="AI Mode",
                             onchange="toggleModelSelect(this.value)"
                         ),
                         Select(
                             *[Option(label, value=model_id, selected=nb.model == model_id)
                               for model_id, label in available_models],
                             cls="model-select", name="model", id="model-select",
-                            hx_post=f"/notebook/{nb.id}/model", hx_swap="none", title="Model",
+                            hx_post=f"/dialeng/{nb.id}/model", hx_swap="none", title="Model",
                             style="display: none;" if nb.dialog_mode == "mock" else ""
                         ),
                         # Safe mode toggle for shell commands
@@ -144,14 +144,14 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                         # Kernel selector (compact toolbar button → opens modal)
                         KernelToolbarButton(nb),
                         Button(icon_sprites('rotate-ccw', sz=14), cls="btn btn-sm",
-                               hx_post=f"/notebook/{nb.id}/kernel/restart", hx_target="#status", title="Restart kernel"),
+                               hx_post=f"/dialeng/{nb.id}/kernel/restart", hx_target="#status", title="Restart kernel"),
                         Button(icon_sprites('square', sz=14), " Cancel", cls="btn btn-sm btn-cancel-all", id="cancel-all-btn",
                                onclick="cancelAllExecution()", title="Cancel running cell and clear queue (Esc Esc)",
                                style="display: none;"),
                         Button(icon_sprites('save', sz=14), cls="btn btn-sm btn-save", id="save-btn",
-                               hx_post=f"/notebook/{nb.id}/save", hx_target="#status", title="Save (Ctrl+S)"),
+                               hx_post=f"/dialeng/{nb.id}/save", hx_target="#status", title="Save (Ctrl+S)"),
                         Button(icon_sprites('download', sz=14), cls="btn btn-sm",
-                               hx_get=f"/notebook/{nb.id}/export", title="Download .ipynb"),
+                               hx_get=f"/dialeng/{nb.id}/export", title="Download .ipynb"),
                         Button(icon_sprites('settings', sz=16), cls="btn btn-sm settings-btn", id="settings-btn",
                                onclick="toggleSettings()", title="Settings"),
                         # Extension toolbar items
@@ -163,7 +163,11 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                 ),
                 Div(id="status"),
                 AllCells(nb),
-                Script(f"window.NOTEBOOK_ID = '{nb.id}';"),
+                Script(f"""
+                    window.NOTEBOOK_ID = '{nb.id}';
+                    window.KERNEL_ALIVE = {'true' if kernel_alive else 'false'};
+                    window.HAS_CRAFT_CODE = {'true' if has_craft_code else 'false'};
+                """),
                 Script(f"document.addEventListener('DOMContentLoaded', () => connectWebSocket('{nb.id}'));"),
                 Div(id="ephemeral"),  # Container for dialoghelper script injection (matches add_scr default)
                 cls="container"
@@ -176,6 +180,8 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
         DeleteConfirmModal(),
         # Kernel selection modal (overlay style, hidden by default)
         KernelModal(nb.id, nb.kernel_type, colab_authenticated, nb.colab_runtime_type),
+        # Auto-show kernel modal if no kernel is attached (runs after modal is in DOM)
+        Script("if(!window.KERNEL_ALIVE){var o=document.getElementById('kernel-modal-overlay');if(o)o.classList.add('visible');}") if not kernel_alive else None,
         # Settings sidebar and overlay (outside main layout - overlay style)
         SettingsOverlay() if config else None,
         SettingsSidebar(config) if config else None

@@ -128,7 +128,7 @@ def get_status(self) -> KernelStatus:
     return KernelStatus(..., connection_state=conn_state)
 ```
 
-The UI's `/notebook/{nb_id}/kernel/status` endpoint returns this state, so users see progress like:
+The UI's `/dialeng/{nb_id}/kernel/status` endpoint returns this state, so users see progress like:
 - `"initializing: Setting up matplotlib"`
 - `"initializing: Installing dialoghelper"`
 - `"initializing: Configuring dialoghelper proxy"`
