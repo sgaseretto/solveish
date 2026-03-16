@@ -310,11 +310,14 @@ def _check_claude_agent_sdk_credentials() -> Tuple[bool, str]:
             return True, "claude_agent_sdk: probe completed successfully"
 
         # Run the async probe
-        loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(_probe())
-        finally:
-            loop.close()
+            return asyncio.run(_probe())
+        except RuntimeError:
+            # Already inside an event loop (e.g. during uvicorn startup) —
+            # fall back to a new loop in a thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, _probe()).result(timeout=10)
 
     except ImportError:
         return False, "claude_agent_sdk: not installed"

@@ -2888,7 +2888,7 @@ def main(root_dir: Path = None, port: int = 8000):
     print("   • Alt+↑/↓           - Move cell up/down")
     print("   • Escape            - Exit edit mode")
     print("   • Double-click      - Edit markdown/response")
-    serve(port=port, reload_excludes=[".autorun_modules/*"])
+    serve(appname="dialeng.app", port=port, reload_excludes=[".autorun_modules/*"])
 
 
 if __name__ == "__main__":
