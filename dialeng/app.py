@@ -420,6 +420,18 @@ def save_notebook(notebook_id: str):
         # Use existing path if set (preserves subdirectory location), else reconstruct from ID
         path = nb.path if nb.path else NOTEBOOKS_DIR / f"{_nb_id_to_relpath(notebook_id)}.ipynb"
         nb.save(str(path))
+        # Auto-extract #| export cells to _lib/ if notebook has #| default_exp
+        try:
+            from dialeng.services.lib_export_service import maybe_extract
+            result = maybe_extract(Path(path), root_dir=NOTEBOOKS_DIR)
+            if result:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"_lib export: {result['module']} ({result['cells_exported']} cells)")
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"_lib export failed for {notebook_id}: {e}")
 
 def list_notebooks() -> List[str]:
     return [p.stem for p in NOTEBOOKS_DIR.glob("*.ipynb")]
