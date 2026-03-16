@@ -309,15 +309,18 @@ def _check_claude_agent_sdk_credentials() -> Tuple[bool, str]:
                 return True, f"claude_agent_sdk: probe completed with: {e}"
             return True, "claude_agent_sdk: probe completed successfully"
 
-        # Run the async probe
+        # Run the async probe — check for running loop first to avoid
+        # creating a coroutine that can never be awaited
         try:
-            return asyncio.run(_probe())
-        except RuntimeError:
+            asyncio.get_running_loop()
             # Already inside an event loop (e.g. during uvicorn startup) —
-            # fall back to a new loop in a thread
+            # run in a separate thread with its own loop
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 return pool.submit(asyncio.run, _probe()).result(timeout=10)
+        except RuntimeError:
+            # No running loop — safe to use asyncio.run directly
+            return asyncio.run(_probe())
 
     except ImportError:
         return False, "claude_agent_sdk: not installed"
