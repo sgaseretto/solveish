@@ -276,3 +276,7 @@ graph TD
 **Separation of concerns:**
 - `#| export` cells → run in the **main server process** (have access to registry, can define routes)
 - Non-export code cells → run in an **isolated background kernel** (`autorun_{name}`) — good for data pipelines, monitoring, initialization tasks
+
+---
+
+> **Note:** The `#| export` directive is also used outside of AUTORUN for the **`_lib` extraction workflow**, where exported cells are auto-extracted to reusable Python modules on notebook save. See the [Notebook to Package guide](notebook_to_package.md) for details on that progression.

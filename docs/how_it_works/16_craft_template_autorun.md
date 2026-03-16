@@ -238,6 +238,8 @@ This is where custom kernel types, LLM providers, toolbar items, and settings se
 
 > **Tutorial**: For a step-by-step guide to writing notebook-based AUTORUN extensions with hot-reload, see [Writing AUTORUN Extensions](../guides/autorun_extensions.md).
 
+> **Related**: The `_lib` extraction workflow uses similar mechanics (extracting `#| export` cells into `.py` modules on notebook save) but targets reusable code sharing between notebooks rather than extension registration. See the [Notebook to Package guide](../guides/notebook_to_package.md) for details.
+
 ### Phase 2: Background Notebooks
 
 Each `.ipynb` in `AUTORUN/` gets its own kernel (`autorun_{stem}`) and all code cells are executed sequentially. Errors are logged but don't affect other notebooks.

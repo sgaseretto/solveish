@@ -10,7 +10,8 @@ docs/
 ├── guides/
 │   ├── gui_overview.md             # Visual guide to the notebook interface
 │   ├── colab_oauth_setup.md        # Google Colab OAuth configuration
-│   └── autorun_extensions.md      # Writing AUTORUN extensions (tutorial)
+│   ├── autorun_extensions.md      # Writing AUTORUN extensions (tutorial)
+│   └── notebook_to_package.md    # Explore → Reuse → Package progression
 └── how_it_works/                   # Deep dives into feature implementations
     ├── README.md                   # Index with recommended reading order
     ├── 01_state_management.md      # Notebook/cell state, persistence
@@ -24,6 +25,7 @@ docs/
 - [Main README](../README.md) - Quick start, features, keyboard shortcuts
 - [GUI Overview](guides/gui_overview.md) - Visual guide to every section of the interface
 - [Writing AUTORUN Extensions](guides/autorun_extensions.md) - Tutorial for creating extensions from notebooks
+- [Notebook to Package](guides/notebook_to_package.md) - Three-phase progression from exploration to published package
 
 ### For Developers
 - [DEVELOPERS.md](../DEVELOPERS.md) - Extension points, patterns, architecture
