@@ -274,6 +274,12 @@ notebooks: Dict[str, Notebook] = {}
 NOTEBOOKS_DIR = Path(os.environ.get("DIALENG_NOTEBOOKS_DIR", "notebooks"))
 NOTEBOOKS_DIR.mkdir(exist_ok=True)
 
+def set_root_dir(root: Path):
+    """Set the notebooks root directory. Called by CLI before main()."""
+    global NOTEBOOKS_DIR
+    NOTEBOOKS_DIR = root
+    NOTEBOOKS_DIR.mkdir(exist_ok=True)
+
 # Track active WebSocket connections per notebook (list of send functions)
 ws_connections: Dict[str, List[Any]] = {}
 
@@ -306,39 +312,61 @@ def _load_notebook(path: str) -> Notebook:
     return nb
 
 
-def _nb_id_from_path(path: Path) -> str:
-    """Derive a URL-safe notebook ID from a file path.
+def _nb_id_encode_part(part: str) -> str:
+    """Escape tildes in a single path component: ~ → ~~"""
+    return part.replace("~", "~~")
 
-    Uses the file stem for root notebooks, and dir_stem for subdirectory ones.
+def _nb_id_from_path(path: Path) -> str:
+    """Derive a collision-proof, URL-safe notebook ID from a file path.
+
+    Uses ~ as path separator with ~~ escaping for literal tildes in names.
+    The encoding is fully reversible via _nb_id_to_relpath().
+
     Examples: notebooks/test.ipynb → 'test'
-              notebooks/subfolder/test.ipynb → 'subfolder_test'
-              notebooks/a/b/test.ipynb → 'a_b_test'
+              notebooks/subfolder/test.ipynb → 'subfolder~test'
+              notebooks/a/b/test.ipynb → 'a~b~test'
+              notebooks/my_project/analysis.ipynb → 'my_project~analysis'
+              notebooks/has~tilde.ipynb → 'has~~tilde'
     """
     try:
         rel = path.resolve().relative_to(NOTEBOOKS_DIR.resolve())
     except ValueError:
-        return path.stem
+        return _nb_id_encode_part(path.stem)
     parts = list(rel.parts)
     parts[-1] = rel.stem  # Remove .ipynb extension
-    return "_".join(parts) if len(parts) > 1 else parts[0]
+    encoded = [_nb_id_encode_part(p) for p in parts]
+    return "~".join(encoded) if len(encoded) > 1 else encoded[0]
+
+def _nb_id_to_relpath(notebook_id: str) -> Path:
+    """Reverse a notebook ID back to a relative path (without .ipynb extension).
+
+    Decodes ~ separator and ~~ escape to reconstruct the original path.
+    This is the inverse of _nb_id_from_path().
+
+    Examples: 'test' → Path('test')
+              'subfolder~test' → Path('subfolder/test')
+              'a~b~test' → Path('a/b/test')
+              'has~~tilde' → Path('has~tilde')
+              'a~~b~c' → Path('a~b/c')
+    """
+    # Replace ~~ with a placeholder, split on ~, restore placeholder to ~
+    placeholder = "\x00"
+    safe = notebook_id.replace("~~", placeholder)
+    parts = safe.split("~")
+    parts = [p.replace(placeholder, "~") for p in parts]
+    return Path(*parts) if len(parts) > 1 else Path(parts[0])
 
 def _find_notebook_path(notebook_id: str) -> Optional[Path]:
-    """Find a notebook file by ID, checking root first then subdirectories."""
-    # Check root directly (most common case)
-    root_path = NOTEBOOKS_DIR / f"{notebook_id}.ipynb"
-    if root_path.exists():
-        return root_path
+    """Find a notebook file by ID using direct path reconstruction."""
+    # Decode the ID to a relative path and look up directly
+    rel = _nb_id_to_relpath(notebook_id)
+    direct_path = NOTEBOOKS_DIR / f"{rel}.ipynb"
+    if direct_path.exists():
+        return direct_path
     # Check if an in-memory notebook has a path set
     if notebook_id in notebooks and notebooks[notebook_id].path:
         p = Path(notebooks[notebook_id].path)
         if p.exists():
-            return p
-    # Reverse the _ encoding: scan all notebooks and find the one whose
-    # _nb_id_from_path matches this notebook_id
-    for p in NOTEBOOKS_DIR.rglob("*.ipynb"):
-        if any(part.startswith('.') or part == '__pycache__' for part in p.relative_to(NOTEBOOKS_DIR).parts):
-            continue
-        if _nb_id_from_path(p) == notebook_id:
             return p
     return None
 
@@ -389,8 +417,8 @@ def get_notebook(notebook_id: str) -> Notebook:
 def save_notebook(notebook_id: str):
     if notebook_id in notebooks:
         nb = notebooks[notebook_id]
-        # Use existing path if set (preserves subdirectory location), else default to root
-        path = nb.path if nb.path else NOTEBOOKS_DIR / f"{notebook_id}.ipynb"
+        # Use existing path if set (preserves subdirectory location), else reconstruct from ID
+        path = nb.path if nb.path else NOTEBOOKS_DIR / f"{_nb_id_to_relpath(notebook_id)}.ipynb"
         nb.save(str(path))
 
 def list_notebooks() -> List[str]:
@@ -687,6 +715,12 @@ async def broadcast_json(nb_id: str, data: dict, exclude_send=None):
     ws_connections[nb_id] = alive
 
 
+async def broadcast_all_json(data: dict):
+    """Broadcast a JSON message to ALL WebSocket connections across all notebooks."""
+    for nb_id in list(ws_connections.keys()):
+        await broadcast_json(nb_id, data)
+
+
 async def broadcast_queue_state(nb_id: str):
     """Broadcast current queue state to all clients."""
     queue = get_execution_queue(nb_id)
@@ -831,6 +865,45 @@ app, rt = fast_app(
 async def _autorun_startup():
     await process_autorun(kernel_service)
 
+# ============================================================================
+# Extension Development Endpoints
+# ============================================================================
+
+@rt("/dialeng/reload-extensions")
+async def post():
+    """Re-extract and reload all AUTORUN extensions, then refresh all clients.
+
+    Used during extension development to pick up changes to #| export cells
+    without restarting the server. Call from a notebook:
+        from dialeng.dev import reload_extensions
+        reload_extensions()
+    """
+    from dialeng.services.autorun_service import reload_autorun_extensions
+    result = reload_autorun_extensions()
+    await broadcast_all_json({"type": "extensions_reloaded"})
+    return result
+
+@rt("/dialeng/{nb_id}/ext/{action_name}")
+async def post(nb_id: str, action_name: str, **kwargs):
+    """Execute a registered extension action.
+
+    Extensions register actions via @register_action("name") in #| export cells.
+    Toolbar buttons or notebook code can POST here to trigger server-side logic.
+    """
+    import asyncio
+    handler = registry.actions.get(action_name)
+    if not handler:
+        return {"error": f"Unknown action: {action_name}"}, 404
+    try:
+        if asyncio.iscoroutinefunction(handler):
+            result = await handler(nb_id=nb_id, **kwargs)
+        else:
+            result = handler(nb_id=nb_id, **kwargs)
+        return result if isinstance(result, dict) else {"result": result}
+    except Exception as e:
+        print(f"[EXT] Action '{action_name}' failed: {e}", flush=True)
+        return {"error": str(e)}, 500
+
 # Static file serving
 @rt("/static/{path:path}")
 async def get(path: str):
@@ -949,9 +1022,9 @@ def post(path: str = ""):
     if target.exists() and target.is_file():
         target.unlink()
         # Remove from in-memory notebooks if loaded
-        nb_name = Path(path).name
-        if nb_name in notebooks:
-            del notebooks[nb_name]
+        nb_id = _nb_id_from_path(target)
+        if nb_id in notebooks:
+            del notebooks[nb_id]
     parent = target.parent
     kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
     return FileListContent(parent, NOTEBOOKS_DIR, "", kernel_notebooks=kernel_nbs)
@@ -2746,10 +2819,12 @@ async def ws(msg: str, send, nb_id: str):
 # Run
 # ============================================================================
 
-def main():
+def main(root_dir: Path = None, port: int = 8000):
     """CLI entry point for dialeng."""
-    print("🚀 Dialeng starting at http://localhost:8000")
-    print("   Notebooks saved to: ./notebooks/")
+    if root_dir is not None:
+        set_root_dir(root_dir)
+    print(f"🚀 Dialeng starting at http://localhost:{port}")
+    print(f"   Root directory: {NOTEBOOKS_DIR.resolve()}")
     print("   Format: Solveit-compatible .ipynb")
     print("")
     # Print credential status
@@ -2774,7 +2849,7 @@ def main():
     print("   • Alt+↑/↓           - Move cell up/down")
     print("   • Escape            - Exit edit mode")
     print("   • Double-click      - Edit markdown/response")
-    serve(port=8000)
+    serve(port=port, reload_excludes=[".autorun_modules/*"])
 
 
 if __name__ == "__main__":

@@ -57,7 +57,7 @@ dependencies = [
 ]
 
 [project.scripts]
-dialeng = "dialeng.app:main"
+dialeng = "dialeng.cli:cli"
 
 [build-system]
 requires = ["hatchling"]
