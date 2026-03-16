@@ -1115,6 +1115,25 @@ def post(nb_id: str, safe_mode: str = "false"):
     return ""
 
 # ============================================================================
+# Kernel Helpers
+# ============================================================================
+
+async def _inject_lib_syspath(nb_id: str):
+    """If _lib/ exists in NOTEBOOKS_DIR, add NOTEBOOKS_DIR to the kernel's sys.path."""
+    lib_dir = NOTEBOOKS_DIR / "_lib"
+    if not lib_dir.exists():
+        return
+    notebooks_path = str(NOTEBOOKS_DIR.resolve())
+    setup_code = f"import sys; sys.path.insert(0, {notebooks_path!r}) if {notebooks_path!r} not in sys.path else None"
+    cell = Cell(id="_lib_syspath_setup", cell_type=CellType.CODE, source=setup_code)
+    try:
+        async for _ in kernel_service.execute_cell(nb_id, cell):
+            pass
+        print(f"[LIB] Injected sys.path for _lib/ into kernel {nb_id}", flush=True)
+    except Exception as e:
+        print(f"[LIB] Failed to inject sys.path for {nb_id}: {e}", flush=True)
+
+# ============================================================================
 # Kernel Management Routes
 # ============================================================================
 
@@ -1203,11 +1222,14 @@ def get(nb_id: str):
 
 @rt("/dialeng/{nb_id}/kernel/craft-init")
 async def post(nb_id: str):
-    """Execute CRAFT code cells after kernel selection.
+    """Execute kernel setup (_lib/ sys.path) and CRAFT code cells after kernel selection.
 
-    Called by the client after the user selects a kernel, so CRAFT setup
+    Called by the client after the user selects a kernel, so setup
     code runs before any manual cell execution.
     """
+    # Always inject _lib/ sys.path at kernel init
+    asyncio.create_task(_inject_lib_syspath(nb_id))
+
     nb = get_notebook(nb_id)
     nb_path = nb.path
     if not nb_path:
@@ -2034,8 +2056,9 @@ async def post(nb_id: str):
     reset_craft_tracking(nb_id)
     print(f"[CRAFT] Reset execution tracking for {nb_id} (kernel restart)", flush=True)
 
-    # Re-run CRAFT code cells in the fresh kernel
+    # Inject _lib/ sys.path and re-run CRAFT code cells in the fresh kernel
     nb = notebooks.get(nb_id)
+    craft_cells = []
     if nb:
         nb_path = nb.path
         if not nb_path:
@@ -2053,17 +2076,21 @@ async def post(nb_id: str):
                     # Mark synchronously to prevent race conditions
                     _executed_craft.setdefault(nb_id, set()).update(cid for cid, _ in craft_cells)
                     print(f"[CRAFT] Re-executing {len(craft_cells)} code cells after kernel restart", flush=True)
-                    async def _run_craft():
-                        for cid, src in craft_cells:
-                            try:
-                                cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
-                                async for _ in kernel_service.execute_cell(nb_id, cell):
-                                    pass
-                                print(f"[CRAFT] Executed: {cid}", flush=True)
-                            except Exception as e:
-                                print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
-                        print(f"[CRAFT] All cells re-executed for {nb_id}", flush=True)
-                    asyncio.create_task(_run_craft())
+
+    async def _restart_setup():
+        # Inject _lib/ sys.path before running CRAFT cells
+        await _inject_lib_syspath(nb_id)
+        for cid, src in craft_cells:
+            try:
+                cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
+                async for _ in kernel_service.execute_cell(nb_id, cell):
+                    pass
+                print(f"[CRAFT] Executed: {cid}", flush=True)
+            except Exception as e:
+                print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
+        if craft_cells:
+            print(f"[CRAFT] All cells re-executed for {nb_id}", flush=True)
+    asyncio.create_task(_restart_setup())
 
     return Div("✓ Kernel restarted", cls="status success")
 
