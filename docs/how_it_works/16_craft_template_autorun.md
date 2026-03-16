@@ -236,6 +236,8 @@ sequenceDiagram
 
 This is where custom kernel types, LLM providers, toolbar items, and settings sections get registered.
 
+> **Tutorial**: For a step-by-step guide to writing notebook-based AUTORUN extensions with hot-reload, see [Writing AUTORUN Extensions](../guides/autorun_extensions.md).
+
 ### Phase 2: Background Notebooks
 
 Each `.ipynb` in `AUTORUN/` gets its own kernel (`autorun_{stem}`) and all code cells are executed sequentially. Errors are logged but don't affect other notebooks.

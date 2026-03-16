@@ -208,6 +208,8 @@ registry.register_kernel_type(KernelRegistration(
 
 After placing this in `AUTORUN/`, restart the server. The kernel will appear in the kernel selection modal.
 
+> **Tutorial**: For a complete walkthrough of creating an AUTORUN extension from a notebook — including decorator-based registration and hot-reload — see [Writing AUTORUN Extensions](../guides/autorun_extensions.md).
+
 For toolbar and settings extensions:
 
 ```python
