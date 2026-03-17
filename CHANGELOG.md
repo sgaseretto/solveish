@@ -9,17 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### CLI `--init` Flag
+- `dialeng --init` initializes the reuse workflow (CRAFT.ipynb, pyproject.toml, package dir) on startup
+- `dialeng --init my_pkg` uses an explicit package name
+- Auto-detects package name from existing `[tool.dialeng]` or `[tool.nbdev]` config, or derives from directory name
+- Safe to re-run: updates generated cells, preserves user-created cells
+- Non-existent directories are created automatically (e.g., `dialeng new_folder --init`)
+- Enhanced `dialeng -h` with usage examples and phase documentation
+
 #### CRAFT Init Extension
 - New toolbar button (square-library icon) to initialize a package-aware CRAFT.ipynb
-- Prompts for a package name (valid Python identifier) and creates:
-  - `pyproject.toml` with `[tool.dialeng] lib_name` configuration
-  - `CRAFT.ipynb` with sys.path setup for the package directory
-  - Package directory with `__init__.py`
+- Prompts for a package name (valid Python identifier), pre-filled from existing config
+- Confirmation dialog when CRAFT.ipynb already exists
+- Creates `pyproject.toml`, `CRAFT.ipynb`, and package directory with `__init__.py`
 - Merges existing CRAFT.ipynb content when re-initializing (user cells preserved)
-- Core extension at `dialeng/extensions/craft_init.py`
+- CRAFT.ipynb now includes a "Transitioning to a Python Package" guide section
+- Core extension at `dialeng/extensions/craft_init.py`, logic in `dialeng/services/craft_init_service.py`
 
 #### Configurable Export Folder
-- Save-hook extraction now reads lib name from `pyproject.toml [tool.dialeng] lib_name`
+- Save-hook extraction reads lib name from `pyproject.toml`, checking `[tool.dialeng]` then `[tool.nbdev]`
+- Seamless integration with existing nbdev projects (no `[tool.dialeng]` section needed)
 - Defaults to `_lib` when no configuration exists (backward compatible)
 - `_inject_lib_syspath()` uses the configured folder name
 
@@ -29,6 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uses base64 encoding for safe file transfer to remote kernel
 
 ### Fixed
+
+#### Kernel Restart Status Dot
+- Kernel status dot now turns green after restart completes (previously stayed yellow)
+- Removed "Kernel restarted" flash message (dot color is sufficient feedback)
+
+#### Package Scaffold with Existing pyproject.toml
+- `dialeng package init` now merges into existing `pyproject.toml` instead of erroring
+- Skips gracefully if `[tool.nbdev]` section already exists
+- `scan_notebook_modules` skips the configured lib directory, not just hardcoded `_lib`
 
 #### Extension Action Endpoint
 - Fixed `/dialeng/{nb_id}/ext/{action_name}` endpoint not passing form parameters to action handlers (FastHTML ignores `**kwargs`; now uses `request.form()`)

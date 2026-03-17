@@ -16,13 +16,24 @@ LIB_DIR_NAME = "_lib"
 
 
 def get_lib_name(root_dir: Path) -> str:
-    """Read lib_name from pyproject.toml [tool.dialeng], defaulting to '_lib'."""
+    """Read lib_name from pyproject.toml, checking [tool.dialeng] then [tool.nbdev].
+
+    This allows dialeng to work seamlessly in existing nbdev projects
+    without requiring a separate [tool.dialeng] section.
+    """
     pyproject = root_dir / "pyproject.toml"
     if pyproject.exists():
         try:
             import tomllib
             data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-            return data.get("tool", {}).get("dialeng", {}).get("lib_name", LIB_DIR_NAME)
+            tool = data.get("tool", {})
+            # Prefer [tool.dialeng] lib_name, fall back to [tool.nbdev] lib_name
+            dialeng_name = tool.get("dialeng", {}).get("lib_name")
+            if dialeng_name:
+                return dialeng_name
+            nbdev_name = tool.get("nbdev", {}).get("lib_name")
+            if nbdev_name:
+                return nbdev_name
         except Exception:
             pass
     return LIB_DIR_NAME

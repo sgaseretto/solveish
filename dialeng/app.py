@@ -2153,9 +2153,11 @@ async def post(nb_id: str):
                 print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
         if craft_cells:
             print(f"[CRAFT] All cells re-executed for {nb_id}", flush=True)
+        # Signal frontend that restart setup is complete → dot turns green
+        await broadcast_kernel_status(nb_id, "connected")
     asyncio.create_task(_restart_setup())
 
-    return Div("✓ Kernel restarted", cls="status success")
+    return Div(cls="status")
 
 @rt("/dialeng/{nb_id}/kernel/interrupt")
 async def post(nb_id: str):

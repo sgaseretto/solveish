@@ -14,7 +14,9 @@ A guide to evolving from exploratory notebooks to reusable modules to publishabl
 
 ## Overview
 
-Dialeng supports a natural progression from experimentation to production. You start by exploring ideas in notebooks, graduate to sharing code between notebooks via `_lib/`, and finally scaffold a full Python package with nbdev integration.
+Dialeng supports a natural progression from experimentation to production. You start by exploring ideas in notebooks, graduate to sharing code between notebooks via a configurable package directory, and finally scaffold a full Python package with nbdev integration.
+
+Run `dialeng -h` to see all available commands and options.
 
 ```mermaid
 flowchart LR
@@ -69,9 +71,26 @@ No special directives are needed -- just write code and explore ideas.
 
 When you find yourself copying code between notebooks, it is time to extract reusable modules.
 
-### Quick start: CRAFT Init button
+### Quick start: CLI or toolbar button
 
-The fastest way to get started is the **CRAFT Init** toolbar button (square-library icon). Click it, enter a package name, and it sets up everything:
+There are two ways to initialize the reuse workflow:
+
+**Option A: CLI flag** (recommended for new projects)
+
+```bash
+# Auto-detect name from pyproject.toml or directory name
+dialeng --init
+
+# Explicit package name
+dialeng --init my_pkg
+
+# Create a new project from scratch
+dialeng my-project --init my_pkg
+```
+
+**Option B: Toolbar button** (from within a running server)
+
+The **CRAFT Init** toolbar button (square-library icon) does the same thing. Click it, enter a package name, and it sets up everything:
 
 ```mermaid
 sequenceDiagram
@@ -102,7 +121,7 @@ This creates three things:
 3. On save, the exported cells are automatically extracted to `{lib_name}/{module_name}.py`
 4. Other notebooks can immediately `from {lib_name}.module_name import ...`
 
-The export folder name is read from `pyproject.toml [tool.dialeng] lib_name`. If no `pyproject.toml` exists (e.g., older projects), it defaults to `_lib/`.
+The export folder name is read from `pyproject.toml`, checking `[tool.dialeng] lib_name` first, then `[tool.nbdev] lib_name` (for existing nbdev projects). If no configuration is found, it defaults to `_lib/`.
 
 ### Save-hook extraction pipeline
 
@@ -268,7 +287,7 @@ flowchart TD
     end
 
     subgraph "Phase 2: Reuse"
-        B0["Click CRAFT Init button"]
+        B0["dialeng --init or toolbar button"]
         B1["Add #| default_exp"]
         B2["Mark cells #| export"]
         B3["Auto-extracted to my_pkg/"]
