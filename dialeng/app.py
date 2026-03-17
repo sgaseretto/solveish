@@ -1213,6 +1213,10 @@ async def post(nb_id: str, kernel_type: str):
     runtime_type = nb.colab_runtime_type
     await kernel_service.set_kernel_type(nb_id, kernel_type, runtime_type=runtime_type)
 
+    # New kernel needs fresh CRAFT initialization (sys.path, uploads, CRAFT cells)
+    from dialeng.services.craft_service import reset_craft_tracking
+    reset_craft_tracking(nb_id)
+
     # Broadcast kernel type change to all clients
     msg = json.dumps({"type": "kernel_type_changed", "kernel_type": kernel_type})
     if nb_id in ws_connections and ws_connections[nb_id]:
@@ -1234,6 +1238,10 @@ async def post(nb_id: str, runtime_type: str):
         return Div("Runtime type only applies to Colab kernels", cls="status error")
 
     nb.colab_runtime_type = runtime_type
+
+    # New kernel needs fresh CRAFT initialization
+    from dialeng.services.craft_service import reset_craft_tracking
+    reset_craft_tracking(nb_id)
 
     # Switch the runtime type - this creates a new kernel object
     if colab_session_manager:
@@ -1286,12 +1294,6 @@ async def post(nb_id: str):
     Called by the client after the user selects a kernel, so setup
     code runs before any manual cell execution.
     """
-    # Always inject lib sys.path at kernel init, then upload to Colab if needed
-    async def _lib_init():
-        await _inject_lib_syspath(nb_id)
-        await _upload_lib_to_colab(nb_id)
-    asyncio.create_task(_lib_init())
-
     nb = get_notebook(nb_id)
     nb_path = nb.path
     if not nb_path:
@@ -1300,39 +1302,46 @@ async def post(nb_id: str):
         if found:
             nb.path = found
 
-    if not nb_path or not Path(nb_path).exists():
-        return ""
+    # Collect CRAFT cells to execute
+    unexecuted = []
+    if nb_path and Path(nb_path).exists():
+        from dialeng.services.craft_service import find_craft_files, get_craft_code_cells, _executed_craft
+        craft_paths = find_craft_files(nb_path, NOTEBOOKS_DIR)
+        nb_path_resolved = Path(nb_path).resolve()
+        craft_paths = [cp for cp in craft_paths if Path(cp).resolve() != nb_path_resolved]
+        if craft_paths:
+            craft_cells = get_craft_code_cells(craft_paths)
+            executed = _executed_craft.get(nb_id, set())
+            unexecuted = [(cid, src) for cid, src in craft_cells if cid not in executed]
+            if unexecuted:
+                # Mark all cells as executed synchronously to prevent double execution
+                _executed_craft.setdefault(nb_id, set()).update(cid for cid, _ in unexecuted)
+                print(f"[CRAFT] Executing {len(unexecuted)} code cells for {nb_id} from {len(craft_paths)} CRAFT file(s)", flush=True)
+                for cp in craft_paths:
+                    print(f"[CRAFT]   - {cp}", flush=True)
 
-    from dialeng.services.craft_service import find_craft_files, get_craft_code_cells, _executed_craft
-    craft_paths = find_craft_files(nb_path, NOTEBOOKS_DIR)
-    nb_path_resolved = Path(nb_path).resolve()
-    craft_paths = [cp for cp in craft_paths if Path(cp).resolve() != nb_path_resolved]
-    if not craft_paths:
-        return ""
-
-    craft_cells = get_craft_code_cells(craft_paths)
-    executed = _executed_craft.get(nb_id, set())
-    unexecuted = [(cid, src) for cid, src in craft_cells if cid not in executed]
-    if not unexecuted:
-        return ""
-
-    # Mark all cells as executed synchronously to prevent double execution
-    _executed_craft.setdefault(nb_id, set()).update(cid for cid, _ in unexecuted)
-    print(f"[CRAFT] Executing {len(unexecuted)} code cells for {nb_id} from {len(craft_paths)} CRAFT file(s)", flush=True)
-    for cp in craft_paths:
-        print(f"[CRAFT]   - {cp}", flush=True)
-
-    async def _run_craft():
-        for cid, src in unexecuted:
-            try:
-                cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
-                async for _ in kernel_service.execute_cell(nb_id, cell):
-                    pass
-                print(f"[CRAFT] Executed: {cid}", flush=True)
-            except Exception as e:
-                print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
-        print(f"[CRAFT] All cells executed for {nb_id}", flush=True)
-    asyncio.create_task(_run_craft())
+    # Run lib init and CRAFT cells in a single sequential task to avoid
+    # racing on Colab's lazy kernel connection (assign_and_connect)
+    async def _init_and_craft():
+        try:
+            await _inject_lib_syspath(nb_id)
+            await _upload_lib_to_colab(nb_id)
+            for cid, src in unexecuted:
+                try:
+                    cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
+                    async for _ in kernel_service.execute_cell(nb_id, cell):
+                        pass
+                    print(f"[CRAFT] Executed: {cid}", flush=True)
+                except Exception as e:
+                    print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
+            if unexecuted:
+                print(f"[CRAFT] All cells executed for {nb_id}", flush=True)
+            # Signal frontend that kernel setup is complete → dot turns green
+            await broadcast_kernel_status(nb_id, "connected")
+        except Exception as e:
+            print(f"[CRAFT] Init failed for {nb_id}: {e}", flush=True)
+            await broadcast_kernel_status(nb_id, "error")
+    asyncio.create_task(_init_and_craft())
     return ""
 
 # ============================================================================
@@ -2140,21 +2149,25 @@ async def post(nb_id: str):
                     print(f"[CRAFT] Re-executing {len(craft_cells)} code cells after kernel restart", flush=True)
 
     async def _restart_setup():
-        # Inject lib sys.path and re-upload to Colab before running CRAFT cells
-        await _inject_lib_syspath(nb_id)
-        await _upload_lib_to_colab(nb_id)
-        for cid, src in craft_cells:
-            try:
-                cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
-                async for _ in kernel_service.execute_cell(nb_id, cell):
-                    pass
-                print(f"[CRAFT] Executed: {cid}", flush=True)
-            except Exception as e:
-                print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
-        if craft_cells:
-            print(f"[CRAFT] All cells re-executed for {nb_id}", flush=True)
-        # Signal frontend that restart setup is complete → dot turns green
-        await broadcast_kernel_status(nb_id, "connected")
+        try:
+            # Inject lib sys.path and re-upload to Colab before running CRAFT cells
+            await _inject_lib_syspath(nb_id)
+            await _upload_lib_to_colab(nb_id)
+            for cid, src in craft_cells:
+                try:
+                    cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
+                    async for _ in kernel_service.execute_cell(nb_id, cell):
+                        pass
+                    print(f"[CRAFT] Executed: {cid}", flush=True)
+                except Exception as e:
+                    print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
+            if craft_cells:
+                print(f"[CRAFT] All cells re-executed for {nb_id}", flush=True)
+            # Signal frontend that restart setup is complete → dot turns green
+            await broadcast_kernel_status(nb_id, "connected")
+        except Exception as e:
+            print(f"[CRAFT] Restart setup failed for {nb_id}: {e}", flush=True)
+            await broadcast_kernel_status(nb_id, "error")
     asyncio.create_task(_restart_setup())
 
     return Div(cls="status")

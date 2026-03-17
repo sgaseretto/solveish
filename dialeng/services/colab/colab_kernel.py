@@ -150,10 +150,12 @@ class ColabKernel(BaseKernel):
     def connection_state(self) -> str:
         return self._connection_state
 
-    async def assign_and_connect(self) -> None:
+    async def assign_and_connect(self, max_retries: int = 5) -> None:
         """Assign a Colab runtime, create session, and connect WebSocket.
 
         Uses self.runtime_type to determine the variant (cpu/gpu/tpu).
+        Retries transient errors (503 Service Unavailable) with exponential
+        backoff — GPU/TPU runtimes can take time to spin up.
         """
         self._connection_state = "connecting"
         # Map runtime_type to Colab API variant + accelerator parameters
@@ -163,44 +165,69 @@ class ColabKernel(BaseKernel):
             "tpu":  {"variant": "TPU", "accelerator": ""},
         }
         rt = _RUNTIME_MAP.get(self.runtime_type, _RUNTIME_MAP["cpu"])
-        try:
-            # 0. Clean up any stale runtimes to avoid TooManyAssignmentsError
-            await self._cleanup_stale_runtimes()
 
-            # 1. Assign runtime via REST API (two-step XSRF)
-            self._assignment = await self._api.assign_kernel(
-                variant=rt["variant"], accelerator=rt["accelerator"]
-            )
-            proxy = self._assignment.proxy_info
-            self._token_expires_at = time.time() + proxy.token_expires_seconds
+        from dialeng.services.colab.colab_api import ColabAPIError
 
-            # 2. Create Jupyter session on the runtime
-            self._jupyter_session = await self._api.create_jupyter_session(
-                proxy.url, proxy.token
-            )
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                # 0. Clean up any stale runtimes to avoid TooManyAssignmentsError
+                await self._cleanup_stale_runtimes()
 
-            # 3. Open WebSocket to runtime
-            await self._connect_websocket()
+                # 1. Assign runtime via REST API (two-step XSRF)
+                self._assignment = await self._api.assign_kernel(
+                    variant=rt["variant"], accelerator=rt["accelerator"]
+                )
+                proxy = self._assignment.proxy_info
+                self._token_expires_at = time.time() + proxy.token_expires_seconds
 
-            # 4. Wait for kernel to be ready (kernel_info handshake)
-            await self._wait_for_kernel_ready()
+                # 2. Create Jupyter session on the runtime
+                self._jupyter_session = await self._api.create_jupyter_session(
+                    proxy.url, proxy.token
+                )
 
-            # 5. Initialize kernel (matplotlib inline backend, etc.)
-            await self._initialize_kernel()
+                # 3. Open WebSocket to runtime
+                await self._connect_websocket()
 
-            # 6. Start background tasks
-            self._keep_alive_task = asyncio.create_task(self._keep_alive_loop())
-            self._token_refresh_task = asyncio.create_task(self._token_refresh_loop())
+                # 4. Wait for kernel to be ready (kernel_info handshake)
+                await self._wait_for_kernel_ready()
 
-            self._connection_state = "connected"
-            logger.info(
-                f"Connected to Colab runtime: endpoint={self._assignment.endpoint}, "
-                f"kernel={self._jupyter_session.kernel_id}"
-            )
-        except Exception as e:
-            self._connection_state = "disconnected"
-            logger.error(f"Failed to connect to Colab: {e}")
-            raise
+                # 5. Initialize kernel (matplotlib inline backend, etc.)
+                await self._initialize_kernel()
+
+                # 6. Start background tasks
+                self._keep_alive_task = asyncio.create_task(self._keep_alive_loop())
+                self._token_refresh_task = asyncio.create_task(self._token_refresh_loop())
+
+                self._connection_state = "connected"
+                logger.info(
+                    f"Connected to Colab runtime: endpoint={self._assignment.endpoint}, "
+                    f"kernel={self._jupyter_session.kernel_id}"
+                )
+                return  # Success
+            except ColabAPIError as e:
+                last_error = e
+                # Retry on transient server errors (503, 500, 502, 504)
+                if getattr(e, 'status_code', 0) >= 500 and attempt < max_retries - 1:
+                    delay = 2 ** attempt  # 1s, 2s, 4s, 8s, 16s
+                    logger.warning(
+                        f"Colab API returned {e.status_code}, retrying in {delay}s "
+                        f"(attempt {attempt + 1}/{max_retries})"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                # Non-retryable API error or max retries exhausted
+                self._connection_state = "disconnected"
+                logger.error(f"Failed to connect to Colab: {e}")
+                raise
+            except Exception as e:
+                self._connection_state = "disconnected"
+                logger.error(f"Failed to connect to Colab: {e}")
+                raise
+
+        # Should not reach here, but just in case
+        self._connection_state = "disconnected"
+        raise last_error
 
     async def _cleanup_stale_runtimes(self) -> None:
         """Unassign all existing runtimes to avoid TooManyAssignmentsError."""

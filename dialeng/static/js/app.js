@@ -1670,9 +1670,11 @@ function connectWebSocket(notebookId) {
             console.log('[WS] kernel_type_changed:', data.kernel_type);
             handleKernelTypeChanged(data.kernel_type);
         } else if (data.type === 'kernel_connected') {
-            // Kernel connected after first execution — refresh status bar
+            // Kernel setup complete (CRAFT init, restart, or first execution)
             document.body.dispatchEvent(new CustomEvent('kernel-connected'));
             updateKernelDot('connected');
+            // Run any cell that was pending while waiting for kernel init
+            _runPendingCell();
         } else if (data.type === 'kernel_error') {
             // Kernel died or disconnected
             updateKernelDot('error');
@@ -3032,37 +3034,37 @@ function applyKernelSelection(nbId) {
         console.log('[Kernel] kernel/type response:', response.status);
         if (!response.ok) throw new Error(`kernel/type failed: ${response.status}`);
         return response.text();
-    }).then(() => {
-        // If Colab, also set runtime type
+    }).then(async () => {
+        // If Colab, set runtime type and WAIT before craft-init
+        // (set_runtime_type shuts down the old kernel and creates a new one)
         if (runtimeType && kernelType === 'colab') {
-            fetch(`/dialeng/${nbId}/kernel/runtime`, {
+            const rtResp = await fetch(`/dialeng/${nbId}/kernel/runtime`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/x-www-form-urlencoded'},
                 body: `runtime_type=${encodeURIComponent(runtimeType)}`
             });
+            console.log('[Kernel] runtime type response:', rtResp.status);
         }
 
         // Refresh kernel toolbar button
         htmx.ajax('GET', `/dialeng/${nbId}/kernel/info`, {target: '#kernel-status-bar', swap: 'outerHTML'});
 
-        // Execute CRAFT code cells now that kernel is selected
-        if (window.HAS_CRAFT_CODE) {
-            console.log('[Kernel] Triggering CRAFT init');
-            fetch(`/dialeng/${nbId}/kernel/craft-init`, { method: 'POST' })
-                .then(resp => {
-                    if (!resp.ok) throw new Error(`craft-init failed: ${resp.status}`);
-                    window.HAS_CRAFT_CODE = false;
-                    updateKernelDot('connected');
-                    _runPendingCell();
-                })
-                .catch(err => {
-                    console.error('[Kernel] CRAFT init error:', err);
-                    updateKernelDot('error');
-                });
-        } else {
-            updateKernelDot('connected');
-            _runPendingCell();
-        }
+        // Always trigger craft-init on kernel selection/switch.
+        // The backend handles: lib sys.path injection, Colab uploads, CRAFT cell
+        // execution. It's safe to call even with no CRAFT files (just does lib init).
+        // The dot stays yellow (busy) — the backend broadcasts kernel_connected
+        // via WebSocket when the background init task completes.
+        console.log('[Kernel] Triggering craft-init (dot will update via WebSocket)');
+        fetch(`/dialeng/${nbId}/kernel/craft-init`, { method: 'POST' })
+            .then(resp => {
+                if (!resp.ok) throw new Error(`craft-init failed: ${resp.status}`);
+                window.HAS_CRAFT_CODE = false;
+                // Pending cell runs when kernel_connected arrives via WebSocket
+            })
+            .catch(err => {
+                console.error('[Kernel] CRAFT init error:', err);
+                updateKernelDot('error');
+            });
     }).catch(err => {
         console.error('[Kernel] applyKernelSelection error:', err);
         updateKernelDot('error');
