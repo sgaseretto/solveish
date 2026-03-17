@@ -41,15 +41,14 @@ def update_pyproject_toml(root_dir: Path, pkg_name: str) -> Path:
     if pyproject_path.exists():
         content = pyproject_path.read_text(encoding="utf-8")
         if "[tool.dialeng]" in content:
-            # Update existing lib_name within [tool.dialeng] section
-            # Stop matching at next section header to avoid cross-section edits
-            updated = re.sub(
-                r'(\[tool\.dialeng\][^\[]*?)lib_name\s*=\s*"[^"]*"',
-                rf'\1lib_name = "{pkg_name}"',
-                content,
-            )
-            if updated != content:
-                content = updated
+            # Check if lib_name key exists in the [tool.dialeng] section
+            if re.search(r'\[tool\.dialeng\][^\[]*?lib_name\s*=', content):
+                # Update existing lib_name value
+                content = re.sub(
+                    r'(\[tool\.dialeng\][^\[]*?)lib_name\s*=\s*"[^"]*"',
+                    rf'\1lib_name = "{pkg_name}"',
+                    content,
+                )
             else:
                 # Section exists but lib_name key is missing — append it
                 content = re.sub(

@@ -290,15 +290,17 @@ def _create_default_config(config_path: Path) -> Dict[str, Any]:
     return DEFAULT_CONFIG
 
 
-def load_config(config_path: Optional[Path] = None, force_reload: bool = False) -> DialengConfig:
+def load_config(config_path: Optional[Path] = None, force_reload: bool = False,
+                create_if_missing: bool = True) -> DialengConfig:
     """
     Load dialeng configuration from JSON file.
 
-    Creates default config if file doesn't exist.
-
     Args:
-        config_path: Path to config file. Defaults to ./dialeng_config.json
+        config_path: Path to config file. Uses cached path or env var.
         force_reload: If True, reload from disk even if cached
+        create_if_missing: If True, create default config file when it doesn't
+            exist. Set to False for early/module-level loads where the final
+            path isn't known yet (avoids creating config in the wrong directory).
 
     Returns:
         Parsed DialengConfig
@@ -306,7 +308,14 @@ def load_config(config_path: Optional[Path] = None, force_reload: bool = False) 
     global _config, _config_path
 
     if config_path is None:
-        config_path = Path(os.environ.get("DIALENG_CONFIG_PATH", Path.cwd() / "dialeng_config.json"))
+        # Priority: env var > cached path from previous load > CWD fallback
+        env_path = os.environ.get("DIALENG_CONFIG_PATH")
+        if env_path:
+            config_path = Path(env_path)
+        elif _config_path is not None:
+            config_path = _config_path
+        else:
+            config_path = Path.cwd() / "dialeng_config.json"
 
     # Return cached if available and path matches
     if _config is not None and not force_reload and _config_path == config_path:
@@ -314,9 +323,12 @@ def load_config(config_path: Optional[Path] = None, force_reload: bool = False) 
 
     _config_path = config_path
 
-    # Create default if doesn't exist
     if not config_path.exists():
-        raw = _create_default_config(config_path)
+        if create_if_missing:
+            raw = _create_default_config(config_path)
+        else:
+            # Use defaults in memory without writing to disk
+            raw = DEFAULT_CONFIG
     else:
         try:
             with open(config_path, "r", encoding="utf-8") as f:
@@ -372,7 +384,7 @@ def save_config(config_dict: Dict[str, Any], config_path: Optional[Path] = None)
 
     Args:
         config_dict: Complete configuration dictionary to save
-        config_path: Path to config file. Defaults to ./dialeng_config.json
+        config_path: Path to config file. Uses cached path from load_config()
 
     Raises:
         IOError: If the file cannot be written
@@ -380,7 +392,9 @@ def save_config(config_dict: Dict[str, Any], config_path: Optional[Path] = None)
     global _config, _config_path
 
     if config_path is None:
-        config_path = _config_path or Path.cwd() / "dialeng_config.json"
+        if _config_path is None:
+            raise RuntimeError("Config path not set — call load_config() with explicit path first")
+        config_path = _config_path
 
     logger.info(f"Saving config to {config_path}")
 
@@ -401,7 +415,7 @@ def update_config(updates: Dict[str, Any], config_path: Optional[Path] = None) -
 
     Args:
         updates: Dictionary of updates to apply (can be nested)
-        config_path: Path to config file. Defaults to ./dialeng_config.json
+        config_path: Path to config file. Uses cached path from load_config()
 
     Returns:
         Updated DialengConfig after applying changes
@@ -420,7 +434,9 @@ def update_config(updates: Dict[str, Any], config_path: Optional[Path] = None) -
     global _config, _config_path
 
     if config_path is None:
-        config_path = _config_path or Path.cwd() / "dialeng_config.json"
+        if _config_path is None:
+            raise RuntimeError("Config path not set — call load_config() with explicit path first")
+        config_path = _config_path
 
     # Load current config from file (not cache, to get raw dict)
     if config_path.exists():

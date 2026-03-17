@@ -1,0 +1,90 @@
+{
+  "aws": {
+    "region": "us-east-1",
+    "comment": "AWS region for Bedrock. Common options: us-east-1, us-west-2, eu-west-1"
+  },
+  "models": {
+    "available": [
+      {
+        "id": "claude-haiku-4-5",
+        "name": "Claude Haiku 4.5"
+      },
+      {
+        "id": "claude-sonnet-4-5",
+        "name": "Claude Sonnet 4.5"
+      },
+      {
+        "id": "claude-3-5-sonnet",
+        "name": "Claude 3.5 Sonnet"
+      },
+      {
+        "id": "claude-3-5-haiku",
+        "name": "Claude 3.5 Haiku"
+      }
+    ],
+    "defaults": {
+      "bedrock": "claude-haiku-4-5",
+      "anthropic_api": "claude-sonnet-4-5",
+      "claude_code_subscription": "claude-sonnet-4-5",
+      "fallback": "claude-sonnet-4-5",
+      "comment": "Default model per provider. bedrock=AWS Bedrock, anthropic_api=direct API, claude_code_subscription=Claude Code CLI. fallback is used when provider is unknown."
+    },
+    "anthropic_api_map": {
+      "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+      "claude-sonnet-4-5": "claude-sonnet-4-5-20250514",
+      "claude-3-5-sonnet": "claude-3-5-sonnet-20241022",
+      "claude-3-5-haiku": "claude-3-5-haiku-20241022",
+      "comment": "Model IDs for direct Anthropic API (with date suffix)"
+    },
+    "bedrock_map": {
+      "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "claude-sonnet-4-5": "us.anthropic.claude-sonnet-4-5-20250514-v1:0",
+      "claude-3-5-sonnet": "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+      "claude-3-5-haiku": "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+      "comment": "Model IDs for AWS Bedrock with cross-region inference. Format: us.anthropic.{model}-{date}-v{n}:{profile}"
+    },
+    "claudette_agent_map": {
+      "claude-haiku-4-5": "haiku",
+      "claude-sonnet-4-5": "sonnet",
+      "claude-3-5-sonnet": "sonnet",
+      "claude-3-5-haiku": "haiku",
+      "comment": "Model IDs for Claude Code subscription - uses simple names (sonnet, haiku, opus)"
+    }
+  },
+  "modes": {
+    "default": "mock",
+    "comment": "Default dialog mode when opening a notebook. Options: mock, learning, concise, standard"
+  },
+  "thinking": {
+    "max_tokens": 10000,
+    "comment": "Maximum tokens for extended thinking. Set to 0 to disable. Requires thinking-capable model (Claude Sonnet 3.7+, Sonnet 4+, Opus 4+)"
+  },
+  "llm": {
+    "use_sdk_directly": false,
+    "debug_mode": false,
+    "debug_log_dir": "./debug_logs",
+    "comment": "LLM provider settings. use_sdk_directly=true uses claude-agent-sdk directly for maximum isolation (stateless). Set to false (default) to use claudette-agent wrapper."
+  },
+  "tool_settings": {
+    "max_steps": 5,
+    "require_confirmation": false,
+    "builtin_tools_enabled": true,
+    "comment": "Tool calling settings. max_steps: max tool calls per prompt (1-10). require_confirmation: prompt before file-modifying tools. builtin_tools_enabled: always-available file tools (view, rg, create, str_replace, insert)."
+  },
+  "display": {
+    "reasoning_truncate_chars": 500,
+    "notebook_width": 1400,
+    "button_size": "normal",
+    "font_size": 15,
+    "comment": "Display settings. reasoning_truncate_chars: max chars for reasoning (0=no limit). notebook_width: max container width in px. button_size: normal/compact/large. font_size: base font size in px."
+  },
+  "shell": {
+    "shell_cells_enabled": false,
+    "comment": "Shell settings. shell_cells_enabled: if true, show dedicated Shell cell type in UI. If false, use %bash/%% bash magic or !command in code cells instead."
+  },
+  "colab": {
+    "enabled": true,
+    "comment": "Google Colab integration. Enable to use Colab as a remote kernel. Authentication uses the same OAuth flow as the Colab VS Code extension \u2014 just click 'Connect Google' in the toolbar."
+  },
+  "test_ext_enabled": true
+}

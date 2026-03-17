@@ -12,8 +12,8 @@ class TestReloadAutorunExtensions:
     """Test the reload_autorun_extensions() function."""
 
     def test_returns_empty_when_no_autorun_dir(self, tmp_path):
-        from dialeng.services.autorun_service import reload_autorun_extensions, AUTORUN_DIR
-        with patch("dialeng.services.autorun_service.AUTORUN_DIR", tmp_path / "nonexistent"):
+        from dialeng.services.autorun_service import reload_autorun_extensions
+        with patch("dialeng.services.autorun_service._autorun_dir", tmp_path / "nonexistent"):
             result = reload_autorun_extensions()
         assert result == {"extracted": [], "loaded": [], "errors": []}
 
@@ -21,7 +21,7 @@ class TestReloadAutorunExtensions:
         from dialeng.services.autorun_service import reload_autorun_extensions
         autorun_dir = tmp_path / "AUTORUN"
         autorun_dir.mkdir()
-        with patch("dialeng.services.autorun_service.AUTORUN_DIR", autorun_dir), \
+        with patch("dialeng.services.autorun_service._autorun_dir", autorun_dir), \
              patch("dialeng.services.autorun_service.CACHE_DIR", tmp_path / ".autorun_modules"):
             result = reload_autorun_extensions()
         assert "extracted" in result
@@ -49,7 +49,7 @@ class TestReloadAutorunExtensions:
         }
         (autorun_dir / "test_ext.ipynb").write_text(json.dumps(nb))
 
-        with patch("dialeng.services.autorun_service.AUTORUN_DIR", autorun_dir), \
+        with patch("dialeng.services.autorun_service._autorun_dir", autorun_dir), \
              patch("dialeng.services.autorun_service.CACHE_DIR", cache_dir):
             from dialeng.services.autorun_service import reload_autorun_extensions
             result = reload_autorun_extensions()
@@ -67,7 +67,7 @@ class TestReloadAutorunExtensions:
         # Write an invalid notebook
         (autorun_dir / "bad.ipynb").write_text("not valid json")
 
-        with patch("dialeng.services.autorun_service.AUTORUN_DIR", autorun_dir), \
+        with patch("dialeng.services.autorun_service._autorun_dir", autorun_dir), \
              patch("dialeng.services.autorun_service.CACHE_DIR", cache_dir):
             from dialeng.services.autorun_service import reload_autorun_extensions
             result = reload_autorun_extensions()

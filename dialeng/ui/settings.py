@@ -63,20 +63,34 @@ def SettingSelect(label: str, name: str, options: List[Tuple[str, str]], current
     )
 
 
-def SettingToggle(label: str, name: str, current: bool, requires_restart: bool = False,
-                  help_text: str = None):
+def SettingToggle(label: str, name: str, current: bool = None, requires_restart: bool = False,
+                  help_text: str = None, default: bool = False):
     """Toggle switch for boolean settings.
 
     Args:
         label: Display label
-        name: Form field name
-        current: Current boolean value
+        name: Form field name (dot-notation, e.g. "colab.enabled" or "my_ext_enabled")
+        current: Current boolean value. If None, auto-reads from config using `name`.
         requires_restart: If True, shows a restart warning
         help_text: Optional help text
+        default: Default value when auto-reading from config and key doesn't exist
 
     Returns:
         Div containing toggle switch
     """
+    if current is None:
+        # Auto-resolve from config using the dotted field name
+        from dialeng.services.dialeng_config import get_config
+        config = get_config()
+        # Traverse dotted path in raw_config (e.g. "colab.enabled" → config["colab"]["enabled"])
+        value = config.raw_config
+        for key in name.split('.'):
+            if isinstance(value, dict):
+                value = value.get(key)
+            else:
+                value = None
+                break
+        current = bool(value) if value is not None else default
     restart_badge = Span(ss('triangle-alert', sz=12), " restart", cls="restart-badge") if requires_restart else None
     return Div(
         Div(
@@ -85,6 +99,9 @@ def SettingToggle(label: str, name: str, current: bool, requires_restart: bool =
             cls="setting-label-row"
         ),
         Label(
+            # Hidden input ensures "off" is sent when checkbox is unchecked
+            # (HTML checkboxes don't send anything when unchecked)
+            Input(type="hidden", name=name, value="off"),
             Input(type="checkbox", name=name, id=name.replace(".", "-"),
                   checked=current, cls="toggle-input"),
             Span(cls="toggle-slider"),

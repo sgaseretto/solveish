@@ -18,17 +18,23 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-AUTORUN_DIR = Path("notebooks/AUTORUN")
 CACHE_DIR = Path(".autorun_modules")
 
+# Set by process_autorun() at startup, used by reload_autorun_extensions()
+_autorun_dir: Optional[Path] = None
 
-async def process_autorun(kernel_service) -> None:
+
+async def process_autorun(kernel_service, notebooks_dir: Path = None) -> None:
     """Process AUTORUN folder on server startup.
 
     Args:
         kernel_service: KernelService instance for running background notebooks
+        notebooks_dir: Root notebooks directory (for locating AUTORUN/)
     """
-    if not AUTORUN_DIR.exists():
+    global _autorun_dir
+    _autorun_dir = (notebooks_dir / "AUTORUN") if notebooks_dir else Path("notebooks/AUTORUN")
+
+    if not _autorun_dir.exists():
         logger.info("No AUTORUN/ directory found, skipping")
         return
 
@@ -37,7 +43,7 @@ async def process_autorun(kernel_service) -> None:
     # Phase 1b: Export #| export cells from notebooks → .autorun_modules/
     CACHE_DIR.mkdir(exist_ok=True)
     exported_count = 0
-    for nb_path in sorted(AUTORUN_DIR.glob("*.ipynb")):
+    for nb_path in sorted(_autorun_dir.glob("*.ipynb")):
         module_name = nb_path.stem
         output_path = CACHE_DIR / f"{module_name}.py"
         try:
@@ -49,7 +55,7 @@ async def process_autorun(kernel_service) -> None:
             logger.error(f"AUTORUN: Failed to extract from {nb_path.name}: {e}")
 
     # Phase 1c: Load .py extensions from AUTORUN/ and .autorun_modules/
-    autorun_exts = load_extensions(AUTORUN_DIR, silent=True)
+    autorun_exts = load_extensions(_autorun_dir, silent=True)
     cache_exts = load_extensions(CACHE_DIR, silent=True)
     if autorun_exts:
         logger.info(f"AUTORUN: Loaded {len(autorun_exts)} extension(s) from AUTORUN/: {autorun_exts}")
@@ -57,7 +63,7 @@ async def process_autorun(kernel_service) -> None:
         logger.info(f"AUTORUN: Loaded {len(cache_exts)} extension(s) from .autorun_modules/: {cache_exts}")
 
     # Phase 2: Open notebooks in their own kernels (background)
-    for nb_path in sorted(AUTORUN_DIR.glob("*.ipynb")):
+    for nb_path in sorted(_autorun_dir.glob("*.ipynb")):
         asyncio.create_task(_run_autorun_notebook(nb_path, kernel_service))
 
 
@@ -75,12 +81,12 @@ def reload_autorun_extensions() -> Dict[str, List[str]]:
 
     result: Dict[str, List[str]] = {"extracted": [], "loaded": [], "errors": []}
 
-    if not AUTORUN_DIR.exists():
+    if _autorun_dir is None or not _autorun_dir.exists():
         return result
 
     # Phase 1b: Re-extract #| export cells from notebooks
     CACHE_DIR.mkdir(exist_ok=True)
-    for nb_path in sorted(AUTORUN_DIR.glob("*.ipynb")):
+    for nb_path in sorted(_autorun_dir.glob("*.ipynb")):
         module_name = nb_path.stem
         output_path = CACHE_DIR / f"{module_name}.py"
         try:
@@ -93,7 +99,7 @@ def reload_autorun_extensions() -> Dict[str, List[str]]:
             logger.error(f"AUTORUN reload: Failed to extract from {nb_path.name}: {e}")
 
     # Phase 1c: Reload .py extensions from AUTORUN/ and .autorun_modules/
-    for ext_dir in [AUTORUN_DIR, CACHE_DIR]:
+    for ext_dir in [_autorun_dir, CACHE_DIR]:
         for py_file in sorted(ext_dir.glob("*.py")):
             if py_file.name.startswith("_"):
                 continue
