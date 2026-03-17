@@ -65,8 +65,9 @@ from dialeng.services.autorun_service import process_autorun
 
 SOLVEIT_VER = 2
 
-# Load configuration (creates dialeng_config.json with defaults if it doesn't exist)
-DIALENG_CONFIG = load_config()
+# Load configuration — use in-memory defaults at import time.
+# The real config file (inside the notebooks dir) is loaded when set_root_dir() is called.
+DIALENG_CONFIG = load_config(create_if_missing=False)
 
 # Detect credentials at startup
 CREDENTIAL_STATUS = detect_credentials()
@@ -133,10 +134,24 @@ DEFAULT_DIALOG_MODE = DIALENG_CONFIG.default_mode if CREDENTIAL_STATUS.available
 
 kernel_service = KernelService()
 
-# Initialize Colab session manager if configured
+# Colab session manager — initialized lazily by _init_colab() after the real config is loaded
 colab_session_manager = None
 colab_auth_service = None
-if DIALENG_CONFIG.colab_enabled:
+
+
+def _init_colab():
+    """Initialize Colab services if colab is enabled in the (real) config.
+
+    Called from set_root_dir() after the config file is loaded, NOT at module
+    import time — because the module-level load_config() uses in-memory defaults
+    where colab.enabled is always False.
+    """
+    global colab_auth_service, colab_session_manager
+    if not DIALENG_CONFIG.colab_enabled:
+        return
+    if colab_auth_service is not None:
+        return  # already initialized
+
     import asyncio
     import concurrent.futures
     from dialeng.services.colab import ColabAuthService, ColabSessionManager
@@ -275,10 +290,20 @@ NOTEBOOKS_DIR = Path(os.environ.get("DIALENG_NOTEBOOKS_DIR", "notebooks"))
 NOTEBOOKS_DIR.mkdir(exist_ok=True)
 
 def set_root_dir(root: Path):
-    """Set the notebooks root directory. Called by CLI before main()."""
-    global NOTEBOOKS_DIR
+    """Set the notebooks root directory. Called by CLI before main().
+
+    Also reloads dialeng_config.json from the new root so the config
+    lives alongside the notebooks (not in whatever CWD the command ran from).
+    """
+    global NOTEBOOKS_DIR, DIALENG_CONFIG
     NOTEBOOKS_DIR = root
     NOTEBOOKS_DIR.mkdir(exist_ok=True)
+
+    # Reload config from the project directory
+    DIALENG_CONFIG = load_config(config_path=NOTEBOOKS_DIR / "dialeng_config.json", force_reload=True)
+
+    # Initialize Colab now that we have the real config
+    _init_colab()
 
 # Track active WebSocket connections per notebook (list of send functions)
 ws_connections: Dict[str, List[Any]] = {}
@@ -878,7 +903,14 @@ app, rt = fast_app(
 # AUTORUN processing on startup (async, needs event loop)
 @app.on_event("startup")
 async def _autorun_startup():
-    await process_autorun(kernel_service)
+    # Reload config from the correct path — the Uvicorn reloader spawns a worker
+    # process that re-imports this module, but set_root_dir() only runs in main().
+    # Without this, DIALENG_CONFIG has DEFAULT_CONFIG (no extension settings).
+    global DIALENG_CONFIG
+    DIALENG_CONFIG = load_config(config_path=NOTEBOOKS_DIR / "dialeng_config.json", force_reload=True)
+    # Initialize Colab in the worker process (set_root_dir() only runs in the main process)
+    _init_colab()
+    await process_autorun(kernel_service, notebooks_dir=NOTEBOOKS_DIR)
 
 # ============================================================================
 # Extension Development Endpoints
@@ -1499,14 +1531,17 @@ async def post(request):
     # Form field names use dot notation: "aws.region", "modes.default", etc.
     updates = {}
 
-    for field_name, value in form_data.items():
+    for field_name, value in form_data.multi_items():
         # Parse the dotted path into nested dict
         keys = field_name.split('.')
 
-        # Handle checkbox values - unchecked boxes aren't sent
-        # Convert string "on" to True, and parse numbers
+        # Handle toggle values: hidden input sends "off", checkbox sends "on"
+        # When checkbox is checked, both "off" and "on" are sent — "on" wins
+        # (last value for same name). When unchecked, only "off" is sent.
         if value == 'on':
             value = True
+        elif value == 'off':
+            value = False
         elif value.isdigit():
             value = int(value)
         else:
@@ -1526,35 +1561,14 @@ async def post(request):
             current = current[key]
         current[keys[-1]] = value
 
-    # Handle unchecked checkboxes (they're not sent in form data)
-    # We need to explicitly set them to False
-    checkbox_fields = [
-        'tool_settings.require_confirmation',
-        'tool_settings.builtin_tools_enabled',
-        'llm.use_sdk_directly',
-        'llm.debug_mode',
-        'shell.shell_cells_enabled',
-        'colab.enabled',
-    ]
-    for field in checkbox_fields:
-        keys = field.split('.')
-        # Check if this field was NOT in the form data (meaning checkbox unchecked)
-        found = field in form_data
-        if not found:
-            current = updates
-            for key in keys[:-1]:
-                if key not in current:
-                    current[key] = {}
-                current = current[key]
-            current[keys[-1]] = False
-
     try:
-        # Apply updates to config
-        update_config(updates)
+        # Apply updates to config (explicitly use project dir path)
+        config_path = NOTEBOOKS_DIR / "dialeng_config.json"
+        update_config(updates, config_path=config_path)
 
         # Reload the global config
         global DIALENG_CONFIG, colab_auth_service, colab_session_manager
-        DIALENG_CONFIG = load_config(force_reload=True)
+        DIALENG_CONFIG = load_config(config_path=config_path, force_reload=True)
 
         # Lazily initialize or tear down Colab services based on new config
         colab_changed = False
@@ -2120,7 +2134,12 @@ async def post(nb_id: str, cid: str, source: str = None):
 async def post(nb_id: str):
     """Restart the kernel for a specific notebook."""
     await broadcast_kernel_status(nb_id, "restarting")
-    await kernel_service.restart_async(nb_id)
+    try:
+        await kernel_service.restart_async(nb_id)
+    except Exception as e:
+        print(f"[KERNEL] Restart failed for {nb_id}: {e}", flush=True)
+        await broadcast_kernel_status(nb_id, "error")
+        return Div(f"Kernel restart failed: {e}", cls="status error")
 
     # Clear CRAFT execution tracking so CRAFT cells re-execute on next page load
     from dialeng.services.craft_service import reset_craft_tracking

@@ -449,6 +449,49 @@ graph LR
     TR -->|"update"| PI[proxy_info.token]
 ```
 
+## Startup Initialization
+
+Colab services are initialized lazily via `_init_colab()`, **not** at module import time. This is critical because `app.py` has a two-phase config loading process:
+
+1. **Module import** — `load_config(create_if_missing=False)` loads in-memory defaults where `colab.enabled` is always `False`
+2. **`set_root_dir()` / `_autorun_startup()`** — Reloads the real `dialeng_config.json` from the project directory
+
+If Colab initialization ran at import time (phase 1), it would always see `colab.enabled=False` and skip, even when the config file has it enabled. Instead, `_init_colab()` is called from both:
+
+- **`set_root_dir()`** — Covers the main CLI process
+- **`_autorun_startup()`** — Covers the Uvicorn worker process (which re-imports the module but doesn't call `set_root_dir()`)
+
+```mermaid
+sequenceDiagram
+    participant CLI as cli.py
+    participant App as app.py (module)
+    participant Main as main()
+    participant Worker as Uvicorn Worker
+
+    CLI->>App: import (module-level code runs)
+    App->>App: load_config(create_if_missing=False)<br/>→ in-memory defaults (colab=False)
+    App->>App: colab_auth_service = None
+
+    CLI->>Main: main(root_dir)
+    Main->>App: set_root_dir(root)
+    App->>App: load_config(real file, force_reload=True)<br/>→ colab.enabled=True
+    App->>App: _init_colab() → imports colab modules,<br/>registers kernel, resolves credentials
+
+    Note over Worker: Uvicorn reloader spawns worker
+    Worker->>App: re-import (module-level code runs again)
+    App->>App: load_config(create_if_missing=False)<br/>→ in-memory defaults (colab=False)
+    Worker->>App: _autorun_startup()
+    App->>App: load_config(real file, force_reload=True)
+    App->>App: _init_colab() → initializes Colab in worker
+```
+
+### Error Handling
+
+Colab API errors (e.g., Google returning 503) are handled at two levels:
+
+- **`assign_and_connect()`** — Retries transient 5xx errors up to 5 times with exponential backoff (1s, 2s, 4s, 8s, 16s)
+- **Restart endpoint** — Catches `ColabAPIError` and broadcasts `kernel_error` status to the frontend (red dot) instead of crashing with a 500
+
 ## Integration with Multi-Kernel System
 
 `ColabSessionManager` manages `ColabKernel` instances per notebook and integrates with `KernelService`:

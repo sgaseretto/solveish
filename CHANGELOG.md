@@ -39,6 +39,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+#### Colab Kernel Not Showing in Modal on Startup
+- Colab kernel option was missing from the "Select Kernel" modal even when `colab.enabled: true` in config
+- Root cause: Colab initialization ran at module import time, before the real config file was loaded — it always read in-memory defaults where `colab.enabled=false`
+- Extracted initialization into `_init_colab()`, called from both `set_root_dir()` (main process) and `_autorun_startup()` (Uvicorn worker process) after the real config is loaded
+- The Uvicorn reloader spawns a worker process that re-imports the module but doesn't call `set_root_dir()`, so `_autorun_startup()` also needed the `_init_colab()` call
+
+#### Colab Kernel Restart 500 Error
+- Restarting a Colab kernel when Google's API returns 503 (or other errors) crashed the endpoint with a 500 Internal Server Error
+- Added error handling around `kernel_service.restart_async()` — now broadcasts `kernel_error` status (red dot) and returns a user-friendly error message
+
 #### Kernel Restart Status Dot
 - Kernel status dot now turns green after restart completes (previously stayed yellow)
 - Removed "Kernel restarted" flash message (dot color is sufficient feedback)
