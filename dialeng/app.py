@@ -65,8 +65,9 @@ from dialeng.services.autorun_service import process_autorun
 
 SOLVEIT_VER = 2
 
-# Load configuration (creates dialeng_config.json with defaults if it doesn't exist)
-DIALENG_CONFIG = load_config()
+# Load configuration — use in-memory defaults at import time.
+# The real config file (inside the notebooks dir) is loaded when set_root_dir() is called.
+DIALENG_CONFIG = load_config(create_if_missing=False)
 
 # Detect credentials at startup
 CREDENTIAL_STATUS = detect_credentials()
@@ -133,10 +134,24 @@ DEFAULT_DIALOG_MODE = DIALENG_CONFIG.default_mode if CREDENTIAL_STATUS.available
 
 kernel_service = KernelService()
 
-# Initialize Colab session manager if configured
+# Colab session manager — initialized lazily by _init_colab() after the real config is loaded
 colab_session_manager = None
 colab_auth_service = None
-if DIALENG_CONFIG.colab_enabled:
+
+
+def _init_colab():
+    """Initialize Colab services if colab is enabled in the (real) config.
+
+    Called from set_root_dir() after the config file is loaded, NOT at module
+    import time — because the module-level load_config() uses in-memory defaults
+    where colab.enabled is always False.
+    """
+    global colab_auth_service, colab_session_manager
+    if not DIALENG_CONFIG.colab_enabled:
+        return
+    if colab_auth_service is not None:
+        return  # already initialized
+
     import asyncio
     import concurrent.futures
     from dialeng.services.colab import ColabAuthService, ColabSessionManager
@@ -274,6 +289,22 @@ notebooks: Dict[str, Notebook] = {}
 NOTEBOOKS_DIR = Path(os.environ.get("DIALENG_NOTEBOOKS_DIR", "notebooks"))
 NOTEBOOKS_DIR.mkdir(exist_ok=True)
 
+def set_root_dir(root: Path):
+    """Set the notebooks root directory. Called by CLI before main().
+
+    Also reloads dialeng_config.json from the new root so the config
+    lives alongside the notebooks (not in whatever CWD the command ran from).
+    """
+    global NOTEBOOKS_DIR, DIALENG_CONFIG
+    NOTEBOOKS_DIR = root
+    NOTEBOOKS_DIR.mkdir(exist_ok=True)
+
+    # Reload config from the project directory
+    DIALENG_CONFIG = load_config(config_path=NOTEBOOKS_DIR / "dialeng_config.json", force_reload=True)
+
+    # Initialize Colab now that we have the real config
+    _init_colab()
+
 # Track active WebSocket connections per notebook (list of send functions)
 ws_connections: Dict[str, List[Any]] = {}
 
@@ -306,39 +337,61 @@ def _load_notebook(path: str) -> Notebook:
     return nb
 
 
-def _nb_id_from_path(path: Path) -> str:
-    """Derive a URL-safe notebook ID from a file path.
+def _nb_id_encode_part(part: str) -> str:
+    """Escape tildes in a single path component: ~ → ~~"""
+    return part.replace("~", "~~")
 
-    Uses the file stem for root notebooks, and dir_stem for subdirectory ones.
+def _nb_id_from_path(path: Path) -> str:
+    """Derive a collision-proof, URL-safe notebook ID from a file path.
+
+    Uses ~ as path separator with ~~ escaping for literal tildes in names.
+    The encoding is fully reversible via _nb_id_to_relpath().
+
     Examples: notebooks/test.ipynb → 'test'
-              notebooks/subfolder/test.ipynb → 'subfolder_test'
-              notebooks/a/b/test.ipynb → 'a_b_test'
+              notebooks/subfolder/test.ipynb → 'subfolder~test'
+              notebooks/a/b/test.ipynb → 'a~b~test'
+              notebooks/my_project/analysis.ipynb → 'my_project~analysis'
+              notebooks/has~tilde.ipynb → 'has~~tilde'
     """
     try:
         rel = path.resolve().relative_to(NOTEBOOKS_DIR.resolve())
     except ValueError:
-        return path.stem
+        return _nb_id_encode_part(path.stem)
     parts = list(rel.parts)
     parts[-1] = rel.stem  # Remove .ipynb extension
-    return "_".join(parts) if len(parts) > 1 else parts[0]
+    encoded = [_nb_id_encode_part(p) for p in parts]
+    return "~".join(encoded) if len(encoded) > 1 else encoded[0]
+
+def _nb_id_to_relpath(notebook_id: str) -> Path:
+    """Reverse a notebook ID back to a relative path (without .ipynb extension).
+
+    Decodes ~ separator and ~~ escape to reconstruct the original path.
+    This is the inverse of _nb_id_from_path().
+
+    Examples: 'test' → Path('test')
+              'subfolder~test' → Path('subfolder/test')
+              'a~b~test' → Path('a/b/test')
+              'has~~tilde' → Path('has~tilde')
+              'a~~b~c' → Path('a~b/c')
+    """
+    # Replace ~~ with a placeholder, split on ~, restore placeholder to ~
+    placeholder = "\x00"
+    safe = notebook_id.replace("~~", placeholder)
+    parts = safe.split("~")
+    parts = [p.replace(placeholder, "~") for p in parts]
+    return Path(*parts) if len(parts) > 1 else Path(parts[0])
 
 def _find_notebook_path(notebook_id: str) -> Optional[Path]:
-    """Find a notebook file by ID, checking root first then subdirectories."""
-    # Check root directly (most common case)
-    root_path = NOTEBOOKS_DIR / f"{notebook_id}.ipynb"
-    if root_path.exists():
-        return root_path
+    """Find a notebook file by ID using direct path reconstruction."""
+    # Decode the ID to a relative path and look up directly
+    rel = _nb_id_to_relpath(notebook_id)
+    direct_path = NOTEBOOKS_DIR / f"{rel}.ipynb"
+    if direct_path.exists():
+        return direct_path
     # Check if an in-memory notebook has a path set
     if notebook_id in notebooks and notebooks[notebook_id].path:
         p = Path(notebooks[notebook_id].path)
         if p.exists():
-            return p
-    # Reverse the _ encoding: scan all notebooks and find the one whose
-    # _nb_id_from_path matches this notebook_id
-    for p in NOTEBOOKS_DIR.rglob("*.ipynb"):
-        if any(part.startswith('.') or part == '__pycache__' for part in p.relative_to(NOTEBOOKS_DIR).parts):
-            continue
-        if _nb_id_from_path(p) == notebook_id:
             return p
     return None
 
@@ -389,9 +442,24 @@ def get_notebook(notebook_id: str) -> Notebook:
 def save_notebook(notebook_id: str):
     if notebook_id in notebooks:
         nb = notebooks[notebook_id]
-        # Use existing path if set (preserves subdirectory location), else default to root
-        path = nb.path if nb.path else NOTEBOOKS_DIR / f"{notebook_id}.ipynb"
+        # Use existing path if set (preserves subdirectory location), else reconstruct from ID
+        path = nb.path if nb.path else NOTEBOOKS_DIR / f"{_nb_id_to_relpath(notebook_id)}.ipynb"
         nb.save(str(path))
+        # Auto-extract #| export cells to lib dir if notebook has #| default_exp
+        try:
+            from dialeng.services.lib_export_service import maybe_extract
+            result = maybe_extract(Path(path), root_dir=NOTEBOOKS_DIR)
+            if result:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"lib export: {result['module']} ({result['cells_exported']} cells)")
+                # Re-upload to Colab if this notebook has an active Colab kernel
+                import asyncio
+                asyncio.create_task(_upload_lib_to_colab(notebook_id))
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"lib export failed for {notebook_id}: {e}")
 
 def list_notebooks() -> List[str]:
     return [p.stem for p in NOTEBOOKS_DIR.glob("*.ipynb")]
@@ -687,6 +755,12 @@ async def broadcast_json(nb_id: str, data: dict, exclude_send=None):
     ws_connections[nb_id] = alive
 
 
+async def broadcast_all_json(data: dict):
+    """Broadcast a JSON message to ALL WebSocket connections across all notebooks."""
+    for nb_id in list(ws_connections.keys()):
+        await broadcast_json(nb_id, data)
+
+
 async def broadcast_queue_state(nb_id: str):
     """Broadcast current queue state to all clients."""
     queue = get_execution_queue(nb_id)
@@ -829,7 +903,56 @@ app, rt = fast_app(
 # AUTORUN processing on startup (async, needs event loop)
 @app.on_event("startup")
 async def _autorun_startup():
-    await process_autorun(kernel_service)
+    # Reload config from the correct path — the Uvicorn reloader spawns a worker
+    # process that re-imports this module, but set_root_dir() only runs in main().
+    # Without this, DIALENG_CONFIG has DEFAULT_CONFIG (no extension settings).
+    global DIALENG_CONFIG
+    DIALENG_CONFIG = load_config(config_path=NOTEBOOKS_DIR / "dialeng_config.json", force_reload=True)
+    # Initialize Colab in the worker process (set_root_dir() only runs in the main process)
+    _init_colab()
+    await process_autorun(kernel_service, notebooks_dir=NOTEBOOKS_DIR)
+
+# ============================================================================
+# Extension Development Endpoints
+# ============================================================================
+
+@rt("/dialeng/reload-extensions")
+async def post():
+    """Re-extract and reload all AUTORUN extensions, then refresh all clients.
+
+    Used during extension development to pick up changes to #| export cells
+    without restarting the server. Call from a notebook:
+        from dialeng.dev import reload_extensions
+        reload_extensions()
+    """
+    from dialeng.services.autorun_service import reload_autorun_extensions
+    result = reload_autorun_extensions()
+    await broadcast_all_json({"type": "extensions_reloaded"})
+    return result
+
+@rt("/dialeng/{nb_id}/ext/{action_name}")
+async def post(nb_id: str, action_name: str, request):
+    """Execute a registered extension action.
+
+    Extensions register actions via @register_action("name") in #| export cells.
+    Toolbar buttons or notebook code can POST here to trigger server-side logic.
+    """
+    import asyncio
+    handler = registry.actions.get(action_name)
+    if not handler:
+        return {"error": f"Unknown action: {action_name}"}, 404
+    try:
+        # Extract form data from request (FastHTML ignores **kwargs)
+        form = await request.form()
+        kwargs = dict(form)
+        if asyncio.iscoroutinefunction(handler):
+            result = await handler(nb_id=nb_id, **kwargs)
+        else:
+            result = handler(nb_id=nb_id, **kwargs)
+        return result if isinstance(result, dict) else {"result": result}
+    except Exception as e:
+        print(f"[EXT] Action '{action_name}' failed: {e}", flush=True)
+        return {"error": str(e)}, 500
 
 # Static file serving
 @rt("/static/{path:path}")
@@ -949,9 +1072,9 @@ def post(path: str = ""):
     if target.exists() and target.is_file():
         target.unlink()
         # Remove from in-memory notebooks if loaded
-        nb_name = Path(path).name
-        if nb_name in notebooks:
-            del notebooks[nb_name]
+        nb_id = _nb_id_from_path(target)
+        if nb_id in notebooks:
+            del notebooks[nb_id]
     parent = target.parent
     kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
     return FileListContent(parent, NOTEBOOKS_DIR, "", kernel_notebooks=kernel_nbs)
@@ -1030,6 +1153,78 @@ def post(nb_id: str, safe_mode: str = "false"):
     return ""
 
 # ============================================================================
+# Kernel Helpers
+# ============================================================================
+
+async def _inject_lib_syspath(nb_id: str):
+    """If lib dir exists in NOTEBOOKS_DIR, add NOTEBOOKS_DIR to the kernel's sys.path."""
+    from dialeng.services.lib_export_service import get_lib_name
+    lib_name = get_lib_name(NOTEBOOKS_DIR)
+    lib_dir = NOTEBOOKS_DIR / lib_name
+    if not lib_dir.exists():
+        return
+    notebooks_path = str(NOTEBOOKS_DIR.resolve())
+    setup_code = f"import sys; sys.path.insert(0, {notebooks_path!r}) if {notebooks_path!r} not in sys.path else None"
+    cell = Cell(id="_lib_syspath_setup", cell_type=CellType.CODE, source=setup_code)
+    try:
+        async for _ in kernel_service.execute_cell(nb_id, cell):
+            pass
+        print(f"[LIB] Injected sys.path for {lib_name}/ into kernel {nb_id}", flush=True)
+    except Exception as e:
+        print(f"[LIB] Failed to inject sys.path for {nb_id}: {e}", flush=True)
+
+
+async def _upload_lib_to_colab(nb_id: str):
+    """If kernel is Colab and lib dir exists, upload module files to remote VM."""
+    from dialeng.services.lib_export_service import get_lib_name
+
+    # Check if this notebook uses a Colab kernel
+    nb = notebooks.get(nb_id)
+    if not nb or getattr(nb, 'kernel_type', 'local') != 'colab':
+        return
+
+    if not kernel_service.has_kernel(nb_id):
+        return
+
+    lib_name = get_lib_name(NOTEBOOKS_DIR)
+    lib_dir = NOTEBOOKS_DIR / lib_name
+    if not lib_dir.exists():
+        return
+
+    # Collect all .py files in the lib directory
+    py_files = list(lib_dir.rglob("*.py"))
+    if not py_files:
+        return
+
+    # Build code that recreates the directory structure and writes files on the VM
+    import base64
+    code_parts = ["import os, base64"]
+    dirs_created = set()
+    for py_file in py_files:
+        rel_path = py_file.relative_to(NOTEBOOKS_DIR)
+        content = py_file.read_text(encoding="utf-8")
+        # Ensure parent dirs exist (deduplicate makedirs calls)
+        parent = str(rel_path.parent)
+        if parent not in dirs_created:
+            code_parts.append(f"os.makedirs({parent!r}, exist_ok=True)")
+            dirs_created.add(parent)
+        # Use base64 encoding to avoid string escaping issues
+        b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        code_parts.append(
+            f"open({str(rel_path)!r}, 'w').write(base64.b64decode({b64!r}).decode('utf-8'))"
+        )
+
+    setup_code = "\n".join(code_parts)
+    cell = Cell(id="_lib_colab_upload", cell_type=CellType.CODE, source=setup_code)
+    try:
+        async for _ in kernel_service.execute_cell(nb_id, cell):
+            pass
+        print(f"[LIB] Uploaded {len(py_files)} module files to Colab kernel {nb_id}", flush=True)
+    except Exception as e:
+        print(f"[LIB] Failed to upload lib files to Colab: {e}", flush=True)
+
+
+# ============================================================================
 # Kernel Management Routes
 # ============================================================================
 
@@ -1049,6 +1244,10 @@ async def post(nb_id: str, kernel_type: str):
     nb.kernel_type = kernel_type
     runtime_type = nb.colab_runtime_type
     await kernel_service.set_kernel_type(nb_id, kernel_type, runtime_type=runtime_type)
+
+    # New kernel needs fresh CRAFT initialization (sys.path, uploads, CRAFT cells)
+    from dialeng.services.craft_service import reset_craft_tracking
+    reset_craft_tracking(nb_id)
 
     # Broadcast kernel type change to all clients
     msg = json.dumps({"type": "kernel_type_changed", "kernel_type": kernel_type})
@@ -1071,6 +1270,10 @@ async def post(nb_id: str, runtime_type: str):
         return Div("Runtime type only applies to Colab kernels", cls="status error")
 
     nb.colab_runtime_type = runtime_type
+
+    # New kernel needs fresh CRAFT initialization
+    from dialeng.services.craft_service import reset_craft_tracking
+    reset_craft_tracking(nb_id)
 
     # Switch the runtime type - this creates a new kernel object
     if colab_session_manager:
@@ -1118,9 +1321,9 @@ def get(nb_id: str):
 
 @rt("/dialeng/{nb_id}/kernel/craft-init")
 async def post(nb_id: str):
-    """Execute CRAFT code cells after kernel selection.
+    """Execute kernel setup (_lib/ sys.path) and CRAFT code cells after kernel selection.
 
-    Called by the client after the user selects a kernel, so CRAFT setup
+    Called by the client after the user selects a kernel, so setup
     code runs before any manual cell execution.
     """
     nb = get_notebook(nb_id)
@@ -1131,39 +1334,46 @@ async def post(nb_id: str):
         if found:
             nb.path = found
 
-    if not nb_path or not Path(nb_path).exists():
-        return ""
+    # Collect CRAFT cells to execute
+    unexecuted = []
+    if nb_path and Path(nb_path).exists():
+        from dialeng.services.craft_service import find_craft_files, get_craft_code_cells, _executed_craft
+        craft_paths = find_craft_files(nb_path, NOTEBOOKS_DIR)
+        nb_path_resolved = Path(nb_path).resolve()
+        craft_paths = [cp for cp in craft_paths if Path(cp).resolve() != nb_path_resolved]
+        if craft_paths:
+            craft_cells = get_craft_code_cells(craft_paths)
+            executed = _executed_craft.get(nb_id, set())
+            unexecuted = [(cid, src) for cid, src in craft_cells if cid not in executed]
+            if unexecuted:
+                # Mark all cells as executed synchronously to prevent double execution
+                _executed_craft.setdefault(nb_id, set()).update(cid for cid, _ in unexecuted)
+                print(f"[CRAFT] Executing {len(unexecuted)} code cells for {nb_id} from {len(craft_paths)} CRAFT file(s)", flush=True)
+                for cp in craft_paths:
+                    print(f"[CRAFT]   - {cp}", flush=True)
 
-    from dialeng.services.craft_service import find_craft_files, get_craft_code_cells, _executed_craft
-    craft_paths = find_craft_files(nb_path, NOTEBOOKS_DIR)
-    nb_path_resolved = Path(nb_path).resolve()
-    craft_paths = [cp for cp in craft_paths if Path(cp).resolve() != nb_path_resolved]
-    if not craft_paths:
-        return ""
-
-    craft_cells = get_craft_code_cells(craft_paths)
-    executed = _executed_craft.get(nb_id, set())
-    unexecuted = [(cid, src) for cid, src in craft_cells if cid not in executed]
-    if not unexecuted:
-        return ""
-
-    # Mark all cells as executed synchronously to prevent double execution
-    _executed_craft.setdefault(nb_id, set()).update(cid for cid, _ in unexecuted)
-    print(f"[CRAFT] Executing {len(unexecuted)} code cells for {nb_id} from {len(craft_paths)} CRAFT file(s)", flush=True)
-    for cp in craft_paths:
-        print(f"[CRAFT]   - {cp}", flush=True)
-
-    async def _run_craft():
-        for cid, src in unexecuted:
-            try:
-                cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
-                async for _ in kernel_service.execute_cell(nb_id, cell):
-                    pass
-                print(f"[CRAFT] Executed: {cid}", flush=True)
-            except Exception as e:
-                print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
-        print(f"[CRAFT] All cells executed for {nb_id}", flush=True)
-    asyncio.create_task(_run_craft())
+    # Run lib init and CRAFT cells in a single sequential task to avoid
+    # racing on Colab's lazy kernel connection (assign_and_connect)
+    async def _init_and_craft():
+        try:
+            await _inject_lib_syspath(nb_id)
+            await _upload_lib_to_colab(nb_id)
+            for cid, src in unexecuted:
+                try:
+                    cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
+                    async for _ in kernel_service.execute_cell(nb_id, cell):
+                        pass
+                    print(f"[CRAFT] Executed: {cid}", flush=True)
+                except Exception as e:
+                    print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
+            if unexecuted:
+                print(f"[CRAFT] All cells executed for {nb_id}", flush=True)
+            # Signal frontend that kernel setup is complete → dot turns green
+            await broadcast_kernel_status(nb_id, "connected")
+        except Exception as e:
+            print(f"[CRAFT] Init failed for {nb_id}: {e}", flush=True)
+            await broadcast_kernel_status(nb_id, "error")
+    asyncio.create_task(_init_and_craft())
     return ""
 
 # ============================================================================
@@ -1321,14 +1531,17 @@ async def post(request):
     # Form field names use dot notation: "aws.region", "modes.default", etc.
     updates = {}
 
-    for field_name, value in form_data.items():
+    for field_name, value in form_data.multi_items():
         # Parse the dotted path into nested dict
         keys = field_name.split('.')
 
-        # Handle checkbox values - unchecked boxes aren't sent
-        # Convert string "on" to True, and parse numbers
+        # Handle toggle values: hidden input sends "off", checkbox sends "on"
+        # When checkbox is checked, both "off" and "on" are sent — "on" wins
+        # (last value for same name). When unchecked, only "off" is sent.
         if value == 'on':
             value = True
+        elif value == 'off':
+            value = False
         elif value.isdigit():
             value = int(value)
         else:
@@ -1348,35 +1561,14 @@ async def post(request):
             current = current[key]
         current[keys[-1]] = value
 
-    # Handle unchecked checkboxes (they're not sent in form data)
-    # We need to explicitly set them to False
-    checkbox_fields = [
-        'tool_settings.require_confirmation',
-        'tool_settings.builtin_tools_enabled',
-        'llm.use_sdk_directly',
-        'llm.debug_mode',
-        'shell.shell_cells_enabled',
-        'colab.enabled',
-    ]
-    for field in checkbox_fields:
-        keys = field.split('.')
-        # Check if this field was NOT in the form data (meaning checkbox unchecked)
-        found = field in form_data
-        if not found:
-            current = updates
-            for key in keys[:-1]:
-                if key not in current:
-                    current[key] = {}
-                current = current[key]
-            current[keys[-1]] = False
-
     try:
-        # Apply updates to config
-        update_config(updates)
+        # Apply updates to config (explicitly use project dir path)
+        config_path = NOTEBOOKS_DIR / "dialeng_config.json"
+        update_config(updates, config_path=config_path)
 
         # Reload the global config
         global DIALENG_CONFIG, colab_auth_service, colab_session_manager
-        DIALENG_CONFIG = load_config(force_reload=True)
+        DIALENG_CONFIG = load_config(config_path=config_path, force_reload=True)
 
         # Lazily initialize or tear down Colab services based on new config
         colab_changed = False
@@ -1942,15 +2134,21 @@ async def post(nb_id: str, cid: str, source: str = None):
 async def post(nb_id: str):
     """Restart the kernel for a specific notebook."""
     await broadcast_kernel_status(nb_id, "restarting")
-    await kernel_service.restart_async(nb_id)
+    try:
+        await kernel_service.restart_async(nb_id)
+    except Exception as e:
+        print(f"[KERNEL] Restart failed for {nb_id}: {e}", flush=True)
+        await broadcast_kernel_status(nb_id, "error")
+        return Div(f"Kernel restart failed: {e}", cls="status error")
 
     # Clear CRAFT execution tracking so CRAFT cells re-execute on next page load
     from dialeng.services.craft_service import reset_craft_tracking
     reset_craft_tracking(nb_id)
     print(f"[CRAFT] Reset execution tracking for {nb_id} (kernel restart)", flush=True)
 
-    # Re-run CRAFT code cells in the fresh kernel
+    # Inject _lib/ sys.path and re-run CRAFT code cells in the fresh kernel
     nb = notebooks.get(nb_id)
+    craft_cells = []
     if nb:
         nb_path = nb.path
         if not nb_path:
@@ -1968,19 +2166,30 @@ async def post(nb_id: str):
                     # Mark synchronously to prevent race conditions
                     _executed_craft.setdefault(nb_id, set()).update(cid for cid, _ in craft_cells)
                     print(f"[CRAFT] Re-executing {len(craft_cells)} code cells after kernel restart", flush=True)
-                    async def _run_craft():
-                        for cid, src in craft_cells:
-                            try:
-                                cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
-                                async for _ in kernel_service.execute_cell(nb_id, cell):
-                                    pass
-                                print(f"[CRAFT] Executed: {cid}", flush=True)
-                            except Exception as e:
-                                print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
-                        print(f"[CRAFT] All cells re-executed for {nb_id}", flush=True)
-                    asyncio.create_task(_run_craft())
 
-    return Div("✓ Kernel restarted", cls="status success")
+    async def _restart_setup():
+        try:
+            # Inject lib sys.path and re-upload to Colab before running CRAFT cells
+            await _inject_lib_syspath(nb_id)
+            await _upload_lib_to_colab(nb_id)
+            for cid, src in craft_cells:
+                try:
+                    cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
+                    async for _ in kernel_service.execute_cell(nb_id, cell):
+                        pass
+                    print(f"[CRAFT] Executed: {cid}", flush=True)
+                except Exception as e:
+                    print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
+            if craft_cells:
+                print(f"[CRAFT] All cells re-executed for {nb_id}", flush=True)
+            # Signal frontend that restart setup is complete → dot turns green
+            await broadcast_kernel_status(nb_id, "connected")
+        except Exception as e:
+            print(f"[CRAFT] Restart setup failed for {nb_id}: {e}", flush=True)
+            await broadcast_kernel_status(nb_id, "error")
+    asyncio.create_task(_restart_setup())
+
+    return Div(cls="status")
 
 @rt("/dialeng/{nb_id}/kernel/interrupt")
 async def post(nb_id: str):
@@ -2746,10 +2955,12 @@ async def ws(msg: str, send, nb_id: str):
 # Run
 # ============================================================================
 
-def main():
+def main(root_dir: Path = None, port: int = 8000):
     """CLI entry point for dialeng."""
-    print("🚀 Dialeng starting at http://localhost:8000")
-    print("   Notebooks saved to: ./notebooks/")
+    if root_dir is not None:
+        set_root_dir(root_dir)
+    print(f"🚀 Dialeng starting at http://localhost:{port}")
+    print(f"   Root directory: {NOTEBOOKS_DIR.resolve()}")
     print("   Format: Solveit-compatible .ipynb")
     print("")
     # Print credential status
@@ -2774,7 +2985,7 @@ def main():
     print("   • Alt+↑/↓           - Move cell up/down")
     print("   • Escape            - Exit edit mode")
     print("   • Double-click      - Edit markdown/response")
-    serve(port=8000)
+    serve(appname="dialeng.app", port=port, reload_excludes=[".autorun_modules/*"])
 
 
 if __name__ == "__main__":

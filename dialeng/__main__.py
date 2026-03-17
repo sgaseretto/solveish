@@ -1,5 +1,5 @@
-"""Allow running dialeng as: python -m dialeng"""
-from dialeng.app import main
+"""Allow running dialeng as `python -m dialeng`."""
+from dialeng.cli import cli
 
 if __name__ == "__main__":
-    main()
+    cli()
