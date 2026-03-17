@@ -69,12 +69,40 @@ No special directives are needed -- just write code and explore ideas.
 
 When you find yourself copying code between notebooks, it is time to extract reusable modules.
 
+### Quick start: CRAFT Init button
+
+The fastest way to get started is the **CRAFT Init** toolbar button (square-library icon). Click it, enter a package name, and it sets up everything:
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant TB as Toolbar Button
+    participant EXT as craft_init extension
+    participant FS as Filesystem
+
+    U->>TB: Click square-library icon
+    TB->>U: Prompt for package name
+    U->>TB: "my_pkg"
+    TB->>EXT: POST /ext/init_craft {pkg_name: "my_pkg"}
+    EXT->>FS: Create pyproject.toml<br/>[tool.dialeng] lib_name = "my_pkg"
+    EXT->>FS: Create CRAFT.ipynb<br/>(sys.path setup for my_pkg/)
+    EXT->>FS: Create my_pkg/__init__.py
+    EXT-->>U: Success
+```
+
+This creates three things:
+1. **`pyproject.toml`** with `[tool.dialeng] lib_name = "my_pkg"` — tells the save hook where to export
+2. **`CRAFT.ipynb`** — auto-executes on kernel start, adds the project root to `sys.path`
+3. **`my_pkg/`** directory with `__init__.py` — ready to receive exported modules
+
 ### How it works
 
 1. Add `#| default_exp module_name` to the **first code cell** of a notebook
 2. Mark reusable cells with `#| export`
-3. On save, the exported cells are automatically extracted to `_lib/{module_name}.py`
-4. Other notebooks can immediately `from _lib.module_name import ...`
+3. On save, the exported cells are automatically extracted to `{lib_name}/{module_name}.py`
+4. Other notebooks can immediately `from {lib_name}.module_name import ...`
+
+The export folder name is read from `pyproject.toml [tool.dialeng] lib_name`. If no `pyproject.toml` exists (e.g., older projects), it defaults to `_lib/`.
 
 ### Save-hook extraction pipeline
 
@@ -83,15 +111,26 @@ sequenceDiagram
     participant U as User
     participant NB as Notebook (save)
     participant EX as Export Hook
-    participant LIB as _lib/
+    participant PT as pyproject.toml
+    participant LIB as {lib_name}/
 
     U->>NB: Edit cells, Cmd+S
     NB->>EX: Save triggers extraction
+    EX->>PT: Read lib_name (default: _lib)
     EX->>EX: Find cells with #| export
     EX->>EX: Read #| default_exp module_name
-    EX->>LIB: Write _lib/module_name.py
+    EX->>LIB: Write {lib_name}/module_name.py
     Note over LIB: Contains exported cell<br/>contents (in order)
 ```
+
+### Colab support
+
+When using a Colab kernel, exported modules are automatically uploaded to the Colab VM:
+- On kernel start (during CRAFT init)
+- On kernel restart
+- On every notebook save that triggers an export
+
+This means `from my_pkg.helpers import ...` works identically on local and Colab kernels.
 
 ### Example notebook
 
@@ -119,28 +158,31 @@ df = load_csv("sample.csv")
 clean_column_names(df).head()
 ```
 
-After saving, `_lib/data_utils.py` is created (or updated) with the contents of the exported cells.
+After saving, `my_pkg/data_utils.py` is created (or updated) with the contents of the exported cells.
 
 ### Using extracted modules
 
 In any other notebook under the same root:
 
 ```python
-from _lib.data_utils import load_csv, clean_column_names
+from my_pkg.data_utils import load_csv, clean_column_names
 ```
 
-This works because `_lib/` is automatically added to the kernel's `sys.path` on startup.
+This works because the project root is automatically added to the kernel's `sys.path` on startup.
 
 ### Directory structure
 
 ```
 my-project/
-├── _lib/                      # Auto-generated from notebooks
+├── pyproject.toml             # [tool.dialeng] lib_name = "my_pkg"
+├── CRAFT.ipynb                # Auto-created by CRAFT Init button
+├── my_pkg/                    # Auto-generated from notebooks
+│   ├── __init__.py
 │   ├── data_utils.py          # From data_exploration.ipynb
 │   └── plotting.py            # From viz_helpers.ipynb
 ├── data_exploration.ipynb     # Has #| default_exp data_utils
 ├── viz_helpers.ipynb          # Has #| default_exp plotting
-└── analysis.ipynb             # Imports from _lib/
+└── analysis.ipynb             # Imports from my_pkg/
 ```
 
 ---
@@ -148,6 +190,8 @@ my-project/
 ## Phase 3: Package
 
 When you are ready to distribute your code as a proper Python package, use the built-in scaffolding command.
+
+If you used the CRAFT Init button in Phase 2, `pyproject.toml` and the package directory already exist. The `dialeng package init` command extends them with `[project]`, `[build-system]`, and `[tool.nbdev]` sections — no migration needed.
 
 ### Initialize the package
 
@@ -162,9 +206,9 @@ This creates an nbdev-compatible project structure:
 ```mermaid
 flowchart TD
     CMD["dialeng package init --name my_package"]
-    CMD --> PYPROJ["Create pyproject.toml<br/>with [tool.nbdev] section"]
-    CMD --> PKGDIR["Create my_package/ directory"]
-    PKGDIR --> INIT["Create __init__.py"]
+    CMD --> PYPROJ["Extend pyproject.toml<br/>with [tool.nbdev], [project], [build-system]"]
+    CMD --> PKGDIR["Ensure my_package/ directory"]
+    PKGDIR --> INIT["Ensure __init__.py"]
 
     style CMD fill:#fff3e0
     style PYPROJ fill:#fce4ec
@@ -176,10 +220,9 @@ flowchart TD
 
 ```
 my-project/
-├── pyproject.toml             # With [tool.nbdev] configuration
+├── pyproject.toml             # With [tool.dialeng] + [tool.nbdev] configuration
 ├── my_package/
 │   └── __init__.py
-├── _lib/                      # Still works for local reuse
 ├── data_exploration.ipynb
 └── ...
 ```
@@ -225,21 +268,22 @@ flowchart TD
     end
 
     subgraph "Phase 2: Reuse"
+        B0["Click CRAFT Init button"]
         B1["Add #| default_exp"]
         B2["Mark cells #| export"]
-        B3["Auto-extracted to _lib/"]
-        B4["from _lib.mod import ..."]
-        B1 --> B2 --> B3 --> B4
+        B3["Auto-extracted to my_pkg/"]
+        B4["from my_pkg.mod import ..."]
+        B0 --> B1 --> B2 --> B3 --> B4
     end
 
     subgraph "Phase 3: Package"
         C1["dialeng package init"]
-        C2["pyproject.toml + package dir"]
+        C2["Extend pyproject.toml + nbdev"]
         C3["nbdev_export / test / docs / pypi"]
         C1 --> C2 --> C3
     end
 
-    A3 -->|"Ready to reuse code"| B1
+    A3 -->|"Ready to reuse code"| B0
     B4 -->|"Ready to distribute"| C1
 ```
 
@@ -247,5 +291,5 @@ Each phase builds on the previous one. You can stay in any phase as long as it s
 
 ### See also
 
-- [Writing AUTORUN Extensions](autorun_extensions.md) -- uses `#| export` for extension registration (a different workflow from `_lib` extraction)
+- [Writing AUTORUN Extensions](autorun_extensions.md) -- uses `#| export` for extension registration (a different workflow from package extraction)
 - [CRAFT, TEMPLATE, and AUTORUN](../how_it_works/16_craft_template_autorun.md) -- deep dive into special notebook mechanics

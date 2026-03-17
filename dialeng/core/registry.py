@@ -114,6 +114,7 @@ class ExtensionRegistry:
     providers: Dict[str, ProviderRegistration] = field(default_factory=dict)
     toolbar_items: Dict[str, ToolbarItemRegistration] = field(default_factory=dict)
     settings_sections: Dict[str, SettingsSectionRegistration] = field(default_factory=dict)
+    actions: Dict[str, Callable] = field(default_factory=dict)
 
     # Track loaded extensions
     _loaded_extensions: List[str] = field(default_factory=list)
@@ -213,6 +214,17 @@ class ExtensionRegistry:
         self.settings_sections[name] = registration
         logger.info(f"Registered settings section: {name} ({registration.label})")
 
+    def register_action(self, name: str, handler: Callable) -> None:
+        """Register a custom action handler for the /ext/{name} endpoint.
+
+        Action handlers are called via POST /dialeng/{nb_id}/ext/{name}.
+        Handler signature: async def handler(nb_id: str, **kwargs) -> dict
+        """
+        if name in self.actions:
+            logger.warning(f"Overwriting existing action: {name}")
+        self.actions[name] = handler
+        logger.info(f"Registered action: {name}")
+
     def get_kernel_choices(self) -> List[tuple]:
         """Get list of (value, label) tuples for kernel selection UI."""
         return [(name, reg.label) for name, reg in self.kernels.items()]
@@ -260,7 +272,8 @@ class ExtensionRegistry:
             f"callbacks={len(self.callbacks)}, "
             f"services={list(self.services.keys())}, "
             f"kernels={list(self.kernels.keys())}, "
-            f"providers={list(self.providers.keys())})"
+            f"providers={list(self.providers.keys())}, "
+            f"actions={list(self.actions.keys())})"
         )
 
 
@@ -465,4 +478,22 @@ def register_settings_section_decorator(
         )
         registry.register_settings_section(registration)
         return renderer
+    return decorator
+
+
+def register_action(name: str):
+    """
+    Decorator to register a custom action handler.
+
+    Actions are invoked via POST /dialeng/{nb_id}/ext/{name}.
+    The handler receives nb_id and any form/query parameters.
+
+        @register_action("yt_capture")
+        async def yt_capture(nb_id: str, **kwargs):
+            # do work, manipulate notebook via dialoghelper
+            return {"status": "ok"}
+    """
+    def decorator(handler):
+        registry.register_action(name, handler)
+        return handler
     return decorator

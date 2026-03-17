@@ -1,8 +1,9 @@
-"""Save-hook extraction: notebooks with #| default_exp auto-export to _lib/.
+"""Save-hook extraction: notebooks with #| default_exp auto-export to a lib directory.
 
 When a notebook containing `#| default_exp module_name` is saved,
-cells marked with `#| export` are extracted to `_lib/{module_name}.py`.
-This makes exported code immediately importable from other notebooks.
+cells marked with `#| export` are extracted to `{lib_name}/{module_name}.py`.
+The lib directory name is read from pyproject.toml [tool.dialeng] lib_name,
+defaulting to '_lib' when no configuration is present.
 """
 import json
 import logging
@@ -12,6 +13,19 @@ from typing import Optional, Dict
 logger = logging.getLogger(__name__)
 
 LIB_DIR_NAME = "_lib"
+
+
+def get_lib_name(root_dir: Path) -> str:
+    """Read lib_name from pyproject.toml [tool.dialeng], defaulting to '_lib'."""
+    pyproject = root_dir / "pyproject.toml"
+    if pyproject.exists():
+        try:
+            import tomllib
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            return data.get("tool", {}).get("dialeng", {}).get("lib_name", LIB_DIR_NAME)
+        except Exception:
+            pass
+    return LIB_DIR_NAME
 
 
 def find_default_exp(notebook_path: Path) -> Optional[str]:
@@ -83,12 +97,13 @@ def _ensure_init_files(lib_dir: Path, module_name: str):
 
 
 def maybe_extract(notebook_path: Path, root_dir: Path) -> Optional[Dict]:
-    """Extract #| export cells from a notebook to _lib/ if it has #| default_exp."""
+    """Extract #| export cells from a notebook to the lib directory if it has #| default_exp."""
     module_name = find_default_exp(notebook_path)
     if module_name is None:
         return None
 
-    lib_dir = root_dir / LIB_DIR_NAME
+    lib_name = get_lib_name(root_dir)
+    lib_dir = root_dir / lib_name
     export_cells = _extract_export_cells(notebook_path)
 
     parts = module_name.split(".")
@@ -100,7 +115,7 @@ def maybe_extract(notebook_path: Path, root_dir: Path) -> Optional[Dict]:
     if not export_cells:
         if output_path.exists():
             output_path.unlink()
-            logger.info(f"Removed stale _lib export: {output_path}")
+            logger.info(f"Removed stale {lib_name} export: {output_path}")
         return None
 
     lib_dir.mkdir(exist_ok=True)

@@ -1822,6 +1822,11 @@ function connectWebSocket(notebookId) {
                     });
                 }
             }
+
+        // Extension system: page refresh after hot-reload
+        } else if (data.type === 'extensions_reloaded') {
+            console.log('[WS] Extensions reloaded, refreshing page...');
+            location.reload();
         }
     };
 

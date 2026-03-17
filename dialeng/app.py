@@ -420,18 +420,21 @@ def save_notebook(notebook_id: str):
         # Use existing path if set (preserves subdirectory location), else reconstruct from ID
         path = nb.path if nb.path else NOTEBOOKS_DIR / f"{_nb_id_to_relpath(notebook_id)}.ipynb"
         nb.save(str(path))
-        # Auto-extract #| export cells to _lib/ if notebook has #| default_exp
+        # Auto-extract #| export cells to lib dir if notebook has #| default_exp
         try:
             from dialeng.services.lib_export_service import maybe_extract
             result = maybe_extract(Path(path), root_dir=NOTEBOOKS_DIR)
             if result:
                 import logging
                 logger = logging.getLogger(__name__)
-                logger.info(f"_lib export: {result['module']} ({result['cells_exported']} cells)")
+                logger.info(f"lib export: {result['module']} ({result['cells_exported']} cells)")
+                # Re-upload to Colab if this notebook has an active Colab kernel
+                import asyncio
+                asyncio.create_task(_upload_lib_to_colab(notebook_id))
         except Exception as e:
             import logging
             logger = logging.getLogger(__name__)
-            logger.warning(f"_lib export failed for {notebook_id}: {e}")
+            logger.warning(f"lib export failed for {notebook_id}: {e}")
 
 def list_notebooks() -> List[str]:
     return [p.stem for p in NOTEBOOKS_DIR.glob("*.ipynb")]
@@ -896,7 +899,7 @@ async def post():
     return result
 
 @rt("/dialeng/{nb_id}/ext/{action_name}")
-async def post(nb_id: str, action_name: str, **kwargs):
+async def post(nb_id: str, action_name: str, request):
     """Execute a registered extension action.
 
     Extensions register actions via @register_action("name") in #| export cells.
@@ -907,6 +910,9 @@ async def post(nb_id: str, action_name: str, **kwargs):
     if not handler:
         return {"error": f"Unknown action: {action_name}"}, 404
     try:
+        # Extract form data from request (FastHTML ignores **kwargs)
+        form = await request.form()
+        kwargs = dict(form)
         if asyncio.iscoroutinefunction(handler):
             result = await handler(nb_id=nb_id, **kwargs)
         else:
@@ -1119,8 +1125,10 @@ def post(nb_id: str, safe_mode: str = "false"):
 # ============================================================================
 
 async def _inject_lib_syspath(nb_id: str):
-    """If _lib/ exists in NOTEBOOKS_DIR, add NOTEBOOKS_DIR to the kernel's sys.path."""
-    lib_dir = NOTEBOOKS_DIR / "_lib"
+    """If lib dir exists in NOTEBOOKS_DIR, add NOTEBOOKS_DIR to the kernel's sys.path."""
+    from dialeng.services.lib_export_service import get_lib_name
+    lib_name = get_lib_name(NOTEBOOKS_DIR)
+    lib_dir = NOTEBOOKS_DIR / lib_name
     if not lib_dir.exists():
         return
     notebooks_path = str(NOTEBOOKS_DIR.resolve())
@@ -1129,9 +1137,60 @@ async def _inject_lib_syspath(nb_id: str):
     try:
         async for _ in kernel_service.execute_cell(nb_id, cell):
             pass
-        print(f"[LIB] Injected sys.path for _lib/ into kernel {nb_id}", flush=True)
+        print(f"[LIB] Injected sys.path for {lib_name}/ into kernel {nb_id}", flush=True)
     except Exception as e:
         print(f"[LIB] Failed to inject sys.path for {nb_id}: {e}", flush=True)
+
+
+async def _upload_lib_to_colab(nb_id: str):
+    """If kernel is Colab and lib dir exists, upload module files to remote VM."""
+    from dialeng.services.lib_export_service import get_lib_name
+
+    # Check if this notebook uses a Colab kernel
+    nb = notebooks.get(nb_id)
+    if not nb or getattr(nb, 'kernel_type', 'local') != 'colab':
+        return
+
+    if not kernel_service.has_kernel(nb_id):
+        return
+
+    lib_name = get_lib_name(NOTEBOOKS_DIR)
+    lib_dir = NOTEBOOKS_DIR / lib_name
+    if not lib_dir.exists():
+        return
+
+    # Collect all .py files in the lib directory
+    py_files = list(lib_dir.rglob("*.py"))
+    if not py_files:
+        return
+
+    # Build code that recreates the directory structure and writes files on the VM
+    import base64
+    code_parts = ["import os, base64"]
+    dirs_created = set()
+    for py_file in py_files:
+        rel_path = py_file.relative_to(NOTEBOOKS_DIR)
+        content = py_file.read_text(encoding="utf-8")
+        # Ensure parent dirs exist (deduplicate makedirs calls)
+        parent = str(rel_path.parent)
+        if parent not in dirs_created:
+            code_parts.append(f"os.makedirs({parent!r}, exist_ok=True)")
+            dirs_created.add(parent)
+        # Use base64 encoding to avoid string escaping issues
+        b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        code_parts.append(
+            f"open({str(rel_path)!r}, 'w').write(base64.b64decode({b64!r}).decode('utf-8'))"
+        )
+
+    setup_code = "\n".join(code_parts)
+    cell = Cell(id="_lib_colab_upload", cell_type=CellType.CODE, source=setup_code)
+    try:
+        async for _ in kernel_service.execute_cell(nb_id, cell):
+            pass
+        print(f"[LIB] Uploaded {len(py_files)} module files to Colab kernel {nb_id}", flush=True)
+    except Exception as e:
+        print(f"[LIB] Failed to upload lib files to Colab: {e}", flush=True)
+
 
 # ============================================================================
 # Kernel Management Routes
@@ -1227,8 +1286,11 @@ async def post(nb_id: str):
     Called by the client after the user selects a kernel, so setup
     code runs before any manual cell execution.
     """
-    # Always inject _lib/ sys.path at kernel init
-    asyncio.create_task(_inject_lib_syspath(nb_id))
+    # Always inject lib sys.path at kernel init, then upload to Colab if needed
+    async def _lib_init():
+        await _inject_lib_syspath(nb_id)
+        await _upload_lib_to_colab(nb_id)
+    asyncio.create_task(_lib_init())
 
     nb = get_notebook(nb_id)
     nb_path = nb.path
@@ -2078,8 +2140,9 @@ async def post(nb_id: str):
                     print(f"[CRAFT] Re-executing {len(craft_cells)} code cells after kernel restart", flush=True)
 
     async def _restart_setup():
-        # Inject _lib/ sys.path before running CRAFT cells
+        # Inject lib sys.path and re-upload to Colab before running CRAFT cells
         await _inject_lib_syspath(nb_id)
+        await _upload_lib_to_colab(nb_id)
         for cid, src in craft_cells:
             try:
                 cell = Cell(id=cid, cell_type=CellType.CODE, source=src)

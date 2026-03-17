@@ -30,7 +30,7 @@ def list_directory(path: Path, root: Path) -> Tuple[List[str], List[str]]:
     folders = sorted(
         d.name for d in path.iterdir()
         if d.is_dir() and not d.name.startswith('.')
-        and d.name not in ('__pycache__', '.ipynb_checkpoints', 'AUTORUN')
+        and d.name not in ('__pycache__', '.ipynb_checkpoints')
     )
     notebooks = sorted(
         f.stem for f in path.iterdir()

@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### CRAFT Init Extension
+- New toolbar button (square-library icon) to initialize a package-aware CRAFT.ipynb
+- Prompts for a package name (valid Python identifier) and creates:
+  - `pyproject.toml` with `[tool.dialeng] lib_name` configuration
+  - `CRAFT.ipynb` with sys.path setup for the package directory
+  - Package directory with `__init__.py`
+- Merges existing CRAFT.ipynb content when re-initializing (user cells preserved)
+- Core extension at `dialeng/extensions/craft_init.py`
+
+#### Configurable Export Folder
+- Save-hook extraction now reads lib name from `pyproject.toml [tool.dialeng] lib_name`
+- Defaults to `_lib` when no configuration exists (backward compatible)
+- `_inject_lib_syspath()` uses the configured folder name
+
+#### Colab Module Upload
+- Exported module files are automatically uploaded to Colab VM during CRAFT init
+- Re-upload triggered on kernel restart and on every save that produces an export
+- Uses base64 encoding for safe file transfer to remote kernel
+
+### Fixed
+
+#### Extension Action Endpoint
+- Fixed `/dialeng/{nb_id}/ext/{action_name}` endpoint not passing form parameters to action handlers (FastHTML ignores `**kwargs`; now uses `request.form()`)
+
 #### Kernel-First Dialog Opening
 - Kernel selection modal now shows automatically when opening a notebook without an attached kernel
 - Users can browse notebook content without selecting a kernel (view-only mode)
