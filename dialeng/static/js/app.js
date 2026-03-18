@@ -3317,7 +3317,21 @@ function processOOBSwap(html) {
             target.replaceWith(element);
             // Reinitialize HTMX bindings on the new element
             const newEl = document.getElementById(targetId);
-            if (newEl) htmx.process(newEl);
+            if (newEl) {
+                htmx.process(newEl);
+                // Re-execute scripts in output OOB swaps (e.g., YouTube embeds, interactive widgets).
+                // innerHTML/replaceWith does NOT execute <script> tags — we must clone them
+                // into new <script> elements so the browser runs them. This mirrors the
+                // same pattern used in appendDisplayData() during streaming.
+                if (targetId.startsWith('output-')) {
+                    newEl.querySelectorAll('script').forEach(script => {
+                        const newScript = document.createElement('script');
+                        if (script.src) newScript.src = script.src;
+                        newScript.textContent = script.textContent;
+                        script.parentNode.replaceChild(newScript, script);
+                    });
+                }
+            }
         }
         else if (targetId === 'cells') {
             // Full cells container update (e.g., from dialoghelper add_msg)

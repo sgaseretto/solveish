@@ -417,6 +417,8 @@ Key design decisions:
 
 4. **stderr is not an error** — Many tools (tqdm, warnings, logging) write to stderr. The `error` CSS class is only applied when the cell actually has an error (`has_error` from `code_stream_end`), not when stderr output is received.
 
+5. **Scripts are re-executed after OOB swap** — When `processOOBSwap()` replaces an `output-*` element, any `<script>` tags in the new DOM are cloned into fresh `<script>` elements so the browser executes them. Without this, interactive widgets (YouTube embeds, custom JS visualizations) would only work on the first cell run — because `replaceWith()` / `innerHTML` does not execute `<script>` tags. On the first run, asynchronously-loaded scripts (e.g., the YouTube IFrame API) happen to fire after the OOB swap, finding the fresh DOM. On subsequent runs, the API is already loaded and creates the widget synchronously during streaming, but the OOB swap then destroys it. Re-executing scripts after the OOB swap ensures the widget is always recreated in the final DOM. This mirrors the same script clone-and-replace pattern used in `appendDisplayData()` during streaming.
+
 ### Shared Rendering Module (`dialeng/ui/mime.py`)
 
 Output rendering utilities are centralized to avoid duplication:

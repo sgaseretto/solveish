@@ -50,6 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+#### Interactive HTML Widgets Not Rendering on Re-run
+- Code cells producing HTML with `<script>` tags (e.g., YouTube embeds, custom JS visualizations) only worked on the first execution — subsequent runs showed an empty output
+- Root cause: the OOB swap that finalizes cell output uses `replaceWith()`, which does not execute `<script>` tags. On first run, async API loading (e.g., YouTube IFrame API) happened to fire after the OOB swap. On re-runs, the API was already loaded and created the widget synchronously during streaming, but the OOB swap then destroyed it
+- Fix: `processOOBSwap()` now clones `<script>` tags into fresh elements after replacing `output-*` divs, mirroring the pattern already used in `appendDisplayData()` during streaming
+
 #### Colab Kernel Not Showing in Modal on Startup
 - Colab kernel option was missing from the "Select Kernel" modal even when `colab.enabled: true` in config
 - Root cause: Colab initialization ran at module import time, before the real config file was loaded — it always read in-memory defaults where `colab.enabled=false`
