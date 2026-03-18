@@ -1720,6 +1720,85 @@ async def post(nb_id: str, cid: str, direction: str):
 
     return AllCells(nb)
 
+@rt("/dialeng/{nb_id}/cell/{cid}/duplicate")
+async def post(nb_id: str, cid: str):
+    """Duplicate a cell, inserting the copy immediately after the original."""
+    nb = get_notebook(nb_id)
+    for i, c in enumerate(nb.cells):
+        if c.id == cid:
+            new_cell = Cell(
+                cell_type=c.cell_type,
+                source=c.source,
+                skipped=c.skipped,
+                pinned=c.pinned,
+                is_exported=c.is_exported,
+            )
+            nb.cells.insert(i + 1, new_cell)
+            cell_html = to_xml(CellView(new_cell, nb_id))
+            add_html = to_xml(AddButtons(i + 2, nb_id))
+            await broadcast_json(nb_id, {
+                "type": "cell_add",
+                "cell_id": new_cell.id,
+                "pos": i + 1,
+                "html": cell_html + add_html
+            })
+            return AllCells(nb)
+    return ""
+
+@rt("/dialeng/{nb_id}/cell/{cid}/clear-output")
+async def post(nb_id: str, cid: str):
+    """Clear outputs from a cell."""
+    nb = get_notebook(nb_id)
+    for c in nb.cells:
+        if c.id == cid:
+            c.clear_outputs()
+            await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
+            return CellView(c, nb.id)
+    return ""
+
+@rt("/dialeng/{nb_id}/cell/{cid}/merge-below")
+async def post(nb_id: str, cid: str):
+    """Merge cell with the one below it (append source, delete below)."""
+    nb = get_notebook(nb_id)
+    for i, c in enumerate(nb.cells):
+        if c.id == cid and i + 1 < len(nb.cells):
+            below = nb.cells[i + 1]
+            c.source = c.source.rstrip('\n') + '\n' + below.source
+            c.clear_outputs()
+            # Remove the cell below
+            del nb.cells[i + 1]
+            await broadcast_json(nb_id, {"type": "cell_delete", "cell_id": below.id})
+            await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
+            return CellView(c, nb.id)
+    return ""
+
+@rt("/dialeng/{nb_id}/cell/{cid}/extract-code-blocks")
+async def post(nb_id: str, cid: str):
+    """Extract fenced code blocks from cell output, create new code cells below."""
+    import re
+    nb = get_notebook(nb_id)
+    for i, c in enumerate(nb.cells):
+        if c.id == cid:
+            # Parse fenced code blocks from output
+            text = c.output or ''
+            blocks = re.findall(r'```(?:\w*)\n(.*?)```', text, re.DOTALL)
+            if not blocks:
+                return ""
+            # Insert code cells after this cell
+            for j, block in enumerate(blocks):
+                new_cell = Cell(cell_type="code", source=block.strip(), output_collapse=1)
+                nb.cells.insert(i + 1 + j, new_cell)
+                cell_html = to_xml(CellView(new_cell, nb_id))
+                add_html = to_xml(AddButtons(i + 2 + j, nb_id))
+                await broadcast_json(nb_id, {
+                    "type": "cell_add",
+                    "cell_id": new_cell.id,
+                    "pos": i + 1 + j,
+                    "html": cell_html + add_html
+                })
+            return AllCells(nb)
+    return ""
+
 @rt("/dialeng/{nb_id}/cell/{cid}/collapse")
 async def post(nb_id: str, cid: str, collapsed: str):
     nb = get_notebook(nb_id)

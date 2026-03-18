@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Solveit-style Keyboard Shortcuts
+- **Navigation**: Arrow keys / `j`/`k` to navigate cells, `Shift+Arrow` for multi-selection, `Cmd+A` select all, `Enter` to edit, `Escape` to exit
+- **Multi-selection**: Click, Shift+click (range), Cmd+click (toggle) — multi-select applies to h/p/e toggles, clipboard ops, and clear outputs
+- **Cell clipboard**: `x`/`c`/`v` to cut/copy/paste cells, `,`/`.` to copy input/output to system clipboard, `q` to duplicate
+- **Cell operations**: `a`/`b` to add cell above/below, `Shift+M` to merge with cell below, `Cmd+Shift+J/K/L/;` to switch cell type
+- **Execution**: `r` re-run all code, `Shift+A`/`Shift+B` run above/below, `Shift+R` restart kernel, `Shift+S` stop all, `Alt+Enter` run and create new cell
+- **Display**: `i`/`o` toggle input/output collapse (replaces `Z`/`Shift+Z`), `Shift+O` clamp output, `S S` save, `←`/`→` collapse/expand cell
+- **Content**: `m` copy code blocks from AI response, `n` edit AI response, `w` extract fenced code blocks to new code cells
+- **Keyboard shortcuts modal**: `?` or toolbar keyboard icon shows scrollable modal listing all shortcuts, categorized with `<kbd>` styling
+- New backend endpoints: `/cell/{cid}/duplicate`, `/cell/{cid}/clear-output`, `/cell/{cid}/merge-below`, `/cell/{cid}/extract-code-blocks`
+
 #### CLI `--init` Flag
 - `dialeng --init` initializes the reuse workflow (CRAFT.ipynb, pyproject.toml, package dir) on startup
 - `dialeng --init my_pkg` uses an explicit package name

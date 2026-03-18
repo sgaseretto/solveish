@@ -29,6 +29,17 @@
     outline-offset: -1px;
 }
 
+/* Multi-selected cells */
+.cell.selected {
+    background: color-mix(in srgb, var(--accent-blue) 8%, transparent);
+    border-color: color-mix(in srgb, var(--accent-blue) 40%, var(--border));
+}
+
+/* Cut cells - dimmed */
+.cell.cell-cut {
+    opacity: 0.5;
+}
+
 /* Ensure focused state overrides other visual states */
 .cell.focused.streaming {
     border-color: var(--accent-blue) !important;

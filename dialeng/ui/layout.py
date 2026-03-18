@@ -152,6 +152,8 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                                hx_post=f"/dialeng/{nb.id}/save", hx_target="#status", title="Save (Ctrl+S)"),
                         Button(icon_sprites('download', sz=14), cls="btn btn-sm",
                                hx_get=f"/dialeng/{nb.id}/export", title="Download .ipynb"),
+                        Button(icon_sprites('keyboard', sz=14), cls="btn btn-sm",
+                               onclick="toggleKeyboardShortcuts()", title="Keyboard shortcuts (?)"),
                         Button(icon_sprites('settings', sz=16), cls="btn btn-sm settings-btn", id="settings-btn",
                                onclick="toggleSettings()", title="Settings"),
                         # Extension toolbar items
