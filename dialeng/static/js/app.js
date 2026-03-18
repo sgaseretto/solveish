@@ -2693,6 +2693,11 @@ function escapeHtml(text) {
 }
 
 function ansiToHtml(text) {
+    // Strip non-SGR ANSI sequences (cursor control, erase codes like \x1b[2K,
+    // \x1b[?25h, etc.) that we don't render — tqdm uses these extensively
+    text = text.replace(/\x1b\[[0-9;]*[A-HJKSTfn]/g, '');  // cursor/erase
+    text = text.replace(/\x1b\[\?[0-9;]*[hl]/g, '');       // private modes
+
     let result = '';
     let openSpans = 0;
 
@@ -2781,7 +2786,11 @@ function appendCodeOutput(cellId, chunk, streamName) {
     // Get current raw text and apply chunk
     let currentText = streamTextContent.get(cellId) || '';
 
-    // Handle carriage return for progress bars (tqdm)
+    // Handle carriage return for progress bars (tqdm, pip).
+    // pexpect can send chunks mixing \n and \r, e.g.:
+    //   "Collecting foo\n  Downloading bar\n\r[2K ━━ 4/20 MB"
+    // We split on \r first, then promote any \n within each part
+    // into separate lines so they survive the \r overwrite.
     if (chunk.includes('\r')) {
         const lines = currentText.split('\n');
         const parts = chunk.split('\r');
@@ -2793,6 +2802,13 @@ function appendCodeOutput(cellId, chunk, streamName) {
             } else {
                 // After \r, replace current line content
                 lines[lines.length - 1] = parts[i];
+            }
+            // Promote embedded \n into separate array entries so
+            // future \r only overwrites the actual last line
+            if (parts[i].includes('\n')) {
+                const tail = lines.pop();
+                const sub = tail.split('\n');
+                lines.push(...sub);
             }
         }
         currentText = lines.join('\n');

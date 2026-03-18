@@ -419,13 +419,19 @@ Key design decisions:
 
 5. **Scripts are re-executed after OOB swap** — When `processOOBSwap()` replaces an `output-*` element, any `<script>` tags in the new DOM are cloned into fresh `<script>` elements so the browser executes them. Without this, interactive widgets (YouTube embeds, custom JS visualizations) would only work on the first cell run — because `replaceWith()` / `innerHTML` does not execute `<script>` tags. On the first run, asynchronously-loaded scripts (e.g., the YouTube IFrame API) happen to fire after the OOB swap, finding the fresh DOM. On subsequent runs, the API is already loaded and creates the widget synchronously during streaming, but the OOB swap then destroys it. Re-executing scripts after the OOB swap ensures the widget is always recreated in the final DOM. This mirrors the same script clone-and-replace pattern used in `appendDisplayData()` during streaming.
 
+6. **Non-SGR ANSI sequences are stripped** — `ansi_to_html()` (both Python and JS) strips cursor control (`\x1b[A`..`\x1b[H`, `\x1b[K`), erase (`\x1b[2K`), and private mode (`\x1b[?25h`, `\x1b[?25l`) sequences before processing SGR color codes. Without this, tqdm's cursor/erase codes pass through as visible `[2K` or `[?25h` text, corrupting the rendered output.
+
+7. **Terminal emulation for progress bars** — `StreamingStdout` sets `encoding='utf-8'` so tqdm uses Unicode bar characters (`█`) instead of ASCII (`#`), and sets `COLUMNS=120` via `os.environ` so tqdm renders a reasonable bar width (tqdm falls back to `os.environ["COLUMNS"]` when `ioctl(TIOCGWINSZ)` fails on non-real file descriptors).
+
+8. **Mixed `\n`/`\r` chunks are handled correctly** — `appendCodeOutput()` splits `\r`-containing chunks and promotes embedded `\n` into separate lines. This ensures that programs like pip, which send newlines followed by `\r`-based progress bars in a single chunk, don't have their permanent output overwritten by the progress bar update.
+
 ### Shared Rendering Module (`dialeng/ui/mime.py`)
 
 Output rendering utilities are centralized to avoid duplication:
 
 | Function | Used By | Purpose |
 |----------|---------|---------|
-| `ansi_to_html()` | `_render_cell_outputs()` | Convert ANSI escape codes to colored HTML spans |
+| `ansi_to_html()` | `_render_cell_outputs()` | Convert ANSI escape codes to colored HTML spans; strips non-SGR sequences (cursor, erase, private modes) |
 | `render_mime_bundle()` | `_render_cell_outputs()`, WebSocket streaming in `app.py` | Convert Jupyter MIME bundles to HTML (priority: text/html > image/svg+xml > image/png > text/markdown > text/plain) |
 
 ## Integration Points

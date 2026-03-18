@@ -55,6 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Root cause: the OOB swap that finalizes cell output uses `replaceWith()`, which does not execute `<script>` tags. On first run, async API loading (e.g., YouTube IFrame API) happened to fire after the OOB swap. On re-runs, the API was already loaded and created the widget synchronously during streaming, but the OOB swap then destroyed it
 - Fix: `processOOBSwap()` now clones `<script>` tags into fresh elements after replacing `output-*` divs, mirroring the pattern already used in `appendDisplayData()` during streaming
 
+#### Progress Bar and Streaming Output Improvements
+- **tqdm Unicode bars**: `StreamingStdout` now exposes `encoding='utf-8'`, so tqdm uses Unicode block characters (`█`) instead of ASCII (`#`)
+- **tqdm bar width**: Sets `COLUMNS=120` in the kernel environment so tqdm renders a reasonable bar width (fallback when `ioctl(TIOCGWINSZ)` fails on non-real FDs)
+- **ANSI escape stripping**: Both server-side (`ansi_to_html` in `mime.py`) and client-side (`ansiToHtml` in `app.js`) now strip non-SGR ANSI sequences (cursor control `\x1b[A`, erase `\x1b[2K`, private modes `\x1b[?25h`) that were rendering as visible garbage text
+- **Mixed `\n`/`\r` streaming**: `appendCodeOutput()` now correctly handles chunks containing both newlines and carriage returns (e.g., pip output with "Collecting...\n" followed by `\r`-based progress bars), preventing permanent output from being overwritten
+
 #### Colab Kernel Not Showing in Modal on Startup
 - Colab kernel option was missing from the "Select Kernel" modal even when `colab.enabled: true` in config
 - Root cause: Colab initialization ran at module import time, before the real config file was loaded — it always read in-memory defaults where `colab.enabled=false`
