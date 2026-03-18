@@ -50,7 +50,7 @@ class KernelRegistration:
 @dataclass
 class ProviderRegistration:
     """Registration for an LLM provider."""
-    name: str               # "claudette", "claudette_agent", "openai"
+    name: str               # "claudette", "claude_agent_sdk", "openai"
     label: str              # "Anthropic API", "Claude Code"
     factory: Callable       # () -> BaseLLMProvider
     credential_checker: Optional[Callable] = None  # () -> Optional[CredentialInfo]

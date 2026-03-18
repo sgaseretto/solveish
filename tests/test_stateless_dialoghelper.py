@@ -115,9 +115,9 @@ async def test_stateless_sdk_direct():
 
 
 async def test_compare_providers():
-    """Compare SDK direct vs claudette-agent wrapper."""
+    """Compare SDK direct mode."""
     print("\n" + "=" * 60)
-    print("Comparing SDK direct vs claudette-agent wrapper")
+    print("Comparing SDK direct mode")
     print("=" * 60)
 
     from dialeng.services.dialeng_config import load_config, reset_config_cache

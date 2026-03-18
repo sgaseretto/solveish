@@ -4,7 +4,7 @@ Credential Service - Detects available LLM credentials and selects provider.
 This module probes for credentials in the following order:
 1. Anthropic API key (ANTHROPIC_API_KEY) - uses claudette
 2. AWS Bedrock credentials - uses claudette
-3. Claude Code subscription (CLI) - uses claudette-agent
+3. Claude Code subscription (CLI) - uses claude-agent-sdk
 4. No credentials - Mock mode only
 
 Based on cred_probe.py logic but integrated as a service module.
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 class CredentialStatus:
     """Result of credential detection."""
     available: bool
-    provider: str  # "claudette" | "claudette_agent" | "mock_only"
+    provider: str  # "claudette" | "claude_agent_sdk" | "mock_only"
     backend: str   # "anthropic_api" | "bedrock" | "claude_code_subscription" | "none"
     source: str    # Where credentials were found
     details: str   # Human-readable details
@@ -263,14 +263,6 @@ def _check_claudette_available() -> bool:
         return False
 
 
-def _check_claudette_agent_available() -> bool:
-    """Check if claudette-agent library is installed."""
-    try:
-        from claudette_agent import AsyncChat
-        return True
-    except ImportError:
-        return False
-
 
 def _check_claude_agent_sdk_credentials() -> Tuple[bool, str]:
     """
@@ -337,7 +329,7 @@ def detect_credentials(dotenv_path: Optional[Path] = None) -> CredentialStatus:
 
     Returns CredentialStatus with:
     - provider: "claudette" if Anthropic API/Bedrock available
-    - provider: "claudette_agent" if Claude Code subscription available
+    - provider: "claude_agent_sdk" if Claude Code subscription available
     - provider: "mock_only" if no credentials found
     """
     global _credential_status
@@ -349,7 +341,6 @@ def detect_credentials(dotenv_path: Optional[Path] = None) -> CredentialStatus:
         dotenv_path = Path.cwd() / ".env"
 
     has_claudette = _check_claudette_available()
-    has_claudette_agent = _check_claudette_agent_available()
 
     # Step 1: Check Anthropic API key
     api_key, key_src = _find_anthropic_api_key(dotenv_path)
@@ -362,7 +353,7 @@ def detect_credentials(dotenv_path: Optional[Path] = None) -> CredentialStatus:
             )
             return _credential_status
         elif ok:
-            # Has API key but no claudette - fall through to check if claudette-agent works
+            # Has API key but no claudette - fall through to check if claude-agent-sdk works
             logger.warning("Anthropic API key found but claudette not installed, checking Claude Code...")
 
     # Step 2: Check AWS Bedrock
@@ -376,26 +367,24 @@ def detect_credentials(dotenv_path: Optional[Path] = None) -> CredentialStatus:
             )
             return _credential_status
 
-    # Step 3: Check Claude Code subscription
-    # First try direct SDK probe (more reliable as SDK handles CLI internally)
-    if has_claudette_agent:
-        ok, msg = _check_claude_agent_sdk_credentials()
-        if ok:
-            _credential_status = CredentialStatus(
-                available=True, provider="claudette_agent", backend="claude_code_subscription",
-                source="claude_agent_sdk", details=msg
-            )
-            return _credential_status
-        else:
-            logger.info(f"claude_agent_sdk probe: {msg}")
+    # Step 3: Check Claude Code subscription via SDK probe
+    ok, msg = _check_claude_agent_sdk_credentials()
+    if ok:
+        _credential_status = CredentialStatus(
+            available=True, provider="claude_agent_sdk", backend="claude_code_subscription",
+            source="claude_agent_sdk", details=msg
+        )
+        return _credential_status
+    else:
+        logger.info(f"claude_agent_sdk probe: {msg}")
 
     # Fallback: try CLI-based detection
     cli_path, cli_src = _find_claude_cli_path()
     if cli_path:
         ok, msg = _check_claude_code_credentials(cli_path)
-        if ok and has_claudette_agent:
+        if ok:
             _credential_status = CredentialStatus(
-                available=True, provider="claudette_agent", backend="claude_code_subscription",
+                available=True, provider="claude_agent_sdk", backend="claude_code_subscription",
                 source=cli_src, details=msg
             )
             return _credential_status

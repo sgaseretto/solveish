@@ -43,7 +43,7 @@
       "claude-3-5-haiku": "us.anthropic.claude-3-5-haiku-20241022-v1:0",
       "comment": "Model IDs for AWS Bedrock with cross-region inference. Format: us.anthropic.{model}-{date}-v{n}:{profile}"
     },
-    "claudette_agent_map": {
+    "claude_code_map": {
       "claude-haiku-4-5": "haiku",
       "claude-sonnet-4-5": "sonnet",
       "claude-3-5-sonnet": "sonnet",
@@ -60,10 +60,9 @@
     "comment": "Maximum tokens for extended thinking. Set to 0 to disable. Requires thinking-capable model (Claude Sonnet 3.7+, Sonnet 4+, Opus 4+)"
   },
   "llm": {
-    "use_sdk_directly": false,
     "debug_mode": false,
     "debug_log_dir": "./debug_logs",
-    "comment": "LLM provider settings. use_sdk_directly=true uses claude-agent-sdk directly for maximum isolation (stateless). Set to false (default) to use claudette-agent wrapper."
+    "comment": "LLM provider settings. debug_mode saves prompts and responses to JSON files."
   },
   "tool_settings": {
     "max_steps": 5,

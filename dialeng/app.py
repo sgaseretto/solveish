@@ -1836,7 +1836,7 @@ async def post(nb_id: str, cid: str, source: str = None):
             context = "\n\n".join(context_parts)
             stream_func = mock_llm_stream(c.source, context, c.use_thinking)
         else:
-            # Use real LLM via claudette-agent with dialoghelper context building
+            # Use real LLM with dialoghelper context building
             context_messages = build_context_messages(nb, cid)
 
             # Check if prompt contains special syntax ($`var` or &`func`)

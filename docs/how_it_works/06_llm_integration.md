@@ -26,7 +26,7 @@ flowchart TD
     B -->|No| D{AWS Bedrock creds?}
     D -->|Yes| C
     D -->|No| E{Claude Code CLI?}
-    E -->|Yes| F[Use claudette-agent library]
+    E -->|Yes| F[Use claude-agent-sdk]
     E -->|No| G[Mock mode only]
 
     C --> H[All modes available]
@@ -40,7 +40,7 @@ flowchart TD
 |----------|-------------|---------|
 | **Anthropic API** | `ANTHROPIC_API_KEY` env var or `.env` | `claudette` |
 | **AWS Bedrock** | AWS credentials (env, profile, IAM) | `claudette` |
-| **Claude Code** | Claude CLI with active subscription | `claudette-agent` |
+| **Claude Code** | Claude CLI with active subscription | `claude-agent-sdk` |
 | **None** | No credentials found | Mock only |
 
 ### Startup Logging
@@ -86,7 +86,7 @@ AVAILABLE_DIALOG_MODES = get_available_modes(CREDENTIAL_STATUS)
 
 # CredentialStatus fields:
 # - available: bool - Whether any credentials were found
-# - provider: str - "claudette" | "claudette_agent" | "mock_only"
+# - provider: str - "claudette" | "claude_agent_sdk" | "mock_only"
 # - backend: str - "anthropic_api" | "bedrock" | "claude_code_subscription" | "none"
 # - source: str - Where credentials were found
 # - details: str - Human-readable details
@@ -187,7 +187,7 @@ def build_context_messages(notebook, current_cell_id):
 
 ### Cell to Message Conversion
 
-Cells are converted to claudette-agent message format:
+Cells are converted to LLM provider message format:
 
 | Cell Type | Conversion |
 |-----------|------------|
@@ -374,7 +374,7 @@ Text output is cleaned separately:
 
 ### Provider Image Handling
 
-Both `claudette_provider.py` and `claudette_agent_provider.py` use `_split_context_images()`:
+`claudette_provider.py` uses `_split_context_images()`:
 
 ```mermaid
 flowchart TD
@@ -390,7 +390,6 @@ flowchart TD
 **Why images must be in the prompt (last message), not in history:**
 - **Anthropic API**: Images can only appear in user turns, never assistant turns. Context may include assistant messages from prior prompt cell outputs.
 - **claudette**: `_append_pr` auto-resolves consecutive user messages by calling `self()`, which can reorder messages and place images in assistant turns.
-- **claudette-agent**: `chat.stream()` uses `_build_conversation_prompt()` which flattens ALL history messages to plain text, losing image data. Only `chat()` (non-streaming) routes to `_call_with_images()` when images are detected.
 - **claude-agent-sdk**: `query()` passes prompts as CLI arguments. Base64 images cause `[Errno 7] Argument list too long` (OS limit ~256KB on macOS). `_call_with_images()` avoids this by using `ClaudeSDKClient` with stdin transport.
 
 ### Current Limitations and Future Improvements
@@ -400,7 +399,6 @@ These are workarounds for current SDK limitations. When they improve:
 | Limitation | Current Workaround | Future |
 |---|---|---|
 | `query()` passes prompt as CLI arg | Images in last message only, sent via stdin by `_call_with_images()` | When `query()` uses stdin transport, images can stay in context |
-| `chat.stream()` flattens to text | Fall back to non-streaming `chat()` for images | When `chat.stream()` supports images, streaming + vision works |
 | `finalize_cell_execution` destroys structured outputs | Two-source extraction (structured + HTML parsing) | Preserve structured outputs alongside HTML |
 | `display()` mid-cell not captured | Use last-expression pattern for images | Hook into IPython's `DisplayPublisher` registration |
 
@@ -410,7 +408,6 @@ These are workarounds for current SDK limitations. When they improve:
 |---|---|
 | `core/dispatch.py` | `_extract_image_blocks()`, `_resize_base64_image()`, `_get_text_output()`, `_strip_base64_images()` |
 | `services/llm/providers/claudette_provider.py` | `_split_context_images()` |
-| `services/llm/providers/claudette_agent_provider.py` | `_split_context_images()` |
 | `services/llm/utils.py` | `_extract_text_from_content()`, `build_prompt_with_context()` |
 | `app.py` | `finalize_cell_execution()`, `render_mime_bundle()` |
 
@@ -431,7 +428,6 @@ services/
     providers/
       __init__.py                  # Re-exports all providers
       claudette_provider.py        # Claudette API/Bedrock provider
-      claudette_agent_provider.py  # claudette-agent wrapper provider
       claude_agent_sdk_provider.py # claude-agent-sdk direct provider
   llm_service.py                   # Compatibility shim → imports from dialeng.services.llm
 ```
@@ -443,11 +439,9 @@ flowchart TD
     A["Prompt Cell Executed"] --> B["LLMService (Coordinator)"]
     B --> C{Provider?}
     C -->|claudette| D["ClaudetteProvider"]
-    C -->|claudette_agent| E["ClaudetteAgentProvider"]
     C -->|claude_agent_sdk| F["ClaudeAgentSdkProvider"]
 
     D --> G["stream() / stream_with_tools()"]
-    E --> G
     F --> G
 
     G --> H["Yield event dicts"]
@@ -464,7 +458,7 @@ flowchart TD
 ### Coordinator (`LLMService`)
 
 The coordinator owns:
-- **Provider selection** based on credential detection and `use_sdk_directly` config flag
+- **Provider selection** based on credential detection
 - **Mode → system prompt** mapping (learning, concise, standard)
 - **Model name mapping** via `config.get_api_model_name()`
 - **Prompt parsing** (`parse_prompt`, `substitute_variables`) and tool registry interaction
@@ -621,7 +615,7 @@ Key features:
 
 #### claude-agent-sdk Direct Mode (Maximum Isolation)
 
-For maximum session isolation, Dialeng can use `claude-agent-sdk.query()` directly instead of the claudette-agent wrapper. This is disabled by default but can be enabled via `use_sdk_directly: true` in `dialeng_config.json`.
+For maximum session isolation, Dialeng uses `claude-agent-sdk.query()` directly instead of the claudette-agent wrapper. This is enabled by default. To use the claudette-agent wrapper instead, set `use_sdk_directly: false` in `dialeng_config.json` or via the Settings UI.
 
 ```python
 from claude_agent_sdk import query, ClaudeAgentOptions
@@ -666,7 +660,7 @@ Configuration in `dialeng_config.json`:
 ```json
 {
   "llm": {
-    "use_sdk_directly": false,
+    "use_sdk_directly": true,
     "debug_mode": false,
     "debug_log_dir": "./debug_logs"
   }
@@ -675,7 +669,7 @@ Configuration in `dialeng_config.json`:
 
 | Option | Description |
 |--------|-------------|
-| `use_sdk_directly` | `true` = use SDK directly, `false` = use claudette-agent wrapper (default) |
+| `use_sdk_directly` | `true` (default) = use SDK directly, `false` = use claudette-agent wrapper |
 | `debug_mode` | When `true`, saves prompts and responses to JSON files |
 | `debug_log_dir` | Directory for debug logs (default: `./debug_logs`) |
 
