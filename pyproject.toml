@@ -25,6 +25,7 @@ dependencies = [
     # LLM integration
     "claudette>=0.2.0",
     "anthropic>=0.40.0",
+    "claude-agent-sdk",
 
     # ContextKit for reading context from various sources
     "contextkit",
