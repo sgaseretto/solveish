@@ -55,6 +55,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Root cause: the OOB swap that finalizes cell output uses `replaceWith()`, which does not execute `<script>` tags. On first run, async API loading (e.g., YouTube IFrame API) happened to fire after the OOB swap. On re-runs, the API was already loaded and created the widget synchronously during streaming, but the OOB swap then destroyed it
 - Fix: `processOOBSwap()` now clones `<script>` tags into fresh elements after replacing `output-*` divs, mirroring the pattern already used in `appendDisplayData()` during streaming
 
+#### Uvicorn Reload Loop on Generated Files
+- Running `!pip install` or other commands that create files in `.venv`/`.autorun_modules` triggered uvicorn's file watcher, causing infinite reload loops
+- Fix: `serve()` now uses `reload_dirs=["dialeng"]` to only watch the source code directory instead of excluding patterns from a broad watch
+
+#### Toolbar Dropdown Clipped by Overflow
+- YT capture button's dropdown panel was invisible because it rendered inside `.toolbar-right` which has `overflow-y: hidden`
+- Fix: panel is now appended to `document.body` with `position: fixed` and positioned via `getBoundingClientRect()`
+
+#### Code Cell Default Output Collapse
+- New code cells were created with `output_collapse=1` (scrollable), which is a rendering detail that shouldn't be a default
+- Removed `output_collapse=1` from all `Cell()` creation sites (add cell, extract code blocks, auto-add after run)
+
 #### Progress Bar and Streaming Output Improvements
 - **tqdm Unicode bars**: `StreamingStdout` now exposes `encoding='utf-8'`, so tqdm uses Unicode block characters (`█`) instead of ASCII (`#`)
 - **tqdm bar width**: Sets `COLUMNS=120` in the kernel environment so tqdm renders a reasonable bar width (fallback when `ioctl(TIOCGWINSZ)` fails on non-real FDs)
@@ -92,6 +104,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Server-side guard on cell run endpoint returns `HX-Trigger: kernel-required` if no kernel is attached
 
 ### Changed
+
+#### Toolbar Layout
+- `.toolbar-right` now uses horizontal scroll (`overflow-x: auto`) with hidden scrollbar instead of `flex-wrap`
+- Settings button moved to first position in right toolbar group for easier access
+- Mobile responsive styles simplified (removed `flex-direction: column`)
+
+#### Notebook Rename
+- `notebooks/yt-companion/` renamed to `notebooks/yt-insights/`
 
 #### URL Path Rename
 - All routes changed from `/notebook/` to `/dialeng/` (e.g., `http://localhost:8000/dialeng/?name=test_capture`)

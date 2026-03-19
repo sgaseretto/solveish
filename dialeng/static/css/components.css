@@ -20,20 +20,28 @@ main.container > h1 { display: none; }
 /* Rounded card container for toolbar — matches sidebar/cell aesthetic */
 .toolbar-container {
     display: flex; justify-content: space-between; align-items: center;
-    padding: 8px 12px;
+    padding: 8px 12px; gap: 12px;
     background: var(--bg-secondary);
     border: 1px solid var(--border);
     border-radius: 12px;
     margin-bottom: 12px;
     position: sticky; top: 8px; z-index: 50;
     backdrop-filter: blur(8px);
+    min-width: 0; /* allow flex children to shrink below content size */
 }
 .toolbar-left {
     display: flex; align-items: center; gap: 6px;
+    flex-shrink: 0; /* left group keeps its size */
 }
 .toolbar-right {
-    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    display: flex; align-items: center; gap: 6px;
+    flex-shrink: 1; min-width: 0;
+    overflow-x: auto; overflow-y: hidden;
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* IE/Edge */
 }
+.toolbar-right::-webkit-scrollbar { display: none; /* Chrome/Safari */ }
+.toolbar-right > * { flex-shrink: 0; white-space: nowrap; }
 .toolbar-title {
     font-size: 0.85rem; font-weight: 600;
     display: inline-flex; align-items: center; gap: 6px;

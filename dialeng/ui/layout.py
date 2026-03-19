@@ -116,6 +116,8 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                     ),
                     Div(
                         # Right group: controls
+                        Button(icon_sprites('settings', sz=16), cls="btn btn-sm settings-btn", id="settings-btn",
+                               onclick="toggleSettings()", title="Settings"),
                         Button(icon_sprites('sun', sz=16), cls="theme-toggle", id="theme-toggle",
                                onclick="toggleTheme()", title="Toggle light/dark theme"),
                         Select(
@@ -154,8 +156,6 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                                hx_get=f"/dialeng/{nb.id}/export", title="Download .ipynb"),
                         Button(icon_sprites('keyboard', sz=14), cls="btn btn-sm",
                                onclick="toggleKeyboardShortcuts()", title="Keyboard shortcuts (?)"),
-                        Button(icon_sprites('settings', sz=16), cls="btn btn-sm settings-btn", id="settings-btn",
-                               onclick="toggleSettings()", title="Settings"),
                         # Extension toolbar items
                         *[reg.renderer(nb, config)
                           for reg in sorted(registry.toolbar_items.values(), key=lambda r: r.order)],

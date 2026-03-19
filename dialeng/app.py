@@ -1614,11 +1614,7 @@ async def post(nb_id: str, pos: int = -1, type: str = "code"):
     nb = get_notebook(nb_id)
     if pos < 0:
         pos = len(nb.cells)
-    # Code cells default to scrollable output for better screen space usage
-    if type == "code":
-        nb.cells.insert(pos, Cell(cell_type=type, output_collapse=1))
-    else:
-        nb.cells.insert(pos, Cell(cell_type=type))
+    nb.cells.insert(pos, Cell(cell_type=type))
 
     # FOUST fix (FOUST = Flash of Unstyled Text — Monaco renders code white first,
     # then tokenizes async via web worker; destroying/recreating the editor causes a
@@ -1786,7 +1782,7 @@ async def post(nb_id: str, cid: str):
                 return ""
             # Insert code cells after this cell
             for j, block in enumerate(blocks):
-                new_cell = Cell(cell_type="code", source=block.strip(), output_collapse=1)
+                new_cell = Cell(cell_type="code", source=block.strip())
                 nb.cells.insert(i + 1 + j, new_cell)
                 cell_html = to_xml(CellView(new_cell, nb_id))
                 add_html = to_xml(AddButtons(i + 2 + j, nb_id))
@@ -2164,8 +2160,8 @@ async def post(nb_id: str, cid: str, source: str = None):
     is_last_cell = cell_index == len(nb.cells) - 1
 
     if is_last_cell:
-        # Add a new code cell using OOB swap (with scrollable output default)
-        new_cell = Cell(cell_type="code", output_collapse=1)
+        # Add a new code cell using OOB swap
+        new_cell = Cell(cell_type="code")
         nb.cells.append(new_cell)
         new_cell_index = len(nb.cells) - 1
         next_cell_id = new_cell.id
@@ -3064,7 +3060,7 @@ def main(root_dir: Path = None, port: int = 8000):
     print("   • Alt+↑/↓           - Move cell up/down")
     print("   • Escape            - Exit edit mode")
     print("   • Double-click      - Edit markdown/response")
-    serve(appname="dialeng.app", port=port, reload_excludes=[".autorun_modules/*"])
+    serve(appname="dialeng.app", port=port, reload_dirs=["dialeng"])
 
 
 if __name__ == "__main__":

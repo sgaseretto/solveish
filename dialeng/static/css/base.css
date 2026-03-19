@@ -36,9 +36,9 @@ body {
 
 @media (max-width: 768px) {
     .container { padding: 8px; }
-    .toolbar-container { flex-direction: column; gap: 8px; align-items: stretch; }
-    .toolbar-left { justify-content: center; }
-    .toolbar-right { justify-content: center; flex-wrap: wrap; }
+    .toolbar-container { gap: 8px; }
+    .toolbar-left { flex-shrink: 1; min-width: 0; overflow: hidden; }
+    .toolbar-right { gap: 4px; }
     .cell-header { flex-direction: column; gap: 8px; padding: 8px; }
     .cell-actions { justify-content: center; flex-wrap: wrap; }
     .cell-badge { align-self: flex-start; }
