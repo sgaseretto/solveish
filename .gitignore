@@ -41,3 +41,7 @@ debug_logs/
 # Test/demo files at root (development only)
 /test_*.py
 *_demo.py
+
+# YouTube capture data (generated at runtime)
+yt_data/
+yt_frames/

@@ -42,11 +42,10 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
         )
 
     def check_thinking_support(self, model: str) -> bool:
-        try:
-            from claudette_agent import can_use_extended_thinking
-            return can_use_extended_thinking(model)
-        except (ImportError, AttributeError):
-            return False
+        """Check if model supports extended thinking (Sonnet 3.7+, Sonnet 4+, Opus 4+)."""
+        m = model.lower()
+        thinking_patterns = ["sonnet-4", "sonnet-3-7", "sonnet-3.7", "opus-4", "opus"]
+        return any(p in m for p in thinking_patterns)
 
     async def stream(
         self,

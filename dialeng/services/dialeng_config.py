@@ -52,7 +52,7 @@ DEFAULT_CONFIG = {
             "claude-3-5-haiku": "us.anthropic.claude-3-5-haiku-20241022-v1:0",
             "comment": "Model IDs for AWS Bedrock with cross-region inference. Format: us.anthropic.{model}-{date}-v{n}:{profile}"
         },
-        "claudette_agent_map": {
+        "claude_code_map": {
             "claude-haiku-4-5": "haiku",
             "claude-sonnet-4-5": "sonnet",
             "claude-3-5-sonnet": "sonnet",
@@ -69,10 +69,9 @@ DEFAULT_CONFIG = {
         "comment": "Maximum tokens for extended thinking. Set to 0 to disable. Requires thinking-capable model (Claude Sonnet 3.7+, Sonnet 4+, Opus 4+)"
     },
     "llm": {
-        "use_sdk_directly": False,
         "debug_mode": False,
         "debug_log_dir": "./debug_logs",
-        "comment": "LLM provider settings. use_sdk_directly=true uses claude-agent-sdk directly for maximum isolation (stateless). Set to false (default) to use claudette-agent wrapper."
+        "comment": "LLM provider settings. debug_mode saves prompts and responses to JSON files."
     },
     "tool_settings": {
         "max_steps": 5,
@@ -117,7 +116,7 @@ class DialengConfig:
     # Model ID mappings for different backends
     anthropic_api_map: Dict[str, str] = field(default_factory=dict)
     bedrock_map: Dict[str, str] = field(default_factory=dict)
-    claudette_agent_map: Dict[str, str] = field(default_factory=dict)
+    claude_code_map: Dict[str, str] = field(default_factory=dict)
 
     # Provider-specific default models
     default_models: Dict[str, str] = field(default_factory=dict)
@@ -129,7 +128,6 @@ class DialengConfig:
     thinking_max_tokens: int = 10000
 
     # LLM provider settings
-    use_sdk_directly: bool = False  # Use claude-agent-sdk directly for maximum isolation
     debug_mode: bool = False  # Enable debug logging to files
     debug_log_dir: str = "./debug_logs"  # Directory for debug logs
 
@@ -187,7 +185,7 @@ class DialengConfig:
         if backend == "bedrock":
             return self.bedrock_map.get(model_id, model_id)
         elif backend == "claude_code_subscription":
-            return self.claudette_agent_map.get(model_id, model_id)
+            return self.claude_code_map.get(model_id, model_id)
         else:
             return self.anthropic_api_map.get(model_id, model_id)
 
@@ -235,8 +233,8 @@ def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
         k: v for k, v in models.get("bedrock_map", {}).items()
         if k != "comment"
     }
-    config.claudette_agent_map = {
-        k: v for k, v in models.get("claudette_agent_map", {}).items()
+    config.claude_code_map = {
+        k: v for k, v in models.get("claude_code_map", {}).items()
         if k != "comment"
     }
 
@@ -250,7 +248,6 @@ def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
 
     # LLM provider settings
     llm = raw.get("llm", {})
-    config.use_sdk_directly = llm.get("use_sdk_directly", False)
     config.debug_mode = llm.get("debug_mode", False)
     config.debug_log_dir = llm.get("debug_log_dir", "./debug_logs")
 
@@ -473,7 +470,6 @@ def print_config_status(config: DialengConfig, detected_backend: Optional[str] =
         detected_backend: The detected backend from credential detection (for showing active default)
     """
     models = ", ".join(m.name for m in config.available_models)
-    sdk_mode = "SDK direct" if config.use_sdk_directly else "claudette-agent"
     print(f"   Config: dialeng_config.json")
     print(f"      AWS Region:     {config.aws_region}")
     print(f"      Models:         {models}")
@@ -494,7 +490,6 @@ def print_config_status(config: DialengConfig, detected_backend: Optional[str] =
         print(f"                      {claude_code_default} (Claude Code)")
 
     print(f"      Default Mode:   {config.default_mode}")
-    print(f"      LLM Provider:   {sdk_mode}")
     if config.debug_mode:
         print(f"      Debug Mode:     ON (logs to {config.debug_log_dir})")
     # Tool settings

@@ -330,10 +330,9 @@ Tool calling works with both LLM providers:
 
 Uses the native Anthropic tool calling API.
 
-### claudette-agent (Claude Code Subscription)
+### claude-agent-sdk (Claude Code Subscription)
 
-Falls back to claude-agent-sdk for tool support, as the claudette-agent wrapper
-may not expose tool calling directly.
+Uses claude-agent-sdk directly for tool support via MCP servers.
 
 ## Error Handling
 

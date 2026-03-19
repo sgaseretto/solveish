@@ -44,8 +44,14 @@ document.addEventListener('mousedown', (e) => {
     const cell = e.target.closest('.cell');
     if (cell) {
         const cellId = cell.id.replace('cell-', '');
-        if (cellId && typeof setFocusedCell === 'function') {
-            setFocusedCell(cellId);
+        if (cellId && typeof selectCell === 'function') {
+            if (e.shiftKey) {
+                selectCell(cellId, {extend: true});
+            } else if (e.metaKey || e.ctrlKey) {
+                selectCell(cellId, {toggle: true});
+            } else {
+                selectCell(cellId);
+            }
         }
     }
 }, true);  // Use capture phase to get the event before it's stopped
@@ -300,6 +306,29 @@ function initMonacoEditor(cellId, mode = 'python') {
         }
     });
 
+    // Alt/Opt+Enter: run cell and create new cell below
+    editor.addAction({
+        id: 'dialeng-alt-enter-' + cellId,
+        label: 'Run Cell and Add New',
+        keybindings: [monaco.KeyMod.Alt | monaco.KeyCode.Enter],
+        run: () => {
+            syncMonacoToTextarea(cellId);
+            const cell = container.closest('.cell');
+            if (cell) {
+                const btn = cell.querySelector('.btn-run');
+                if (btn) btn.click();
+                const cells = getOrderedCells();
+                const idx = cells.indexOf(cell);
+                const pos = idx >= 0 ? idx + 1 : cells.length;
+                _pendingScrollToNewCell = true;
+                fetch(`${nbApiPath()}/cell/add?pos=${pos}&type=code`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'}
+                });
+            }
+        }
+    });
+
     // Ctrl/Cmd+S: save notebook
     editor.addAction({
         id: 'dialeng-save-' + cellId,
@@ -334,18 +363,103 @@ function destroyMonacoEditor(cellId) {
     }
 }
 
-// ==================== Focused Cell Tracking ====================
+// ==================== Cell Selection & Focus Tracking ====================
 let focusedCellId = null;
 let lastKeyTime = 0;
 let lastKey = '';
 
-function setFocusedCell(cellId) {
+// Multi-selection state
+let selectedCellIds = new Set();
+let anchorCellId = null;
+
+// Cell clipboard
+let cellClipboard = [];
+let clipboardMode = null; // 'cut' or 'copy'
+
+/** Get all .cell elements in DOM order */
+function getOrderedCells() {
+    return Array.from(document.querySelectorAll('#cells .cell'));
+}
+
+/** Get selected cell IDs in DOM order */
+function getSelectedCellIds() {
+    const ordered = getOrderedCells();
+    return ordered
+        .filter(c => selectedCellIds.has(c.id.replace('cell-', '')))
+        .map(c => c.id.replace('cell-', ''));
+}
+
+/** Update DOM classes to reflect selection state */
+function _updateSelectionClasses() {
     document.querySelectorAll('.cell.focused').forEach(c => c.classList.remove('focused'));
-    focusedCellId = cellId;
-    if (cellId) {
-        const cell = document.getElementById(`cell-${cellId}`);
-        if (cell) cell.classList.add('focused');
+    document.querySelectorAll('.cell.selected').forEach(c => c.classList.remove('selected'));
+    if (anchorCellId) {
+        const anchor = document.getElementById(`cell-${anchorCellId}`);
+        if (anchor) anchor.classList.add('focused');
     }
+    for (const id of selectedCellIds) {
+        const el = document.getElementById(`cell-${id}`);
+        if (el) el.classList.add('selected');
+    }
+}
+
+/**
+ * Select a cell. If extend=true, select range from anchor to cellId.
+ * If toggle=true, toggle cellId in/out of selection without changing anchor.
+ */
+function selectCell(cellId, {extend = false, toggle = false} = {}) {
+    if (!cellId) return;
+    if (toggle) {
+        if (selectedCellIds.has(cellId)) {
+            selectedCellIds.delete(cellId);
+            if (anchorCellId === cellId) {
+                // Pick another selected cell as anchor, or clear
+                anchorCellId = selectedCellIds.size > 0 ? [...selectedCellIds][0] : null;
+            }
+        } else {
+            selectedCellIds.add(cellId);
+            anchorCellId = cellId;
+        }
+    } else if (extend && anchorCellId) {
+        // Range select from anchor to cellId
+        const cells = getOrderedCells();
+        const anchorIdx = cells.findIndex(c => c.id === `cell-${anchorCellId}`);
+        const targetIdx = cells.findIndex(c => c.id === `cell-${cellId}`);
+        if (anchorIdx >= 0 && targetIdx >= 0) {
+            const start = Math.min(anchorIdx, targetIdx);
+            const end = Math.max(anchorIdx, targetIdx);
+            selectedCellIds.clear();
+            for (let i = start; i <= end; i++) {
+                selectedCellIds.add(cells[i].id.replace('cell-', ''));
+            }
+        }
+        // Keep anchorCellId unchanged for range selection
+    } else {
+        // Single select
+        selectedCellIds.clear();
+        selectedCellIds.add(cellId);
+        anchorCellId = cellId;
+    }
+    focusedCellId = anchorCellId;
+    _updateSelectionClasses();
+}
+
+/** Select all cells */
+function selectAllCells() {
+    const cells = getOrderedCells();
+    selectedCellIds.clear();
+    cells.forEach(c => selectedCellIds.add(c.id.replace('cell-', '')));
+    // Keep current anchor, or set to first cell
+    if (!anchorCellId && cells.length > 0) {
+        anchorCellId = cells[0].id.replace('cell-', '');
+    }
+    focusedCellId = anchorCellId;
+    _updateSelectionClasses();
+}
+
+function setFocusedCell(cellId) {
+    // Backward-compatible alias: single-select the cell
+    selectCell(cellId);
 }
 
 function focusNextCell(cellId) {
@@ -464,8 +578,13 @@ document.addEventListener('keydown', e => {
         currentCellId = target.closest('.cell').id.replace('cell-', '');
     }
 
-    // ===== Escape to close sidebars =====
+    // ===== Escape to close sidebars/modals =====
     if (e.key === 'Escape') {
+        const shortcutsModal = document.getElementById('shortcuts-modal-overlay');
+        if (shortcutsModal && shortcutsModal.classList.contains('visible')) {
+            shortcutsModal.classList.remove('visible');
+            return;
+        }
         const sidebar = document.getElementById('settings-sidebar');
         if (sidebar && sidebar.classList.contains('open')) {
             toggleSettings();
@@ -476,6 +595,13 @@ document.addEventListener('keydown', e => {
             toggleOutline();
             return;
         }
+    }
+
+    // ===== ? - Toggle keyboard shortcuts modal =====
+    if (e.key === '?' && !inInput && !inMonaco) {
+        e.preventDefault();
+        toggleKeyboardShortcuts();
+        return;
     }
 
     // ===== Ctrl+Shift+O to toggle outline =====
@@ -490,6 +616,67 @@ document.addEventListener('keydown', e => {
         e.preventDefault();
         toggleFileExplorer();
         return;
+    }
+
+    // ===== Arrow/j/k Navigation (nav mode only) =====
+    if (!inInput && !inMonaco && !mod) {
+        const navKeys = {'ArrowUp': -1, 'ArrowDown': 1, 'k': -1, 'j': 1};
+        if (navKeys[e.key] !== undefined && !e.altKey) {
+            e.preventDefault();
+            const cells = getOrderedCells();
+            if (cells.length === 0) return;
+            const currentIdx = anchorCellId
+                ? cells.findIndex(c => c.id === `cell-${anchorCellId}`)
+                : -1;
+            const dir = navKeys[e.key];
+            let nextIdx = currentIdx + dir;
+            if (nextIdx < 0) nextIdx = 0;
+            if (nextIdx >= cells.length) nextIdx = cells.length - 1;
+            const nextId = cells[nextIdx].id.replace('cell-', '');
+            if (e.shiftKey) {
+                selectCell(nextId, {extend: true});
+            } else {
+                selectCell(nextId);
+            }
+            cells[nextIdx].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            return;
+        }
+    }
+
+    // ===== Cmd/Ctrl+A - Select all cells =====
+    if (mod && e.key === 'a' && !inInput && !inMonaco) {
+        e.preventDefault();
+        selectAllCells();
+        return;
+    }
+
+    // ===== Enter - Enter edit mode =====
+    if (e.key === 'Enter' && !inInput && !inMonaco && !mod && !e.shiftKey && !e.altKey) {
+        if (currentCellId) {
+            e.preventDefault();
+            const cell = document.getElementById(`cell-${currentCellId}`);
+            if (!cell) return;
+            const type = cell.dataset.type;
+            if (type === 'code' || type === 'shell') {
+                const editor = monacoEditors[currentCellId];
+                if (editor) editor.focus();
+            } else if (type === 'prompt') {
+                const textarea = cell.querySelector('.prompt-content[name="prompt_source"]');
+                if (textarea) {
+                    if (textarea.style.display === 'none') {
+                        // Switch from preview to edit
+                        switchToEdit(currentCellId, 'prompt');
+                    }
+                    textarea.focus();
+                }
+            } else if (type === 'note') {
+                // Switch from preview to edit mode
+                switchToEdit(currentCellId, 'source');
+                const textarea = cell.querySelector('textarea[name="source"]');
+                if (textarea) textarea.focus();
+            }
+            return;
+        }
     }
 
     // ===== D D to delete cell (Jupyter style) =====
@@ -593,24 +780,6 @@ document.addEventListener('keydown', e => {
         lastKeyTime = now;
     }
 
-    // ===== Z - Collapse shortcuts =====
-    // Z: cycle input collapse, Shift+Z: cycle output collapse, Alt+Z: cycle both
-    if ((e.key === 'z' || e.key === 'Z') && !inInput && !inMonaco) {
-        if (currentCellId) {
-            e.preventDefault();
-            if (e.altKey) {
-                // Alt+Z: cycle both
-                cycleCollapseLevel(currentCellId, 'both');
-            } else if (e.shiftKey) {
-                // Shift+Z: cycle output
-                cycleCollapseLevel(currentCellId, 'output');
-            } else {
-                // Z: cycle input
-                cycleCollapseLevel(currentCellId, 'input');
-            }
-        }
-    }
-
     // ===== 0-3: Set specific collapse level =====
     // 0-3 for input, Shift+0-3 for output
     if (['0', '1', '2', '3'].includes(e.key) && !inInput && !inMonaco && !mod) {
@@ -675,19 +844,22 @@ document.addEventListener('keydown', e => {
         }
     }
     
-    // ===== h/p/e - Toggle cell state shortcuts =====
+    // ===== h/p/e - Toggle cell state shortcuts (multi-select aware) =====
     if (!inInput && !inMonaco && !mod) {
         if (e.key === 'h' && currentCellId) {
             e.preventDefault();
-            toggleCellState(currentCellId, 'skipped');
+            const ids = getSelectedCellIds();
+            (ids.length > 0 ? ids : [currentCellId]).forEach(id => toggleCellState(id, 'skipped'));
         }
         if (e.key === 'p' && currentCellId) {
             e.preventDefault();
-            toggleCellState(currentCellId, 'pinned');
+            const ids = getSelectedCellIds();
+            (ids.length > 0 ? ids : [currentCellId]).forEach(id => toggleCellState(id, 'pinned'));
         }
         if (e.key === 'e' && currentCellId) {
             e.preventDefault();
-            toggleCellState(currentCellId, 'is_exported');
+            const ids = getSelectedCellIds();
+            (ids.length > 0 ? ids : [currentCellId]).forEach(id => toggleCellState(id, 'is_exported'));
         }
     }
 
@@ -706,6 +878,265 @@ document.addEventListener('keydown', e => {
             htmx.ajax('POST', nbApiPath() + '/cell/add?type=prompt', {target: '#cells'});
         }
     }
+
+    // ===== Cell clipboard shortcuts (nav mode) =====
+    if (!inInput && !inMonaco && !mod) {
+        // x - Cut selected cells
+        if (e.key === 'x' && currentCellId) {
+            e.preventDefault();
+            _clipboardSerialize('cut');
+        }
+        // c - Copy selected cells (also to system clipboard as markdown)
+        if (e.key === 'c' && !e.shiftKey && currentCellId) {
+            e.preventDefault();
+            _clipboardSerialize('copy');
+        }
+        // v - Paste after anchor cell
+        if (e.key === 'v' && currentCellId) {
+            e.preventDefault();
+            _clipboardPaste();
+        }
+        // , - Copy cell input to system clipboard
+        if (e.key === ',' && currentCellId) {
+            e.preventDefault();
+            _copyCellContent(currentCellId, 'input');
+        }
+        // . - Copy cell output to system clipboard
+        if (e.key === '.' && currentCellId) {
+            e.preventDefault();
+            _copyCellContent(currentCellId, 'output');
+        }
+        // q - Duplicate selected cells
+        if (e.key === 'q' && currentCellId) {
+            e.preventDefault();
+            const ids = getSelectedCellIds();
+            (ids.length > 0 ? ids : [currentCellId]).forEach(id => {
+                fetch(`${nbApiPath()}/cell/${id}/duplicate`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'}
+                });
+            });
+        }
+        // Backspace - Clear outputs from selected cells
+        if (e.key === 'Backspace' && currentCellId) {
+            e.preventDefault();
+            const ids = getSelectedCellIds();
+            (ids.length > 0 ? ids : [currentCellId]).forEach(id => {
+                fetch(`${nbApiPath()}/cell/${id}/clear-output`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'}
+                });
+            });
+        }
+        // m - Copy code blocks from AI response to clipboard
+        if (e.key === 'm' && currentCellId) {
+            e.preventDefault();
+            _copyCodeBlocks(currentCellId);
+        }
+        // n - Edit AI response (output) of prompt cell
+        if (e.key === 'n' && currentCellId) {
+            e.preventDefault();
+            const cell = document.getElementById(`cell-${currentCellId}`);
+            if (cell && cell.dataset.type === 'prompt') {
+                switchToEdit(currentCellId, 'output');
+                const textarea = cell.querySelector('.prompt-content[name="output"]');
+                if (textarea) textarea.focus();
+            }
+        }
+
+        // ===== Phase 3: Cell operations =====
+        // a - Add cell above current
+        if (e.key === 'a' && !e.shiftKey && currentCellId) {
+            e.preventDefault();
+            const cells = getOrderedCells();
+            const idx = cells.findIndex(c => c.id === `cell-${currentCellId}`);
+            const pos = idx >= 0 ? idx : 0;
+            fetch(`${nbApiPath()}/cell/add?pos=${pos}&type=code`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'}
+            });
+        }
+        // b - Add cell below current
+        if (e.key === 'b' && !e.shiftKey && currentCellId) {
+            e.preventDefault();
+            const cells = getOrderedCells();
+            const idx = cells.findIndex(c => c.id === `cell-${currentCellId}`);
+            const pos = idx >= 0 ? idx + 1 : cells.length;
+            fetch(`${nbApiPath()}/cell/add?pos=${pos}&type=code`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'}
+            });
+        }
+        // w - Extract fenced code blocks from prompt/note output
+        if (e.key === 'w' && currentCellId) {
+            e.preventDefault();
+            fetch(`${nbApiPath()}/cell/${currentCellId}/extract-code-blocks`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'}
+            });
+        }
+
+        // ===== Phase 4: Execution shortcuts =====
+        // r - Re-run all code cells
+        if (e.key === 'r' && !e.shiftKey) {
+            e.preventDefault();
+            getOrderedCells().forEach(c => {
+                if (c.dataset.type === 'code') {
+                    const runBtn = c.querySelector('.btn-run');
+                    if (runBtn) runBtn.click();
+                }
+            });
+        }
+
+        // ===== Phase 5: Display shortcuts =====
+        // i - Toggle input collapse (multi-select aware)
+        if (e.key === 'i' && !e.shiftKey && currentCellId) {
+            e.preventDefault();
+            const ids = getSelectedCellIds();
+            (ids.length > 0 ? ids : [currentCellId]).forEach(id => {
+                cycleCollapseLevel(id, 'input');
+                fetch(`${nbApiPath()}/cell/${id}/collapse-section`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: `section=input&level=${_getNextCollapseLevel(id, 'input')}`
+                });
+            });
+        }
+        // o - Toggle output collapse (multi-select aware)
+        if (e.key === 'o' && !e.shiftKey && currentCellId) {
+            e.preventDefault();
+            const ids = getSelectedCellIds();
+            (ids.length > 0 ? ids : [currentCellId]).forEach(id => {
+                cycleCollapseLevel(id, 'output');
+                fetch(`${nbApiPath()}/cell/${id}/collapse-section`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: `section=output&level=${_getNextCollapseLevel(id, 'output')}`
+                });
+            });
+        }
+        // s - Save (S S double press)
+        if (e.key === 's' || e.key === 'S') {
+            const now = Date.now();
+            if (lastKey === 's' && now - lastKeyTime < 500) {
+                e.preventDefault();
+                const saveBtn = document.getElementById('save-btn');
+                if (saveBtn) saveBtn.click();
+                lastKey = '';
+                return;
+            }
+            lastKey = 's';
+            lastKeyTime = now;
+        }
+        // ArrowLeft - Collapse full cell
+        if (e.key === 'ArrowLeft' && currentCellId) {
+            e.preventDefault();
+            const cell = document.getElementById(`cell-${currentCellId}`);
+            if (cell && !cell.classList.contains('collapsed')) {
+                toggleCollapse(currentCellId);
+            }
+        }
+        // ArrowRight - Expand full cell
+        if (e.key === 'ArrowRight' && currentCellId) {
+            e.preventDefault();
+            const cell = document.getElementById(`cell-${currentCellId}`);
+            if (cell && cell.classList.contains('collapsed')) {
+                toggleCollapse(currentCellId);
+            }
+        }
+    }
+
+    // ===== Phase 3: Cell type switching (works with mod, any mode) =====
+    if (mod && e.shiftKey && !inInput && !inMonaco && currentCellId) {
+        const typeMap = {'J': 'code', 'K': 'note', 'L': 'prompt', ';': 'raw'};
+        if (typeMap[e.key]) {
+            e.preventDefault();
+            fetch(`${nbApiPath()}/cell/${currentCellId}/type`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: `cell_type=${typeMap[e.key]}`
+            });
+        }
+    }
+
+    // ===== Phase 3: Shift+M - Merge with cell below =====
+    if (e.shiftKey && e.key === 'M' && !inInput && !inMonaco && !mod && currentCellId) {
+        e.preventDefault();
+        fetch(`${nbApiPath()}/cell/${currentCellId}/merge-below`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'}
+        });
+    }
+
+    // ===== Phase 4: Shift execution shortcuts =====
+    if (e.shiftKey && !inInput && !inMonaco && !mod) {
+        // Shift+R - Restart kernel
+        if (e.key === 'R') {
+            e.preventDefault();
+            htmx.ajax('POST', nbApiPath() + '/kernel/restart', {target: '#status'});
+        }
+        // Shift+S - Stop all execution
+        if (e.key === 'S') {
+            e.preventDefault();
+            if (typeof cancelAllExecution === 'function') cancelAllExecution();
+        }
+        // Shift+A - Run all code cells above
+        if (e.key === 'A' && currentCellId) {
+            e.preventDefault();
+            const cells = getOrderedCells();
+            const idx = cells.findIndex(c => c.id === `cell-${currentCellId}`);
+            cells.slice(0, idx).forEach(c => {
+                if (c.dataset.type === 'code') {
+                    const runBtn = c.querySelector('.btn-run');
+                    if (runBtn) runBtn.click();
+                }
+            });
+        }
+        // Shift+B - Run all code cells below
+        if (e.key === 'B' && currentCellId) {
+            e.preventDefault();
+            const cells = getOrderedCells();
+            const idx = cells.findIndex(c => c.id === `cell-${currentCellId}`);
+            cells.slice(idx + 1).forEach(c => {
+                if (c.dataset.type === 'code') {
+                    const runBtn = c.querySelector('.btn-run');
+                    if (runBtn) runBtn.click();
+                }
+            });
+        }
+        // Shift+O - Clamp output height (set to scrollable)
+        if (e.key === 'O' && currentCellId) {
+            e.preventDefault();
+            setCollapseLevel(currentCellId, 'output', 1);
+            fetch(`${nbApiPath()}/cell/${currentCellId}/collapse-section`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: 'section=output&level=1'
+            });
+        }
+    }
+
+    // ===== Phase 4: Alt/Opt+Enter - Run and create new cell =====
+    if (e.altKey && e.key === 'Enter' && !mod) {
+        if (currentCellId) {
+            e.preventDefault();
+            // Run current cell
+            const cell = document.getElementById(`cell-${currentCellId}`);
+            if (cell) {
+                const runBtn = cell.querySelector('.btn-run');
+                if (runBtn) runBtn.click();
+            }
+            // Create new cell below
+            const cells = getOrderedCells();
+            const idx = cells.findIndex(c => c.id === `cell-${currentCellId}`);
+            const pos = idx >= 0 ? idx + 1 : cells.length;
+            _pendingScrollToNewCell = true;
+            fetch(`${nbApiPath()}/cell/add?pos=${pos}&type=code`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'}
+            });
+        }
+    }
 });
 
 // Toggle cell state (skipped, pinned, is_exported) via server endpoint
@@ -714,6 +1145,287 @@ function toggleCellState(cellId, property) {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'}
     });
+}
+
+// ==================== Cell Clipboard Helpers ====================
+
+/** Serialize selected cells into clipboard */
+function _clipboardSerialize(mode) {
+    // Clear previous cut styling
+    document.querySelectorAll('.cell.cell-cut').forEach(c => c.classList.remove('cell-cut'));
+
+    const ids = getSelectedCellIds();
+    const cellIds = ids.length > 0 ? ids : (anchorCellId ? [anchorCellId] : []);
+    cellClipboard = cellIds.map(id => {
+        const el = document.getElementById(`cell-${id}`);
+        if (!el) return null;
+        // Read source from hidden textarea or Monaco
+        let source = '';
+        const textarea = el.querySelector(`#source-${id}`);
+        if (textarea) source = textarea.value;
+        else if (monacoEditors[id]) source = monacoEditors[id].getValue();
+        // Read output text
+        const outputEl = el.querySelector('.cell-output, .ai-response');
+        const output = outputEl ? outputEl.textContent : '';
+        return { id, type: el.dataset.type, source, output };
+    }).filter(Boolean);
+
+    clipboardMode = mode;
+    if (mode === 'cut') {
+        cellIds.forEach(id => {
+            const el = document.getElementById(`cell-${id}`);
+            if (el) el.classList.add('cell-cut');
+        });
+    }
+    // Also copy to system clipboard as markdown
+    if (cellClipboard.length > 0) {
+        const md = cellClipboard.map(c => {
+            if (c.type === 'code') return '```python\n' + c.source + '\n```';
+            return c.source;
+        }).join('\n\n');
+        navigator.clipboard.writeText(md).catch(() => {});
+    }
+}
+
+/** Paste clipboard cells after anchor */
+async function _clipboardPaste() {
+    if (cellClipboard.length === 0) return;
+    const cells = getOrderedCells();
+    const anchorIdx = anchorCellId
+        ? cells.findIndex(c => c.id === `cell-${anchorCellId}`)
+        : cells.length - 1;
+    const basePos = anchorIdx + 1;
+
+    for (let i = 0; i < cellClipboard.length; i++) {
+        const item = cellClipboard[i];
+        const pos = basePos + i;
+        // Create cell
+        const resp = await fetch(`${nbApiPath()}/cell/add?pos=${pos}&type=${item.type}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'}
+        });
+        // Wait a bit for the WS cell_add to insert the cell
+        await new Promise(r => setTimeout(r, 100));
+        // Find the newly added cell and set its source
+        const newCells = getOrderedCells();
+        if (newCells[pos]) {
+            const newId = newCells[pos].id.replace('cell-', '');
+            await fetch(`${nbApiPath()}/cell/${newId}/source`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: `source=${encodeURIComponent(item.source)}`
+            });
+            // Update Monaco or textarea
+            if (monacoEditors[newId]) {
+                monacoEditors[newId].setValue(item.source);
+            } else {
+                const ta = document.querySelector(`#source-${newId}`);
+                if (ta) ta.value = item.source;
+                // Also update preview if it's a note/prompt
+                const preview = document.querySelector(`#preview-${newId}`);
+                if (preview) preview.innerHTML = renderMarkdown(item.source);
+            }
+        }
+    }
+    // If cut, delete originals
+    if (clipboardMode === 'cut') {
+        for (const item of cellClipboard) {
+            const el = document.getElementById(`cell-${item.id}`);
+            if (el) {
+                const deleteBtn = el.querySelector('button[hx-delete]');
+                if (deleteBtn) deleteBtn.click();
+            }
+        }
+        document.querySelectorAll('.cell.cell-cut').forEach(c => c.classList.remove('cell-cut'));
+    }
+    cellClipboard = [];
+    clipboardMode = null;
+}
+
+/** Copy cell input or output to system clipboard */
+function _copyCellContent(cellId, section) {
+    const cell = document.getElementById(`cell-${cellId}`);
+    if (!cell) return;
+    let text = '';
+    if (section === 'input') {
+        const textarea = cell.querySelector(`#source-${cellId}`);
+        if (textarea) text = textarea.value;
+        else if (monacoEditors[cellId]) text = monacoEditors[cellId].getValue();
+    } else {
+        // Output: get text content from output area
+        const outputEl = cell.querySelector('.cell-output, .ai-response, .output-content');
+        if (outputEl) text = outputEl.textContent || '';
+    }
+    if (text) navigator.clipboard.writeText(text).catch(() => {});
+}
+
+/** Copy code blocks from AI response to clipboard */
+function _copyCodeBlocks(cellId) {
+    const cell = document.getElementById(`cell-${cellId}`);
+    if (!cell) return;
+    const codeEls = cell.querySelectorAll('.ai-response pre code, .cell-output pre code, .output-content pre code');
+    const blocks = Array.from(codeEls).map(el => el.textContent.trim()).filter(Boolean);
+    if (blocks.length > 0) {
+        navigator.clipboard.writeText(blocks.join('\n\n')).catch(() => {});
+    }
+}
+
+// ==================== Keyboard Shortcuts Modal ====================
+
+function toggleKeyboardShortcuts() {
+    let overlay = document.getElementById('shortcuts-modal-overlay');
+    if (!overlay) {
+        overlay = _createShortcutsModal();
+        document.body.appendChild(overlay);
+    }
+    overlay.classList.toggle('visible');
+}
+
+function _createShortcutsModal() {
+    const overlay = document.createElement('div');
+    overlay.id = 'shortcuts-modal-overlay';
+    overlay.className = 'shortcuts-modal-overlay';
+    overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) overlay.classList.remove('visible');
+    });
+
+    const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+    const mod = isMac ? '⌘' : 'Ctrl';
+    const alt = isMac ? '⌥' : 'Alt';
+
+    const sections = [
+        {
+            title: 'Navigation',
+            shortcuts: [
+                ['↑ / k', 'Move to previous cell'],
+                ['↓ / j', 'Move to next cell'],
+                ['Shift+↑ / Shift+k', 'Extend selection up'],
+                ['Shift+↓ / Shift+j', 'Extend selection down'],
+                [`${mod}+A`, 'Select all cells'],
+                ['Enter', 'Enter edit mode'],
+                ['Escape', 'Exit edit mode'],
+                ['← / →', 'Collapse / expand cell'],
+            ]
+        },
+        {
+            title: 'Cell Operations',
+            shortcuts: [
+                ['a', 'Add cell above'],
+                ['b', 'Add cell below'],
+                ['D D', 'Delete cell'],
+                ['q', 'Duplicate cell'],
+                ['Shift+M', 'Merge with cell below'],
+                [`${mod}+Shift+D`, 'Delete cell (alt)'],
+                [`${alt}+↑`, 'Move cell up'],
+                [`${alt}+↓`, 'Move cell down'],
+            ]
+        },
+        {
+            title: 'Clipboard',
+            shortcuts: [
+                ['x', 'Cut selected cells'],
+                ['c', 'Copy selected cells'],
+                ['v', 'Paste cells'],
+                [',', 'Copy cell input to clipboard'],
+                ['.', 'Copy cell output to clipboard'],
+                ['m', 'Copy code blocks from output'],
+            ]
+        },
+        {
+            title: 'Execution',
+            shortcuts: [
+                [`${mod}+Enter`, 'Run cell'],
+                ['Shift+Enter', 'Run cell and move to next'],
+                [`${alt}+Enter`, 'Run cell and create new below'],
+                ['r', 'Re-run all code cells'],
+                ['Shift+A', 'Run all code above'],
+                ['Shift+B', 'Run all code below'],
+                ['Shift+R', 'Restart kernel'],
+                ['Shift+S', 'Stop all execution'],
+                ['Esc Esc', 'Cancel all execution'],
+            ]
+        },
+        {
+            title: 'Cell State',
+            shortcuts: [
+                ['h', 'Toggle hidden from AI'],
+                ['p', 'Toggle pinned'],
+                ['e', 'Toggle export'],
+            ]
+        },
+        {
+            title: 'Display',
+            shortcuts: [
+                ['i', 'Toggle input collapse'],
+                ['o', 'Toggle output collapse'],
+                ['Shift+O', 'Clamp output height'],
+                ['S S', 'Save notebook'],
+                [`${mod}+S`, 'Save notebook'],
+            ]
+        },
+        {
+            title: 'Cell Type',
+            shortcuts: [
+                [`${mod}+Shift+J`, 'Switch to Code'],
+                [`${mod}+Shift+K`, 'Switch to Note'],
+                [`${mod}+Shift+L`, 'Switch to Prompt'],
+                [`${mod}+Shift+;`, 'Switch to Raw'],
+            ]
+        },
+        {
+            title: 'Content',
+            shortcuts: [
+                ['n', 'Edit AI response'],
+                ['w', 'Extract code blocks to cells'],
+            ]
+        },
+        {
+            title: 'Sidebar',
+            shortcuts: [
+                ['Ctrl+Shift+O', 'Toggle outline'],
+                ['Ctrl+Shift+E', 'Toggle file explorer'],
+                ['?', 'This shortcuts modal'],
+            ]
+        },
+    ];
+
+    let html = `<div class="shortcuts-modal">
+        <div class="shortcuts-modal-header">
+            <h3>Keyboard Shortcuts</h3>
+            <button class="btn btn-sm shortcuts-modal-close" onclick="toggleKeyboardShortcuts()">&times;</button>
+        </div>
+        <div class="shortcuts-modal-body">`;
+
+    for (const section of sections) {
+        html += `<div class="shortcuts-category">
+            <h4>${section.title}</h4>
+            <table class="shortcuts-table">`;
+        for (const [keys, desc] of section.shortcuts) {
+            const kbds = keys.split(/(?<=\s)\+\s*|\s+(?=\+)/).join('').split('+').map(k =>
+                `<kbd>${k.trim()}</kbd>`
+            ).join(' + ');
+            // Better: split by visual groups
+            const keyBadges = keys.split(/\s*\+\s*/).map(k => `<kbd>${k}</kbd>`).join('');
+            html += `<tr><td class="shortcut-keys">${keyBadges}</td><td>${desc}</td></tr>`;
+        }
+        html += `</table></div>`;
+    }
+
+    html += `</div></div>`;
+    overlay.innerHTML = html;
+    return overlay;
+}
+
+/** Get the current collapse level for a cell section (for persistence after cycling) */
+function _getNextCollapseLevel(cellId, section) {
+    const cell = document.getElementById(`cell-${cellId}`);
+    if (!cell) return 0;
+    const selector = section === 'input' ? '.cell-input' : '.cell-output, .output-section';
+    const el = cell.querySelector(selector);
+    if (!el) return 0;
+    if (el.classList.contains('collapse-summary')) return 0; // was 2, cycled to 0
+    if (el.classList.contains('collapse-scrollable')) return 2; // was 1, cycled to 2
+    return 1; // was 0, cycled to 1
 }
 
 // Sync prompt content before running
@@ -1763,25 +2475,31 @@ function connectWebSocket(notebookId) {
 
         } else if (data.type === 'cell_move') {
             // Granular cell reorder: swap two adjacent cells in DOM.
-            // Previously used AllCellsOOB (replaced entire #cells → FOUST on ALL cells).
             // Key insight: insertBefore() MOVES DOM nodes (doesn't copy them), so Monaco
-            // editors survive the move with their full state — syntax highlighting, cursor
-            // position, undo history, etc. are all preserved.
+            // editors survive the move with their full state.
             // DOM structure: .add-row, #cell-A, .add-row, #cell-B, .add-row
+            // We swap the cell+addRow pair as a unit to keep add-rows aligned.
             const cellEl = document.getElementById(`cell-${data.cell_id}`);
             if (!cellEl) return;
             const parent = cellEl.parentNode;
             if (data.direction === 'up') {
-                const addRow = cellEl.previousElementSibling;
-                const prevCell = addRow?.previousElementSibling;
+                // Move cellEl above the previous cell (skip the add-row between)
+                const addRowBefore = cellEl.previousElementSibling; // add-row between
+                const prevCell = addRowBefore?.previousElementSibling;
                 if (prevCell && prevCell.id?.startsWith('cell-')) {
+                    // Move cell before prevCell, then move the add-row after cellEl
                     parent.insertBefore(cellEl, prevCell);
+                    // The add-row that was between them goes after cellEl
+                    cellEl.after(addRowBefore);
                 }
             } else {
-                const addRow = cellEl.nextElementSibling;
-                const nextCell = addRow?.nextElementSibling;
+                // Move cellEl below the next cell
+                const addRowAfter = cellEl.nextElementSibling; // add-row between
+                const nextCell = addRowAfter?.nextElementSibling;
                 if (nextCell && nextCell.id?.startsWith('cell-')) {
+                    // Move nextCell before cellEl, then add-row after nextCell
                     parent.insertBefore(nextCell, cellEl);
+                    nextCell.after(addRowAfter);
                 }
             }
 
@@ -1975,6 +2693,11 @@ function escapeHtml(text) {
 }
 
 function ansiToHtml(text) {
+    // Strip non-SGR ANSI sequences (cursor control, erase codes like \x1b[2K,
+    // \x1b[?25h, etc.) that we don't render — tqdm uses these extensively
+    text = text.replace(/\x1b\[[0-9;]*[A-HJKSTfn]/g, '');  // cursor/erase
+    text = text.replace(/\x1b\[\?[0-9;]*[hl]/g, '');       // private modes
+
     let result = '';
     let openSpans = 0;
 
@@ -2063,7 +2786,11 @@ function appendCodeOutput(cellId, chunk, streamName) {
     // Get current raw text and apply chunk
     let currentText = streamTextContent.get(cellId) || '';
 
-    // Handle carriage return for progress bars (tqdm)
+    // Handle carriage return for progress bars (tqdm, pip).
+    // pexpect can send chunks mixing \n and \r, e.g.:
+    //   "Collecting foo\n  Downloading bar\n\r[2K ━━ 4/20 MB"
+    // We split on \r first, then promote any \n within each part
+    // into separate lines so they survive the \r overwrite.
     if (chunk.includes('\r')) {
         const lines = currentText.split('\n');
         const parts = chunk.split('\r');
@@ -2075,6 +2802,13 @@ function appendCodeOutput(cellId, chunk, streamName) {
             } else {
                 // After \r, replace current line content
                 lines[lines.length - 1] = parts[i];
+            }
+            // Promote embedded \n into separate array entries so
+            // future \r only overwrites the actual last line
+            if (parts[i].includes('\n')) {
+                const tail = lines.pop();
+                const sub = tail.split('\n');
+                lines.push(...sub);
             }
         }
         currentText = lines.join('\n');
@@ -2599,7 +3333,21 @@ function processOOBSwap(html) {
             target.replaceWith(element);
             // Reinitialize HTMX bindings on the new element
             const newEl = document.getElementById(targetId);
-            if (newEl) htmx.process(newEl);
+            if (newEl) {
+                htmx.process(newEl);
+                // Re-execute scripts in output OOB swaps (e.g., YouTube embeds, interactive widgets).
+                // innerHTML/replaceWith does NOT execute <script> tags — we must clone them
+                // into new <script> elements so the browser runs them. This mirrors the
+                // same pattern used in appendDisplayData() during streaming.
+                if (targetId.startsWith('output-')) {
+                    newEl.querySelectorAll('script').forEach(script => {
+                        const newScript = document.createElement('script');
+                        if (script.src) newScript.src = script.src;
+                        newScript.textContent = script.textContent;
+                        script.parentNode.replaceChild(newScript, script);
+                    });
+                }
+            }
         }
         else if (targetId === 'cells') {
             // Full cells container update (e.g., from dialoghelper add_msg)

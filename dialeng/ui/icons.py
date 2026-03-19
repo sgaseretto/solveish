@@ -29,6 +29,8 @@ _ICON_NAMES = [
     'shield-check', 'shield-off',
     # Settings
     'triangle-alert',
+    # Keyboard shortcuts
+    'keyboard',
 ]
 for _name in _ICON_NAMES:
     sprites(_name)

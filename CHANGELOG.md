@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Solveit-style Keyboard Shortcuts
+- **Navigation**: Arrow keys / `j`/`k` to navigate cells, `Shift+Arrow` for multi-selection, `Cmd+A` select all, `Enter` to edit, `Escape` to exit
+- **Multi-selection**: Click, Shift+click (range), Cmd+click (toggle) — multi-select applies to h/p/e toggles, clipboard ops, and clear outputs
+- **Cell clipboard**: `x`/`c`/`v` to cut/copy/paste cells, `,`/`.` to copy input/output to system clipboard, `q` to duplicate
+- **Cell operations**: `a`/`b` to add cell above/below, `Shift+M` to merge with cell below, `Cmd+Shift+J/K/L/;` to switch cell type
+- **Execution**: `r` re-run all code, `Shift+A`/`Shift+B` run above/below, `Shift+R` restart kernel, `Shift+S` stop all, `Alt+Enter` run and create new cell
+- **Display**: `i`/`o` toggle input/output collapse (replaces `Z`/`Shift+Z`), `Shift+O` clamp output, `S S` save, `←`/`→` collapse/expand cell
+- **Content**: `m` copy code blocks from AI response, `n` edit AI response, `w` extract fenced code blocks to new code cells
+- **Keyboard shortcuts modal**: `?` or toolbar keyboard icon shows scrollable modal listing all shortcuts, categorized with `<kbd>` styling
+- New backend endpoints: `/cell/{cid}/duplicate`, `/cell/{cid}/clear-output`, `/cell/{cid}/merge-below`, `/cell/{cid}/extract-code-blocks`
+
 #### CLI `--init` Flag
 - `dialeng --init` initializes the reuse workflow (CRAFT.ipynb, pyproject.toml, package dir) on startup
 - `dialeng --init my_pkg` uses an explicit package name
@@ -38,6 +49,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uses base64 encoding for safe file transfer to remote kernel
 
 ### Fixed
+
+#### Interactive HTML Widgets Not Rendering on Re-run
+- Code cells producing HTML with `<script>` tags (e.g., YouTube embeds, custom JS visualizations) only worked on the first execution — subsequent runs showed an empty output
+- Root cause: the OOB swap that finalizes cell output uses `replaceWith()`, which does not execute `<script>` tags. On first run, async API loading (e.g., YouTube IFrame API) happened to fire after the OOB swap. On re-runs, the API was already loaded and created the widget synchronously during streaming, but the OOB swap then destroyed it
+- Fix: `processOOBSwap()` now clones `<script>` tags into fresh elements after replacing `output-*` divs, mirroring the pattern already used in `appendDisplayData()` during streaming
+
+#### Uvicorn Reload Loop on Generated Files
+- Running `!pip install` or other commands that create files in `.venv`/`.autorun_modules` triggered uvicorn's file watcher, causing infinite reload loops
+- Fix: `serve()` now uses `reload_dirs=["dialeng"]` to only watch the source code directory instead of excluding patterns from a broad watch
+
+#### Toolbar Dropdown Clipped by Overflow
+- YT capture button's dropdown panel was invisible because it rendered inside `.toolbar-right` which has `overflow-y: hidden`
+- Fix: panel is now appended to `document.body` with `position: fixed` and positioned via `getBoundingClientRect()`
+
+#### Code Cell Default Output Collapse
+- New code cells were created with `output_collapse=1` (scrollable), which is a rendering detail that shouldn't be a default
+- Removed `output_collapse=1` from all `Cell()` creation sites (add cell, extract code blocks, auto-add after run)
+
+#### Progress Bar and Streaming Output Improvements
+- **tqdm Unicode bars**: `StreamingStdout` now exposes `encoding='utf-8'`, so tqdm uses Unicode block characters (`█`) instead of ASCII (`#`)
+- **tqdm bar width**: Sets `COLUMNS=120` in the kernel environment so tqdm renders a reasonable bar width (fallback when `ioctl(TIOCGWINSZ)` fails on non-real FDs)
+- **ANSI escape stripping**: Both server-side (`ansi_to_html` in `mime.py`) and client-side (`ansiToHtml` in `app.js`) now strip non-SGR ANSI sequences (cursor control `\x1b[A`, erase `\x1b[2K`, private modes `\x1b[?25h`) that were rendering as visible garbage text
+- **Mixed `\n`/`\r` streaming**: `appendCodeOutput()` now correctly handles chunks containing both newlines and carriage returns (e.g., pip output with "Collecting...\n" followed by `\r`-based progress bars), preventing permanent output from being overwritten
 
 #### Colab Kernel Not Showing in Modal on Startup
 - Colab kernel option was missing from the "Select Kernel" modal even when `colab.enabled: true` in config
@@ -70,6 +104,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Server-side guard on cell run endpoint returns `HX-Trigger: kernel-required` if no kernel is attached
 
 ### Changed
+
+#### Toolbar Layout
+- `.toolbar-right` now uses horizontal scroll (`overflow-x: auto`) with hidden scrollbar instead of `flex-wrap`
+- Settings button moved to first position in right toolbar group for easier access
+- Mobile responsive styles simplified (removed `flex-direction: column`)
+
+#### Notebook Rename
+- `notebooks/yt-companion/` renamed to `notebooks/yt-insights/`
 
 #### URL Path Rename
 - All routes changed from `/notebook/` to `/dialeng/` (e.g., `http://localhost:8000/dialeng/?name=test_capture`)

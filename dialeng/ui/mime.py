@@ -27,6 +27,11 @@ def ansi_to_html(text: str) -> str:
         '44': '#00a', '45': '#a0a', '46': '#0aa', '47': '#aaa',
     }
 
+    # Strip non-SGR ANSI sequences (cursor control, erase codes like \x1b[2K,
+    # \x1b[?25h, etc.) that we don't render — tqdm uses these extensively
+    text = re.sub(r'\x1b\[[0-9;]*[A-HJKSTfn]', '', text)  # cursor/erase (CSI ... letter)
+    text = re.sub(r'\x1b\[\?[0-9;]*[hl]', '', text)       # private modes (?25h, ?25l)
+
     result = []
     open_spans = 0
 

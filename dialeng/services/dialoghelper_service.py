@@ -573,14 +573,14 @@ def build_context_messages(notebook, current_cell_id: str) -> List[Dict]:
     2. Use find_msgs() to get the window of recent non-pinned cells
     3. Combine up to MAX_CONTEXT_CELLS total (pinned count towards limit)
     4. Sort all cells by original index to maintain chronological order
-    5. Convert to claudette-agent message format
+    5. Convert to LLM provider message format
 
     Args:
         notebook: Notebook object with cells list
         current_cell_id: ID of the current prompt cell being executed
 
     Returns:
-        List of message dicts in claudette-agent format:
+        List of message dicts in LLM provider format:
         [{"role": "user"/"assistant", "content": "..."}]
     """
     logger.info(f"build_context_messages: Building context for cell {current_cell_id}")
@@ -660,7 +660,7 @@ def build_context_messages(notebook, current_cell_id: str) -> List[Dict]:
 
 def cell_to_messages(cell) -> List[Dict]:
     """
-    Convert a cell to claudette-agent message format.
+    Convert a cell to LLM provider message format.
 
     Uses the extensible dispatch system from dialeng.core.dispatch.
     Extensions can register custom converters for new cell types.

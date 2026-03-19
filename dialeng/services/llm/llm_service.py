@@ -2,7 +2,7 @@
 
 This is the slim coordinator that keeps the same public API as the original
 monolithic LLMService. It owns:
-- Provider selection (credential detection + use_sdk_directly flag)
+- Provider selection (credential detection)
 - Mode -> system prompt mapping
 - Model name mapping via config.get_api_model_name()
 - Prompt parsing (parse_prompt, substitute_variables) and tool registry interaction
@@ -21,9 +21,8 @@ logger = logging.getLogger(__name__)
 class LLMService:
     """Service for streaming LLM responses.
 
-    Supports three providers:
+    Supports two providers:
     - claudette: Direct Anthropic API or AWS Bedrock (requires credentials)
-    - claudette_agent: Claude Code subscription wrapper (claudette-agent library)
     - claude_agent_sdk: Claude Code subscription via SDK directly (most isolated)
 
     Usage:
@@ -59,19 +58,11 @@ class LLMService:
 
         from dialeng.core.registry import registry as ext_registry
 
-        # Resolve effective provider name (claudette_agent may map to SDK)
-        effective_provider = self._provider_name
-        if self._provider_name == "claudette_agent":
-            from dialeng.services.dialeng_config import get_config
-            config = get_config()
-            if getattr(config, 'use_sdk_directly', False):
-                effective_provider = "claude_agent_sdk"
-
         # Try registry-based lookup
-        reg = ext_registry.providers.get(effective_provider)
+        reg = ext_registry.providers.get(self._provider_name)
         if reg:
             # Construct provider — pass backend kwarg for claudette
-            if effective_provider == "claudette":
+            if self._provider_name == "claudette":
                 self._provider = reg.factory(backend=self._backend or "anthropic_api")
             else:
                 self._provider = reg.factory()
@@ -262,7 +253,7 @@ class LLMService:
                 }
 
             # If no tools or provider doesn't need tool loop, fall back to regular streaming
-            if not tools or (self._provider_name == "claudette_agent" and not needs_tool_loop):
+            if not tools:
                 async for item in self.stream_response(
                     processed_prompt, context_messages, mode, model, use_thinking
                 ):

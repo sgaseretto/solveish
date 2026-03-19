@@ -25,7 +25,11 @@ class StreamingStdout:
     def __init__(self, queue: Queue, stream_name: str = 'stdout'):
         self.queue = queue
         self.stream_name = stream_name
+        self.encoding = 'utf-8'  # tqdm checks this to decide unicode vs ASCII bars
         self._original = sys.stdout if stream_name == 'stdout' else sys.stderr
+        # tqdm falls back to os.environ["COLUMNS"] when ioctl fails on non-real FDs
+        import os
+        os.environ.setdefault('COLUMNS', '120')
 
     def write(self, text: str):
         if text:

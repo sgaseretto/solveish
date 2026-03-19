@@ -65,7 +65,7 @@ flowchart TB
 
     subgraph "LLM Integration"
         CTX[build_context_messages]
-        LLM[claudette-agent]
+        LLM[claude-agent-sdk]
     end
 
     DH --> CE
