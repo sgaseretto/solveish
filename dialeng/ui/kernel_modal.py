@@ -55,7 +55,8 @@ def KernelToolbarButton(nb, kernel_info: dict = None):
 
 def KernelModal(nb_id: str, current_kernel_type: str,
                 colab_authenticated: bool = False,
-                current_runtime: str = "cpu"):
+                current_runtime: str = "cpu",
+                colab_account_email: str = None):
     """Modal for selecting and switching kernels.
 
     Selection is client-side only until Apply is clicked.
@@ -78,6 +79,8 @@ def KernelModal(nb_id: str, current_kernel_type: str,
         auth_note = None
         if reg.requires_auth and not colab_authenticated:
             auth_note = Span("Sign in required", cls="kernel-auth-note")
+        elif name == "colab" and colab_authenticated and colab_account_email:
+            auth_note = Span(f"Connected as {colab_account_email}", cls="kernel-auth-note")
 
         # Runtime picker (shown when this kernel is selected, only for kernels with runtime_options)
         runtime_picker = None

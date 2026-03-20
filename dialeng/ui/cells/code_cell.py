@@ -44,7 +44,7 @@ def _render_cell_outputs(cell) -> tuple:
     has_error = False
     stream_parts = []  # raw text, before ansi conversion
 
-    for out in cell.outputs:
+    for out in cell.normalized_outputs():
         if out.output_type in ('stream', 'execute_result'):
             stream_parts.append(str(out.content))
         elif out.output_type == 'error':

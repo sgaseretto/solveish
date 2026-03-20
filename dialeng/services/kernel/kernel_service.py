@@ -5,11 +5,20 @@ Provides a high-level interface for cell execution with
 streaming output, managing one kernel per notebook.
 Supports multiple kernel backends through the BaseKernel abstraction.
 """
+import asyncio
+import logging
 from typing import Dict, AsyncIterator, Optional
 from datetime import datetime
 
-from dialeng.document.cell import Cell, CellState, CellOutput
+from dialeng.document.cell import (
+    Cell,
+    CellState,
+    CellOutput,
+    is_benign_display_formatter_error,
+)
 from .base_kernel import BaseKernel
+
+logger = logging.getLogger(__name__)
 
 
 class KernelService:
@@ -32,6 +41,7 @@ class KernelService:
         self._kernels: Dict[str, BaseKernel] = {}
         self._lazy_start = lazy_start
         self._colab_session_manager = None
+        self._execution_locks: Dict[str, asyncio.Lock] = {}
 
     def set_colab_session_manager(self, manager):
         """Inject the Colab session manager for remote kernel support."""
@@ -70,6 +80,19 @@ class KernelService:
                 )
         return self._kernels[notebook_id]
 
+    def _get_execution_lock(self, notebook_id: str) -> asyncio.Lock:
+        """Return the per-notebook execution lock.
+
+        Colab kernels multiplex all traffic over a single WebSocket, so background
+        setup tasks and foreground cell execution must never overlap. The same
+        lock also keeps local-kernel behavior deterministic.
+        """
+        lock = self._execution_locks.get(notebook_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._execution_locks[notebook_id] = lock
+        return lock
+
     async def set_kernel_type(self, notebook_id: str, kernel_type: str,
                               runtime_type: str = "cpu") -> BaseKernel:
         """
@@ -91,6 +114,10 @@ class KernelService:
                 old.shutdown()
             del self._kernels[notebook_id]
         return self.get_kernel(notebook_id, kernel_type, runtime_type)
+
+    def set_kernel_instance(self, notebook_id: str, kernel: BaseKernel) -> None:
+        """Replace the kernel object for a notebook without touching the lock."""
+        self._kernels[notebook_id] = kernel
 
     def get_kernel_type(self, notebook_id: str) -> str:
         """Get the kernel type for a notebook."""
@@ -138,53 +165,79 @@ class KernelService:
         Yields:
             CellOutput objects for each chunk of output
         """
-        kernel = self.get_kernel(notebook_id)
-
-        # Use provided source or fall back to cell's source
-        code_to_execute = source if source is not None else cell.source
-
-        # Update cell state
-        cell.state = CellState.RUNNING
-        cell.outputs = []
-        cell.time_run = datetime.now().strftime("%H:%M:%S")
-
-        has_error = False
-
-        try:
-            # Pass notebook_id and cell.id for dialoghelper magic variables
-            async for output in kernel.execute_streaming(
-                code_to_execute,
-                notebook_id=notebook_id,
-                cell_id=cell.id
-            ):
-                # Append to cell's outputs
-                cell.outputs.append(output)
-
-                # Track errors
-                if output.output_type == 'error':
-                    has_error = True
-
-                yield output
-
-            # Update execution count
-            cell.execution_count = kernel._execution_count
-
-        except Exception as e:
-            # Unexpected error in the streaming itself
-            error_output = CellOutput(
-                output_type='error',
-                ename=type(e).__name__,
-                evalue=str(e),
-                traceback=[f"{type(e).__name__}: {e}"]
+        lock = self._get_execution_lock(notebook_id)
+        if lock.locked():
+            logger.info(
+                "Execution waiting for notebook lock",
+                extra={"notebook_id": notebook_id, "cell_id": cell.id},
             )
-            cell.outputs.append(error_output)
-            has_error = True
-            yield error_output
 
-        finally:
-            # Set final state
-            if cell.state == CellState.RUNNING:  # Wasn't interrupted
-                cell.state = CellState.ERROR if has_error else CellState.SUCCESS
+        async with lock:
+            kernel = self.get_kernel(notebook_id)
+
+            # Use provided source or fall back to cell's source
+            code_to_execute = source if source is not None else cell.source
+
+            # Update cell state
+            cell.state = CellState.RUNNING
+            cell.outputs = []
+            cell.time_run = datetime.now().strftime("%H:%M:%S")
+
+            has_error = False
+            saw_rich_display = False
+            formatter_error_count = 0
+
+            try:
+                # Pass notebook_id and cell.id for dialoghelper magic variables
+                async for output in kernel.execute_streaming(
+                    code_to_execute,
+                    notebook_id=notebook_id,
+                    cell_id=cell.id
+                ):
+                    # Append to cell's outputs
+                    cell.outputs.append(output)
+
+                    if output.output_type in {'display_data', 'update_display_data'}:
+                        saw_rich_display = True
+
+                    # Track errors
+                    if output.output_type == 'error':
+                        if is_benign_display_formatter_error(output):
+                            formatter_error_count += 1
+                        else:
+                            has_error = True
+
+                    yield output
+
+                # Update execution count
+                cell.execution_count = kernel._execution_count
+
+                if formatter_error_count:
+                    if saw_rich_display:
+                        logger.info(
+                            "Suppressing %s formatter-only display error(s) for successful rich output",
+                            formatter_error_count,
+                            extra={"notebook_id": notebook_id, "cell_id": cell.id},
+                        )
+                    else:
+                        has_error = True
+
+            except Exception as e:
+                # Unexpected error in the streaming itself
+                error_output = CellOutput(
+                    output_type='error',
+                    ename=type(e).__name__,
+                    evalue=str(e),
+                    traceback=[f"{type(e).__name__}: {e}"]
+                )
+                cell.outputs.append(error_output)
+                has_error = True
+                yield error_output
+
+            finally:
+                # Set final state
+                if cell.state == CellState.RUNNING:  # Wasn't interrupted
+                    cell.state = CellState.ERROR if has_error else CellState.SUCCESS
 
     def interrupt(self, notebook_id: str) -> bool:
         """
@@ -252,6 +305,7 @@ class KernelService:
         if notebook_id in self._kernels:
             self._kernels[notebook_id].shutdown()
             del self._kernels[notebook_id]
+        self._execution_locks.pop(notebook_id, None)
 
     def shutdown_all(self):
         """Shutdown all kernels."""

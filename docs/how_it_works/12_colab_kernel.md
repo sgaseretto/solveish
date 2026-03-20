@@ -13,9 +13,10 @@ This document explains how Dialeng connects to Google Colab runtimes to execute 
 7. [Code Execution & Streaming Output](#code-execution--streaming-output)
 8. [Rich Output Handling](#rich-output-handling)
 9. [Multiplexed WebSocket Subtlety](#multiplexed-websocket-subtlety)
-10. [Background Tasks](#background-tasks)
-11. [Integration with Multi-Kernel System](#integration-with-multi-kernel-system)
-12. [How to Extend](#how-to-extend)
+10. [Notebook Setup & State Sync](#notebook-setup--state-sync)
+11. [Background Tasks](#background-tasks)
+12. [Integration with Multi-Kernel System](#integration-with-multi-kernel-system)
+13. [How to Extend](#how-to-extend)
 
 ## Architecture Overview
 
@@ -128,6 +129,9 @@ sequenceDiagram
 - Built-in OAuth credentials work out of the box (validated and auto-updated at startup)
 - `COLAB_CLIENT_ID` and `COLAB_CLIENT_SECRET` env vars are optional overrides
 - Tokens persist in `~/.dialeng/colab_tokens.json` (file permissions `0600`)
+- Stored sessions are validated on startup before Dialeng treats Colab as authenticated
+- The signed-in email is fetched from Google's userinfo endpoint and exposed to the UI
+- OAuth `state` values are single-use and validated on callback before the code exchange
 - Access tokens auto-refresh 5 minutes before expiry
 - Scopes: `profile`, `email`, `https://www.googleapis.com/auth/colaboratory`
 
@@ -207,11 +211,6 @@ sequenceDiagram
 
     Note over CK: assign_and_connect()
 
-    CK->>API: cleanup_stale_runtimes()
-    API->>GP: GET /v1/assignments
-    GP-->>API: [existing assignments]
-    API->>CA: POST /tun/m/unassign/{endpoint}
-
     CK->>API: assign_kernel(variant, accelerator)
     API->>CA: GET /tun/m/assign?nbh=...
     CA-->>API: {token: xsrf_token}
@@ -240,13 +239,15 @@ sequenceDiagram
 
 ### Steps in Detail
 
-1. **Cleanup stale runtimes** — Colab limits active runtimes per user. We unassign any existing ones to avoid `TooManyAssignmentsError`.
-2. **Assign runtime** — Two-step XSRF pattern: GET to obtain an XSRF token, POST with that token to create the assignment. Returns a runtime endpoint and proxy connection info.
-3. **Create Jupyter session** — POST to the runtime proxy's Jupyter API to start a Python 3 kernel. Returns a `kernel_id`.
-4. **Connect WebSocket** — Open `wss://<proxy>/api/kernels/<kernel_id>/channels?session_id=<session>` with proxy token in headers.
-5. **Kernel readiness handshake** — Send `kernel_info_request`, wait for `kernel_info_reply` (30s timeout).
-6. **Initialize kernel** — Multi-step silent init: `%matplotlib inline`, `pip install dialoghelper`, and dialoghelper proxy setup. See [DialogHelper Proxy for Colab](./13_colab_dialoghelper_proxy.md).
-7. **Start background tasks** — Keep-alive pings (5 min) and proxy token refresh (before expiry).
+1. **Assign runtime** — Two-step XSRF pattern: GET to obtain an XSRF token, POST with that token to create the assignment. Returns a runtime endpoint and proxy connection info.
+2. **Create Jupyter session** — POST to the runtime proxy's Jupyter API to start a Python 3 kernel. Returns a `kernel_id`.
+3. **Connect WebSocket** — Open `wss://<proxy>/api/kernels/<kernel_id>/channels?session_id=<session>` with proxy token in headers.
+4. **Kernel readiness handshake** — Send `kernel_info_request`, wait for `kernel_info_reply` (30s timeout).
+5. **Initialize kernel** — Multi-step silent init: `%matplotlib inline`, `pip install dialoghelper`, and dialoghelper proxy setup. Init now waits for `status: idle`, not just `execute_reply`, so Colab's multiplexed socket cannot report a step complete before late IOPub traffic arrives.
+6. **Start background tasks** — Keep-alive pings (5 min) and proxy token refresh (before expiry).
+7. **Track runtime health** — repeated keep-alive or proxy-refresh failures mark the connection as `degraded`, and runtime replacement is logged explicitly instead of being silently hidden from the UI.
+
+Dialeng no longer unassigns every active Colab runtime before attaching a notebook. That old behavior could tear down unrelated Colab sessions on the same Google account. Runtime cleanup is now limited to the notebook/kernel being shut down or restarted.
 
 ### Two API Backends
 
@@ -430,6 +431,46 @@ This is the same approach used by proper Jupyter clients like VS Code's Jupyter 
 
 `stream` messages (from `print()`) are sent **during** cell execution, well before `execute_reply`. The large time gap makes reordering unlikely. But `display_data` from matplotlib is sent very close to the end of execution (via the `flush_figures` post-execute hook), making it susceptible to being overtaken by `execute_reply`.
 
+The same rule now applies to kernel initialization. `_run_init_code()` also waits for `status: idle`, because Colab can emit late IOPub traffic for init requests just like it does for user code.
+
+## Notebook Setup & State Sync
+
+Kernel attachment is only the first stage of getting a notebook ready. Dialeng also needs to:
+- inject the project root into `sys.path` when a reusable package folder exists
+- upload exported modules to the Colab VM
+- execute pending CRAFT code cells
+
+Those notebook-level steps now run through one tracked setup runner and one backend snapshot that the browser receives over WebSocket and polls over HTTP.
+
+```mermaid
+sequenceDiagram
+    participant UI as Browser
+    participant App as app.py
+    participant KS as KernelService
+    participant CK as ColabKernel
+
+    UI->>App: Apply kernel selection
+    App->>CK: assign_and_connect()
+    App->>App: set kernel_setup_state = inject_lib/upload_lib/craft
+    App->>KS: execute_cell(_lib_syspath_setup)
+    App->>KS: execute_cell(_lib_colab_upload)
+    App->>KS: execute_cell(CRAFT code cells...)
+    App-->>UI: kernel_snapshot {kernel, queue, setup, auth}
+    UI->>UI: Dot/status derived from snapshot, not from client timeouts
+```
+
+### Why the Snapshot Exists
+
+The browser can lose or miss individual queue events. The snapshot solves that by carrying:
+- selected kernel type
+- alive/busy/degraded/disconnected state
+- runtime id
+- queue state
+- notebook setup phase
+- Colab auth state and account email
+
+On WebSocket reconnect, on periodic polling, and after setup transitions, the UI rehydrates itself from this snapshot instead of guessing from whichever event happened last.
+
 ## Background Tasks
 
 Two asyncio tasks run continuously while the kernel is connected:
@@ -448,6 +489,10 @@ graph LR
     TR[Token Refresh Task<br/>before expiry] -->|"GET /v1/runtime-proxy-token"| GP[Colab GAPI]
     TR -->|"update"| PI[proxy_info.token]
 ```
+
+### Serialized Kernel Access
+
+Notebook setup work, save-triggered Colab module uploads, and queued code execution all share the same per-notebook execution lock in `KernelService`. This is critical for Colab because all code execution shares one Jupyter WebSocket. Without serialization, background setup and user-triggered cells can interleave and produce misleading GUI states.
 
 ## Startup Initialization
 

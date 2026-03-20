@@ -151,6 +151,8 @@ When using a Colab kernel, exported modules are automatically uploaded to the Co
 
 This means `from my_pkg.helpers import ...` works identically on local and Colab kernels.
 
+The upload path is now serialized with other kernel work. If a save happens while the Colab kernel is still attaching or executing notebook setup, Dialeng queues the upload behind that work instead of racing the same Jupyter WebSocket. The notebook status dot and kernel snapshot will show the temporary setup/sync state while that happens.
+
 ### Example notebook
 
 ```python

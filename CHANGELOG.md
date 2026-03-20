@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Colab Kernel Snapshot & Auth Visibility
+- Added a backend-authoritative `kernel_snapshot` payload carrying kernel liveness, queue state, notebook setup phase, Colab auth state, runtime id, and account email
+- Browser now polls `/dialeng/{nb_id}/kernel/snapshot` and also receives the same snapshot over WebSocket to recover cleanly after reconnects
+- Kernel modal now shows the signed-in Colab account email when a persisted Google session is active
+- OAuth callback now validates single-use `state` tokens before exchanging the authorization code
+
+#### Colab Resilience Tests
+- Added `tests/test_colab_resilience.py` covering per-notebook kernel serialization, Colab auth state handling, and degraded Colab connection liveness
+
 #### Solveit-style Keyboard Shortcuts
 - **Navigation**: Arrow keys / `j`/`k` to navigate cells, `Shift+Arrow` for multi-selection, `Cmd+A` select all, `Enter` to edit, `Escape` to exit
 - **Multi-selection**: Click, Shift+click (range), Cmd+click (toggle) — multi-select applies to h/p/e toggles, clipboard ops, and clear outputs
@@ -49,6 +58,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uses base64 encoding for safe file transfer to remote kernel
 
 ### Fixed
+
+#### Colab Connection Robustness
+- Removed the global "cleanup all runtimes before attach" behavior that could tear down unrelated Colab sessions on the same Google account
+- Colab init steps now wait for `status: idle` instead of treating `execute_reply` as completion, avoiding premature setup transitions on Colab's multiplexed WebSocket
+- Notebook setup work (`sys.path` injection, Colab module upload, CRAFT execution, restart setup) now shares the same per-notebook execution lock as regular cell execution, preventing races on the Colab kernel transport
+- Quiet long-running code cells no longer get marked finished by a 30-second browser inactivity timeout; completion now comes from backend kernel state
+- WebSocket reconnect now rehydrates queue/kernel state from the backend snapshot instead of inferring readiness from queue emptiness alone
+- Stored Colab sessions are validated on startup before Dialeng treats them as authenticated, and invalid/revoked sessions are cleared instead of being reused silently
+- Keep-alive and proxy-token-refresh failures now mark Colab connections as degraded and emit richer server logs for runtime replacement, setup phases, reconnects, and sync operations
+- Final OOB rendering and notebook saves now normalize `update_display_data` and `clear_output` events, so fastprogress/tqdm progress bars keep their last visible state instead of collapsing into blank `<progress value="0">` placeholders after execution
+- Formatter-only IPython `__repr__ returned non-string` errors are now treated as benign when the cell also produced rich display output, preventing fastai/fastprogress visual cells from ending in duplicate error tracebacks while still rendering their images/widgets
 
 #### Interactive HTML Widgets Not Rendering on Re-run
 - Code cells producing HTML with `<script>` tags (e.g., YouTube embeds, custom JS visualizations) only worked on the first execution — subsequent runs showed an empty output

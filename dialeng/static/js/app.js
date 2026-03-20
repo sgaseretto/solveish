@@ -1921,6 +1921,18 @@ document.addEventListener('DOMContentLoaded', () => {
     setupPreviewEditing();
 });
 
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && window.NOTEBOOK_ID) {
+        fetchKernelSnapshot(window.NOTEBOOK_ID, 'visibility');
+    }
+});
+
+window.addEventListener('online', () => {
+    if (window.NOTEBOOK_ID) {
+        fetchKernelSnapshot(window.NOTEBOOK_ID, 'online');
+    }
+});
+
 // Auto-resize textareas
 document.addEventListener('input', e => {
     if (e.target.tagName === 'TEXTAREA') {
@@ -2007,6 +2019,10 @@ function onColabAuthenticated() {
     // Status dot → green
     const statusDot = document.getElementById('colab-status-dot');
     if (statusDot) statusDot.className = 'colab-status-dot connected';
+    if (window.NOTEBOOK_ID) {
+        fetchKernelSnapshot(window.NOTEBOOK_ID, 'auth');
+        htmx.ajax('GET', `/dialeng/${window.NOTEBOOK_ID}/kernel/modal`, {target: '#kernel-modal-overlay', swap: 'outerHTML'});
+    }
 }
 
 function onColabDisconnected() {
@@ -2016,6 +2032,10 @@ function onColabDisconnected() {
     // Status dot → gray
     const statusDot = document.getElementById('colab-status-dot');
     if (statusDot) statusDot.className = 'colab-status-dot disconnected';
+    if (window.NOTEBOOK_ID) {
+        fetchKernelSnapshot(window.NOTEBOOK_ID, 'auth');
+        htmx.ajax('GET', `/dialeng/${window.NOTEBOOK_ID}/kernel/modal`, {target: '#kernel-modal-overlay', swap: 'outerHTML'});
+    }
 }
 
 // Listen for postMessage from popup (works if browser preserves window.opener)
@@ -2256,11 +2276,125 @@ function cancelStreaming(cellId) {
 let ws = null;
 let streamingCellId = null;
 let currentNotebookId = null;  // Global notebook ID for use in cancelAllExecution, etc.
+let kernelStateSyncIntervalId = null;
+let kernelStatusMessageTimeoutId = null;
 
 let _wsReconnectDelay = 1000;
 
+function getKernelState() {
+    return window.KERNEL_STATE || null;
+}
+
+function canRunCurrentKernel() {
+    const state = getKernelState();
+    if (!state) return !!window.KERNEL_ALIVE;
+    return !!state.kernel?.can_run;
+}
+
+function showKernelStatusMessage(message, tone = 'warning', persistMs = 5000) {
+    const statusEl = document.getElementById('status');
+    if (!statusEl) return;
+    statusEl.innerHTML = `<div class="status ${tone}">${escapeHtml(message)}</div>`;
+    if (kernelStatusMessageTimeoutId) clearTimeout(kernelStatusMessageTimeoutId);
+    if (persistMs > 0) {
+        kernelStatusMessageTimeoutId = setTimeout(() => {
+            if (statusEl.textContent === message) statusEl.innerHTML = '';
+        }, persistMs);
+    }
+}
+
+async function fetchKernelSnapshot(notebookId, source = 'poll') {
+    try {
+        const resp = await fetch(`/dialeng/${notebookId}/kernel/snapshot`, { cache: 'no-store' });
+        if (!resp.ok) return;
+        const snapshot = await resp.json();
+        applyKernelSnapshot(snapshot, source);
+    } catch (err) {
+        console.warn('[Kernel] Failed to fetch snapshot:', err);
+    }
+}
+
+function startKernelStateSync(notebookId) {
+    if (kernelStateSyncIntervalId) clearInterval(kernelStateSyncIntervalId);
+    fetchKernelSnapshot(notebookId, 'startup');
+    kernelStateSyncIntervalId = setInterval(() => fetchKernelSnapshot(notebookId, 'poll'), 5000);
+}
+
+function applyKernelSnapshot(snapshot, source = 'ws') {
+    if (!snapshot || snapshot.type !== 'kernel_snapshot') return;
+
+    const previous = getKernelState();
+    window.KERNEL_STATE = snapshot;
+    window.KERNEL_ALIVE = !!snapshot.kernel?.can_run;
+
+    handleQueueUpdate({
+        running_cell_id: snapshot.queue?.running_cell_id || null,
+        queued_cell_ids: snapshot.queue?.queued_cell_ids || []
+    });
+
+    const dotStateMap = {
+        connected: 'connected',
+        busy: 'busy',
+        connecting: 'busy',
+        initializing: 'busy',
+        restarting: 'busy',
+        degraded: 'error',
+        disconnected: '',
+        auth_required: '',
+        error: 'error'
+    };
+    updateKernelDot(dotStateMap[snapshot.kernel.display_state] || '');
+
+    const dot = document.getElementById('kernel-dot');
+    if (dot) {
+        const detail = snapshot.setup?.detail || snapshot.kernel?.connection_detail || '';
+        const labelMap = {
+            connected: 'Kernel: idle',
+            busy: 'Kernel: busy',
+            connecting: 'Kernel: connecting',
+            initializing: 'Kernel: initializing',
+            restarting: 'Kernel: restarting',
+            degraded: 'Kernel: degraded',
+            disconnected: 'Kernel: disconnected',
+            auth_required: 'Kernel: authentication required'
+        };
+        dot.title = detail ? `${labelMap[snapshot.kernel.display_state] || 'Kernel'} (${detail})`
+            : (labelMap[snapshot.kernel.display_state] || 'Kernel');
+    }
+
+    const prevRuntimeId = previous?.kernel?.runtime_id;
+    const nextRuntimeId = snapshot.kernel?.runtime_id;
+    if (prevRuntimeId && nextRuntimeId && prevRuntimeId !== nextRuntimeId) {
+        showKernelStatusMessage('Attached to a new Colab runtime. Remote kernel state was reset.', 'warning', 9000);
+    }
+
+    const prevDisplayState = previous?.kernel?.display_state;
+    const nextDisplayState = snapshot.kernel?.display_state;
+    if (prevDisplayState !== nextDisplayState) {
+        if (nextDisplayState === 'degraded') {
+            showKernelStatusMessage('Colab connection is degraded. Dialeng will keep trying to recover.', 'warning', 7000);
+        } else if (nextDisplayState === 'disconnected' && snapshot.kernel?.exists) {
+            showKernelStatusMessage('Kernel connection was lost. Reattach or restart if it does not recover.', 'error', 9000);
+        } else if (nextDisplayState === 'auth_required') {
+            showKernelStatusMessage('Sign in with Google before using a Colab kernel.', 'warning', 7000);
+        }
+    }
+
+    const prevCanRun = !!previous?.kernel?.can_run;
+    const nextCanRun = !!snapshot.kernel?.can_run;
+    if (!prevCanRun && nextCanRun) {
+        document.body.dispatchEvent(new CustomEvent('kernel-connected'));
+        _runPendingCell();
+    }
+
+    if (source === 'ws') {
+        console.log('[Kernel] Applied snapshot from WebSocket:', snapshot);
+    }
+}
+
 function connectWebSocket(notebookId) {
     currentNotebookId = notebookId;  // Store globally for other functions to use
+    startKernelStateSync(notebookId);
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${protocol}//${window.location.host}/ws/${notebookId}`);
 
@@ -2295,7 +2429,9 @@ function connectWebSocket(notebookId) {
         }
         console.log('[WS] Received message:', data.type, 'cell_id:', data.cell_id || 'none');
 
-        if (data.type === 'stream_chunk') {
+        if (data.type === 'kernel_snapshot') {
+            applyKernelSnapshot(data, 'ws');
+        } else if (data.type === 'stream_chunk') {
             // Skip if cancelled
             if (cancelledCells.has(data.cell_id)) return;
             appendToResponse(data.cell_id, data.chunk, data.thinking);
@@ -2384,12 +2520,11 @@ function connectWebSocket(notebookId) {
         } else if (data.type === 'kernel_connected') {
             // Kernel setup complete (CRAFT init, restart, or first execution)
             document.body.dispatchEvent(new CustomEvent('kernel-connected'));
-            updateKernelDot('connected');
             // Run any cell that was pending while waiting for kernel init
             _runPendingCell();
         } else if (data.type === 'kernel_error') {
             // Kernel died or disconnected
-            updateKernelDot('error');
+            showKernelStatusMessage('Kernel setup failed. Check the server logs for details.', 'error', 8000);
         } else if (data.type === 'kernel_restarting') {
             // Kernel is restarting — show yellow, will go grey until next execution
             updateKernelDot('busy');
@@ -2553,6 +2688,7 @@ function connectWebSocket(notebookId) {
     ws.onclose = function() {
         const delay = _wsReconnectDelay + Math.random() * _wsReconnectDelay * 0.2;
         console.log(`[WS] Disconnected, reconnecting in ${Math.round(delay)}ms...`);
+        showKernelStatusMessage('Browser connection dropped. Reconnecting…', 'warning', Math.round(delay) + 1000);
         setTimeout(() => connectWebSocket(notebookId), delay);
         _wsReconnectDelay = Math.min(_wsReconnectDelay * 2, 30000);
     };
@@ -2986,9 +3122,6 @@ function handleQueueUpdate(data) {
     // Show/hide Cancel All button based on queue state
     const hasQueuedOrRunning = data.running_cell_id || (data.queued_cell_ids && data.queued_cell_ids.length > 0);
     updateCancelAllButton(hasQueuedOrRunning);
-
-    // Update kernel dot: busy if running/queued, connected if idle
-    updateKernelDot(hasQueuedOrRunning ? 'busy' : 'connected');
 }
 
 function updateCellQueueState(cellId, state, position) {
@@ -3063,7 +3196,6 @@ async function cancelAllExecution() {
 
 // Code cell streaming timeout mechanism
 let codeStreamingTimeouts = new Map();  // Track timeouts per cell
-const CODE_STREAMING_TIMEOUT_MS = 30000; // 30 seconds safety timeout (reduced for better UX)
 
 // Called immediately when user clicks run on a code cell
 // Provides visual feedback before WebSocket code_stream_start arrives
@@ -3097,24 +3229,6 @@ function prepareCodeRun(cellId) {
     // Reset text content tracker
     streamTextContent.set(cellId, '');
 
-    // Set safety timeout to reset streaming state if server doesn't respond
-    clearCodeStreamingTimeout(cellId);
-    const timeoutId = setTimeout(() => {
-        const cell = document.getElementById(`cell-${cellId}`);
-        if (cell && cell.classList.contains('streaming')) {
-            console.warn('[Code] Safety timeout reached for cell:', cellId);
-            finishCodeStreaming(cellId, true);
-            const outputEl = document.getElementById(`output-${cellId}`);
-            if (outputEl) {
-                const currentOutput = outputEl.textContent?.trim();
-                if (!currentOutput || currentOutput === 'Running...') {
-                    outputEl.innerHTML = '<pre class="stream-output" style="color: var(--error);">Execution timed out. Please try again.</pre>';
-                }
-            }
-        }
-    }, CODE_STREAMING_TIMEOUT_MS);
-    codeStreamingTimeouts.set(cellId, timeoutId);
-
     console.log('[Code] Preparing to run cell:', cellId);
 }
 
@@ -3127,16 +3241,9 @@ function clearCodeStreamingTimeout(cellId) {
 }
 
 function resetCodeStreamingTimeout(cellId) {
-    // Call this when we receive streaming activity to reset the timeout
-    clearCodeStreamingTimeout(cellId);
-    const timeoutId = setTimeout(() => {
-        const cell = document.getElementById(`cell-${cellId}`);
-        if (cell && cell.classList.contains('streaming')) {
-            console.warn('[Code] Safety timeout reached for cell:', cellId);
-            finishCodeStreaming(cellId, true);
-        }
-    }, CODE_STREAMING_TIMEOUT_MS);
-    codeStreamingTimeouts.set(cellId, timeoutId);
+    // Quiet long-running code cells are valid. The backend snapshot is now
+    // authoritative for completion/liveness, so this client-side watchdog is
+    // intentionally a no-op.
 }
 
 function interruptCodeCell(notebookId, cellId) {
@@ -3770,8 +3877,15 @@ function applyKernelSelection(nbId) {
     const savedPendingCell = pendingCellRunId;
     toggleKernelModal();
     pendingCellRunId = savedPendingCell;
-    window.KERNEL_ALIVE = true;
+    window.KERNEL_ALIVE = false;
+    window.KERNEL_STATE = window.KERNEL_STATE || {};
+    window.KERNEL_STATE.kernel = Object.assign({}, window.KERNEL_STATE.kernel, {
+        selected_type: kernelType,
+        can_run: false,
+        display_state: 'initializing'
+    });
     updateKernelDot('busy');
+    showKernelStatusMessage('Attaching kernel and running notebook setup…', 'warning', 4000);
 
     // Send kernel type change in background
     fetch(`/dialeng/${nbId}/kernel/type`, {
@@ -3812,10 +3926,12 @@ function applyKernelSelection(nbId) {
             .catch(err => {
                 console.error('[Kernel] CRAFT init error:', err);
                 updateKernelDot('error');
+                showKernelStatusMessage('Kernel setup failed. Check the server logs for details.', 'error', 8000);
             });
     }).catch(err => {
         console.error('[Kernel] applyKernelSelection error:', err);
         updateKernelDot('error');
+        showKernelStatusMessage('Kernel selection failed. Check the server logs for details.', 'error', 8000);
     });
 }
 
@@ -3843,7 +3959,7 @@ document.body.addEventListener('htmx:beforeRequest', function(e) {
     // Get request path from HTMX element or requestConfig
     const elt = e.detail.elt;
     const path = elt?.getAttribute('hx-post') || e.detail.requestConfig?.path || e.detail.pathInfo?.requestPath || '';
-    if (!path.match(/\/cell\/[^/]+\/run$/) || window.KERNEL_ALIVE) return;
+    if (!path.match(/\/cell\/[^/]+\/run$/) || canRunCurrentKernel()) return;
 
     // Cancel the HTMX request
     e.preventDefault();
@@ -3869,6 +3985,15 @@ document.body.addEventListener('htmx:beforeRequest', function(e) {
 
     // Store pending cell and show kernel modal
     pendingCellRunId = cellId;
+    const kernelState = getKernelState();
+    const displayState = kernelState?.kernel?.display_state;
+    if (kernelState?.kernel?.exists && ['connecting', 'initializing', 'restarting', 'busy'].includes(displayState)) {
+        showKernelStatusMessage(kernelState.setup?.detail || 'Kernel is still initializing. The cell will run once it is ready.', 'warning', 5000);
+        return;
+    }
+    if (kernelState?.kernel?.auth_required) {
+        showKernelStatusMessage('Sign in with Google before using a Colab kernel.', 'warning', 6000);
+    }
     const overlay = document.getElementById('kernel-modal-overlay');
     if (overlay && !overlay.classList.contains('visible')) {
         overlay.classList.add('visible');

@@ -52,6 +52,7 @@ _DEFAULT_CLIENT_SECRET = _build_default_client_secret()
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 COLAB_SCOPES = [
     "profile",
     "email",
@@ -277,6 +278,7 @@ class ColabTokens:
     refresh_token: str
     expires_at: float  # Unix timestamp
     token_type: str = "Bearer"
+    account_email: Optional[str] = None
 
     @property
     def is_expired(self) -> bool:
@@ -289,6 +291,7 @@ class ColabTokens:
             "refresh_token": self.refresh_token,
             "expires_at": self.expires_at,
             "token_type": self.token_type,
+            "account_email": self.account_email,
         }
 
     @classmethod
@@ -298,6 +301,7 @@ class ColabTokens:
             refresh_token=d["refresh_token"],
             expires_at=d["expires_at"],
             token_type=d.get("token_type", "Bearer"),
+            account_email=d.get("account_email"),
         )
 
 
@@ -326,12 +330,38 @@ class ColabAuthService:
             self.client_secret = os.environ.get("COLAB_CLIENT_SECRET", _DEFAULT_CLIENT_SECRET)
         self.redirect_uri = redirect_uri
         self._tokens: Optional[ColabTokens] = None
+        self._validated: bool = False
+        self._session_error: Optional[str] = None
+        self._pending_states: set[str] = set()
         self._load_tokens()
 
     @property
     def is_authenticated(self) -> bool:
-        """Whether we have valid (or refreshable) tokens."""
-        return self._tokens is not None
+        """Whether we have a validated session."""
+        return self._tokens is not None and self._validated
+
+    @property
+    def account_email(self) -> Optional[str]:
+        return self._tokens.account_email if self._tokens else None
+
+    @property
+    def session_error(self) -> Optional[str]:
+        return self._session_error
+
+    def create_auth_state(self) -> str:
+        """Generate and remember an OAuth state token for callback validation."""
+        import secrets
+
+        state = secrets.token_urlsafe(32)
+        self._pending_states.add(state)
+        return state
+
+    def validate_auth_state(self, state: str) -> bool:
+        """Check and consume an OAuth state token."""
+        if not state or state not in self._pending_states:
+            return False
+        self._pending_states.discard(state)
+        return True
 
     def get_auth_url(self, state: str = "", redirect_uri: str = None) -> str:
         """Generate Google OAuth2 authorization URL.
@@ -389,8 +419,14 @@ class ColabAuthService:
             expires_at=time.time() + expires_in,
             token_type=data.get("token_type", "Bearer"),
         )
+        await self._refresh_profile()
+        self._validated = True
+        self._session_error = None
         self._save_tokens()
-        logger.info("Colab OAuth tokens saved successfully")
+        logger.info(
+            "Colab OAuth tokens saved successfully%s",
+            f" for {self.account_email}" if self.account_email else "",
+        )
         return self._tokens
 
     async def get_access_token(self) -> str:
@@ -404,9 +440,90 @@ class ColabAuthService:
         """
         if self._tokens is None:
             raise ColabNotAuthenticatedError("Not authenticated with Google. Click 'Connect Colab' to sign in.")
+        if not self._validated:
+            validated = await self.validate_session()
+            if not validated:
+                raise ColabNotAuthenticatedError(
+                    self._session_error or "Stored Colab session is no longer valid. Please sign in again."
+                )
         if self._tokens.is_expired:
             await self._refresh_token()
         return self._tokens.access_token
+
+    async def validate_session(self) -> bool:
+        """Validate the stored session and refresh user metadata.
+
+        Returns True when the stored session is usable. Network errors fail open:
+        the session remains usable if tokens are present, but the validation error
+        is retained for diagnostics.
+        """
+        if self._tokens is None:
+            self._validated = False
+            self._session_error = "Not authenticated with Google."
+            return False
+
+        try:
+            if self._tokens.is_expired:
+                await self._refresh_token()
+            else:
+                await self._refresh_profile()
+
+            self._validated = True
+            self._session_error = None
+            self._save_tokens()
+            logger.info(
+                "Validated stored Colab OAuth session%s",
+                f" for {self.account_email}" if self.account_email else "",
+            )
+            return True
+        except ColabNotAuthenticatedError as e:
+            logger.warning("Stored Colab OAuth session is invalid: %s", e)
+            self.logout(clear_error=False)
+            self._session_error = str(e)
+            return False
+        except httpx.HTTPStatusError as e:
+            error = ""
+            try:
+                error = e.response.json().get("error", "")
+            except Exception:
+                error = ""
+            if e.response.status_code in (400, 401) or error in {
+                "invalid_grant", "invalid_request", "invalid_client", "unauthorized_client"
+            }:
+                logger.warning(
+                    "Stored Colab OAuth session rejected by Google (status=%s, error=%s)",
+                    e.response.status_code, error or "unknown",
+                )
+                self.logout(clear_error=False)
+                self._session_error = "Stored Colab session expired or was revoked. Please sign in again."
+                return False
+            self._validated = self._tokens is not None
+            self._session_error = f"Could not validate Colab session (HTTP {e.response.status_code})."
+            logger.warning("Could not validate stored Colab session: %s", self._session_error)
+            return self._validated
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            self._validated = self._tokens is not None
+            self._session_error = f"Could not validate Colab session due to network error: {e}"
+            logger.warning(self._session_error)
+            return self._validated
+        except Exception as e:
+            self._validated = self._tokens is not None
+            self._session_error = f"Could not validate Colab session: {e}"
+            logger.warning(self._session_error)
+            return self._validated
+
+    async def _refresh_profile(self) -> None:
+        """Refresh the stored user profile for the active access token."""
+        if not self._tokens:
+            return
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                GOOGLE_USERINFO_URL,
+                headers={"Authorization": f"Bearer {self._tokens.access_token}"},
+            )
+            response.raise_for_status()
+            data = response.json()
+        self._tokens.account_email = data.get("email") or self._tokens.account_email
 
     async def _refresh_token(self):
         """Refresh the access token using the refresh token."""
@@ -424,7 +541,19 @@ class ColabAuthService:
                     "client_secret": self.client_secret,
                 },
             )
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                error = ""
+                try:
+                    error = e.response.json().get("error", "")
+                except Exception:
+                    error = ""
+                if e.response.status_code in (400, 401) or error == "invalid_grant":
+                    self.logout(clear_error=False)
+                    self._session_error = "Stored Colab refresh token expired or was revoked."
+                    raise ColabNotAuthenticatedError(self._session_error) from e
+                raise
             data = response.json()
 
         expires_in = data.get("expires_in", 3600)
@@ -433,6 +562,9 @@ class ColabAuthService:
         # Google may return a new refresh token
         if "refresh_token" in data:
             self._tokens.refresh_token = data["refresh_token"]
+        await self._refresh_profile()
+        self._validated = True
+        self._session_error = None
         self._save_tokens()
         logger.info("Colab OAuth token refreshed successfully")
 
@@ -442,21 +574,41 @@ class ColabAuthService:
             try:
                 data = json.loads(TOKEN_FILE.read_text())
                 self._tokens = ColabTokens.from_dict(data)
-                logger.info("Loaded Colab OAuth tokens from disk")
+                self._validated = False
+                logger.info(
+                    "Loaded Colab OAuth tokens from disk%s",
+                    f" for {self.account_email}" if self.account_email else "",
+                )
             except (json.JSONDecodeError, KeyError, TypeError) as e:
                 logger.warning(f"Failed to load Colab tokens: {e}")
                 self._tokens = None
+                self._validated = False
 
     def _save_tokens(self):
         """Save tokens to disk."""
+        if self._tokens is None:
+            return
         TOKEN_DIR.mkdir(parents=True, exist_ok=True)
         TOKEN_FILE.write_text(json.dumps(self._tokens.to_dict(), indent=2))
         # Set restrictive permissions (owner read/write only)
         TOKEN_FILE.chmod(0o600)
 
-    def logout(self):
+    def logout(self, clear_error: bool = True):
         """Clear stored tokens."""
         self._tokens = None
+        self._validated = False
+        if clear_error:
+            self._session_error = None
         if TOKEN_FILE.exists():
             TOKEN_FILE.unlink()
         logger.info("Colab OAuth tokens cleared")
+
+    def get_status(self) -> dict:
+        """Return a JSON-serializable authentication status snapshot."""
+        return {
+            "enabled": True,
+            "authenticated": self.is_authenticated,
+            "has_tokens": self._tokens is not None,
+            "email": self.account_email,
+            "validation_error": self._session_error,
+        }

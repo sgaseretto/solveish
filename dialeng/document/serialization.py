@@ -28,36 +28,6 @@ def _cell_to_jupyter(cell: Cell) -> dict:
     - PROMPT cells -> 'markdown' cells with solveit_ai metadata
     """
     if cell.cell_type == CellType.CODE:
-        # Code cell with outputs
-        outputs = []
-        for out in cell.outputs:
-            if out.output_type == 'stream':
-                outputs.append({
-                    'output_type': 'stream',
-                    'name': out.stream_name or 'stdout',
-                    'text': [out.content] if isinstance(out.content, str) else out.content
-                })
-            elif out.output_type == 'execute_result':
-                outputs.append({
-                    'output_type': 'execute_result',
-                    'data': {'text/plain': [str(out.content)]},
-                    'metadata': out.metadata or {},
-                    'execution_count': cell.execution_count
-                })
-            elif out.output_type == 'display_data':
-                outputs.append({
-                    'output_type': 'display_data',
-                    'data': out.content if isinstance(out.content, dict) else {'text/plain': [str(out.content)]},
-                    'metadata': out.metadata or {}
-                })
-            elif out.output_type == 'error':
-                outputs.append({
-                    'output_type': 'error',
-                    'ename': out.ename or 'Error',
-                    'evalue': out.evalue or '',
-                    'traceback': out.traceback or []
-                })
-
         return {
             'cell_type': 'code',
             'source': cell.source,
@@ -72,7 +42,7 @@ def _cell_to_jupyter(cell: Cell) -> dict:
                 'heading_collapsed': cell.heading_collapsed,
                 'bookmark': cell.bookmark,
             },
-            'outputs': outputs,
+            'outputs': cell._format_outputs_jupyter(),
             'execution_count': cell.execution_count
         }
 
