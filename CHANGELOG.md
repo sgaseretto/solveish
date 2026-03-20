@@ -104,6 +104,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Cell Reordering Consistency
 - Cell move broadcasts now send the backend-authoritative notebook order instead of only an `up`/`down` direction
 - The browser now reorders existing cell DOM nodes from that canonical order, which fixes prompt cells with generated output getting stuck when moved down and fixes neighboring cells being unable to cross back above them
+- Cell move requests now return an empty HTMX response, and the browser rebuilds `#cells` from a stable snapshot of existing cell/add-row pairs, preventing duplicate add-row controls, move-induced scroll wiggles, and broken follow-up reordering after prompt-cell moves
 
 #### Toolbar Dropdown Clipped by Overflow
 - YT capture button's dropdown panel was invisible because it rendered inside `.toolbar-right` which has `overflow-y: hidden`

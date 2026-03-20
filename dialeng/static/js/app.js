@@ -2659,27 +2659,57 @@ function connectWebSocket(notebookId) {
 
         } else if (data.type === 'cell_move') {
             // Reorder cells from the backend-authoritative notebook order.
-            // We still move the existing DOM nodes in place, so Monaco editors
-            // keep their state, but we no longer rely on local "adjacent swap"
-            // assumptions that can drift from notebook state.
+            // We snapshot the current cell/add-row pairs first, then rebuild
+            // #cells from that immutable snapshot. This avoids duplicate or
+            // misplaced add-rows when the live DOM is mutated mid-reorder.
             const orderedIds = Array.isArray(data.ordered_cell_ids) ? data.ordered_cell_ids : [];
             const cellsRoot = document.getElementById('cells');
-            const leadingAddRow = cellsRoot?.firstElementChild;
+            const movingCell = data.cell_id ? document.getElementById(`cell-${data.cell_id}`) : null;
+            const movingTop = movingCell ? movingCell.getBoundingClientRect().top : null;
+            const children = cellsRoot ? Array.from(cellsRoot.children) : [];
+            const leadingAddRow = children[0];
             if (!cellsRoot || !leadingAddRow || !leadingAddRow.classList.contains('add-row') || !orderedIds.length) {
                 return;
             }
+
+            const cellUnits = new Map();
+            for (let i = 1; i < children.length; i += 1) {
+                const child = children[i];
+                if (!child.classList.contains('cell')) continue;
+                const addRowAfter = children[i + 1];
+                cellUnits.set(child.id.replace('cell-', ''), {
+                    cellEl: child,
+                    addRowEl: addRowAfter && addRowAfter.classList.contains('add-row') ? addRowAfter : null,
+                });
+            }
+
+            if (cellUnits.size !== orderedIds.length || orderedIds.some(cellId => !cellUnits.has(cellId))) {
+                console.warn('[cells] Unable to apply backend cell order cleanly; refreshing notebook view');
+                window.location.reload();
+                return;
+            }
+
             const fragment = document.createDocumentFragment();
             fragment.appendChild(leadingAddRow);
             orderedIds.forEach(cellId => {
-                const cellEl = document.getElementById(`cell-${cellId}`);
-                if (!cellEl) return;
-                const addRowAfter = cellEl.nextElementSibling;
-                fragment.appendChild(cellEl);
-                if (addRowAfter && addRowAfter.classList.contains('add-row')) {
-                    fragment.appendChild(addRowAfter);
+                const unit = cellUnits.get(cellId);
+                if (!unit) return;
+                fragment.appendChild(unit.cellEl);
+                if (unit.addRowEl) {
+                    fragment.appendChild(unit.addRowEl);
                 }
             });
-            cellsRoot.appendChild(fragment);
+            cellsRoot.replaceChildren(fragment);
+
+            if (movingCell) {
+                setFocusedCell(data.cell_id);
+            }
+            if (movingCell && movingTop !== null) {
+                requestAnimationFrame(() => {
+                    const newTop = movingCell.getBoundingClientRect().top;
+                    window.scrollBy(0, newTop - movingTop);
+                });
+            }
 
         } else if (data.type === 'cell_add') {
             // Granular cell insertion: add one cell + add-row at a position.

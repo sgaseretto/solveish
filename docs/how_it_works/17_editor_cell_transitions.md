@@ -277,12 +277,13 @@ Deletion sends a `cell_delete` JSON message. The client removes the cell element
 
 ### Cell Move
 
-Move sends a `cell_move` JSON message with the backend-authoritative `ordered_cell_ids` list. The client rebuilds the visual order by moving the existing cell nodes and their adjacent `.add-row` controls in that exact sequence.
+Move sends a `cell_move` JSON message with the backend-authoritative `ordered_cell_ids` list. The client snapshots the current `cell + trailing .add-row` units first, then rebuilds `#cells` from that stable snapshot in the exact backend order.
 
 This is stricter than the earlier adjacent-swap approach:
 
 - the backend owns notebook order
 - the browser does not infer order from its current DOM neighbors
+- the initiating tab does not perform an HTMX swap for moves; it only applies the WebSocket order update
 - prompt cells with rendered output and the cells around them can move repeatedly without the UI getting stuck in a stale local ordering
 
 ```mermaid

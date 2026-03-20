@@ -2296,7 +2296,10 @@ async def post(nb_id: str, cid: str, direction: str):
         "ordered_cell_ids": [cell.id for cell in nb.cells],
     })
 
-    return AllCells(nb)
+    # Move buttons use hx_swap="none"; the browser applies the canonical order
+    # from the WebSocket message and keeping the HTTP response empty avoids
+    # unnecessary HTMX lifecycle work on the initiating tab.
+    return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/duplicate")
 async def post(nb_id: str, cid: str):
