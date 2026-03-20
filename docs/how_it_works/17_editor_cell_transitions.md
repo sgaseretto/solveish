@@ -296,7 +296,7 @@ flowchart LR
 
 ### Cell Add
 
-Addition sends a `cell_add` JSON message with both `ordered_cell_ids` and the rendered HTML for the newly inserted cell. The client folds that new cell into the same structure-reconciliation pass used by delete/move, initializes HTMX bindings and Monaco only for the inserted cell, and preserves the current viewport anchor unless the action intentionally asked to scroll to the new cell.
+Addition sends a `cell_add` JSON message with both `ordered_cell_ids` and the rendered HTML for the newly inserted cell. The client folds that new cell into the same structure-reconciliation pass used by delete/move, initializes HTMX bindings and Monaco only for the inserted cell, and preserves the current viewport anchor during the reconcile before doing any follow-up reveal/focus work for the new cell.
 
 ### Structural Invariant
 
@@ -307,6 +307,7 @@ Add, delete, and move now share one invariant:
 - the browser reconciles the entire `#cells` structure from a stable snapshot of existing cells plus any newly provided cell HTML
 - structural HTTP responses are empty, so the initiating tab does not mix HTMX swaps with WebSocket structure updates
 - structural adds preserve the user's current viewport context by anchoring on the focused or nearby visible cell
+- last-cell `Shift+Enter` keeps that same viewport anchor during the structural add, then reveals the newly inserted cell with a minimal `scrollIntoView({block: 'nearest'})` adjustment before focusing its editor
 
 ```mermaid
 flowchart LR

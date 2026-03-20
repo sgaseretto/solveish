@@ -459,14 +459,13 @@ function setFocusedCell(cellId) {
     selectCell(cellId);
 }
 
-function focusCellWithoutScroll(cellId) {
+function focusCellWithoutScroll(cellId, preserveY = window.scrollY) {
     setFocusedCell(cellId);
     const cell = document.getElementById(`cell-${cellId}`);
     if (!cell) return;
 
     // Suppress any pending HTMX scroll restore so it doesn't fight us
     _htmxScrollRestore = null;
-    const preserveY = window.scrollY;
 
     // If it's a code or shell cell with Monaco editor, focus the editor
     if (cell.dataset.type === 'code' || cell.dataset.type === 'shell') {
@@ -584,10 +583,6 @@ function _firstVisibleCellId() {
 let _pendingStructureViewport = null;
 
 function rememberStructureViewport(anchorCellId = null) {
-    if (_pendingScrollToNewCell) {
-        _pendingStructureViewport = null;
-        return;
-    }
     _pendingStructureViewport = {
         cellId: anchorCellId || getFocusedCellId() || _firstVisibleCellId(),
         scrollY: window.scrollY,
@@ -2826,22 +2821,23 @@ function connectWebSocket(notebookId) {
             if (!reconcileCellStructure({
                 orderedIds: data.ordered_cell_ids || [],
                 insertedCells: [{ cellId: data.cell_id, html: data.html }],
-                preserveViewportCellId: !_pendingScrollToNewCell ? pendingViewport?.cellId : null,
-                preserveScrollY: !_pendingScrollToNewCell ? pendingViewport?.scrollY ?? null : null,
+                preserveViewportCellId: pendingViewport?.cellId ?? null,
+                preserveScrollY: pendingViewport?.scrollY ?? null,
             })) {
                 return;
             }
 
-            // If Shift+Enter created this cell, scroll to it now that it's
-            // in the DOM with its Monaco editor fully initialized.
+            // If Shift+Enter created this cell at the end, keep the current
+            // viewport stable through the structural reconcile, then reveal the
+            // new cell with the smallest possible adjustment.
             if (_pendingScrollToNewCell) {
                 _pendingScrollToNewCell = false;
                 requestAnimationFrame(() => {
-                    // This path is specific to "run last cell and create next".
-                    // Use one explicit bottom scroll, then focus the new cell
-                    // without introducing a second competing scroll action.
-                    window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
-                    requestAnimationFrame(() => focusCellWithoutScroll(data.cell_id));
+                    const newCell = document.getElementById(`cell-${data.cell_id}`);
+                    if (newCell) {
+                        newCell.scrollIntoView({ behavior: 'auto', block: 'nearest' });
+                    }
+                    focusCellWithoutScroll(data.cell_id, window.scrollY);
                 });
             }
 

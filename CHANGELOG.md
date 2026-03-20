@@ -108,6 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cell add/delete broadcasts now also carry `ordered_cell_ids`, and the browser reconciles add/delete/move through the same structure-sync path instead of three separate DOM heuristics
 - Keyboard add shortcuts no longer use a local HTMX `#cells` swap; they now use the same WebSocket-backed add flow as button clicks and prompt/code auto-insertions
 - Add-button, duplicate, and extract-code-block insertions now preserve the current viewport anchor instead of jumping back to the top of the notebook after the structure reconcile
+- Last-cell `Shift+Enter` now preserves the current viewport through the structural add reconcile and only then reveals the new cell with a minimal in-view adjustment, fixing the remaining jump-to-top path when creating the next code cell at the bottom
 
 #### Toolbar Dropdown Clipped by Overflow
 - YT capture button's dropdown panel was invisible because it rendered inside `.toolbar-right` which has `overflow-y: hidden`
