@@ -553,11 +553,44 @@ function addCellAtRow(btn, nbId, cellType) {
     const pos = Array.from(allAddRows).indexOf(addRow);
     if (pos < 0) return;
 
-    requestCellAdd(cellType, pos);
+    const cells = getOrderedCells();
+    const anchorCell = cells[Math.min(Math.max(pos - 1, 0), Math.max(cells.length - 1, 0))];
+    const anchorCellId = anchorCell ? anchorCell.id.replace('cell-', '') : null;
+    requestCellAdd(cellType, pos, { anchorCellId });
     // The WS cell_add handler will insert the cell into the DOM.
 }
 
-function requestCellAdd(cellType, pos = null) {
+function _firstVisibleCellId() {
+    const cells = getOrderedCells();
+    const visible = cells.find(cell => {
+        const rect = cell.getBoundingClientRect();
+        return rect.bottom > 0 && rect.top < window.innerHeight;
+    });
+    return visible ? visible.id.replace('cell-', '') : null;
+}
+
+let _pendingStructureViewport = null;
+
+function rememberStructureViewport(anchorCellId = null) {
+    if (_pendingScrollToNewCell) {
+        _pendingStructureViewport = null;
+        return;
+    }
+    _pendingStructureViewport = {
+        cellId: anchorCellId || getFocusedCellId() || _firstVisibleCellId(),
+        scrollY: window.scrollY,
+    };
+}
+
+function consumeStructureViewport() {
+    const viewport = _pendingStructureViewport;
+    _pendingStructureViewport = null;
+    return viewport;
+}
+
+function requestCellAdd(cellType, pos = null, options = {}) {
+    const { anchorCellId = null } = options;
+    rememberStructureViewport(anchorCellId);
     const params = new URLSearchParams({ type: cellType });
     if (Number.isInteger(pos)) {
         params.set('pos', String(pos));
@@ -603,7 +636,12 @@ function buildCellUnitFromHtml(cellId, html) {
     return { cellEl, addRowEl };
 }
 
-function reconcileCellStructure({ orderedIds, insertedCells = [], preserveViewportCellId = null } = {}) {
+function reconcileCellStructure({
+    orderedIds,
+    insertedCells = [],
+    preserveViewportCellId = null,
+    preserveScrollY = null,
+} = {}) {
     if (!Array.isArray(orderedIds) || !orderedIds.length) {
         return false;
     }
@@ -658,6 +696,8 @@ function reconcileCellStructure({ orderedIds, insertedCells = [], preserveViewpo
             if (!liveCell) return;
             window.scrollBy(0, liveCell.getBoundingClientRect().top - viewportTop);
         });
+    } else if (preserveScrollY !== null) {
+        requestAnimationFrame(() => window.scrollTo(0, preserveScrollY));
     }
 
     return true;
@@ -1006,6 +1046,7 @@ document.addEventListener('keydown', e => {
         // q - Duplicate selected cells
         if (e.key === 'q' && currentCellId) {
             e.preventDefault();
+            rememberStructureViewport(currentCellId);
             const ids = getSelectedCellIds();
             (ids.length > 0 ? ids : [currentCellId]).forEach(id => {
                 fetch(`${nbApiPath()}/cell/${id}/duplicate`, {
@@ -1061,6 +1102,7 @@ document.addEventListener('keydown', e => {
         // w - Extract fenced code blocks from prompt/note output
         if (e.key === 'w' && currentCellId) {
             e.preventDefault();
+            rememberStructureViewport(currentCellId);
             fetch(`${nbApiPath()}/cell/${currentCellId}/extract-code-blocks`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/x-www-form-urlencoded'}
@@ -2749,9 +2791,12 @@ function connectWebSocket(notebookId) {
 
         } else if (data.type === 'cell_add') {
             // Granular cell insertion: add one cell + add-row at a position.
+            const pendingViewport = consumeStructureViewport();
             if (!reconcileCellStructure({
                 orderedIds: data.ordered_cell_ids || [],
                 insertedCells: [{ cellId: data.cell_id, html: data.html }],
+                preserveViewportCellId: !_pendingScrollToNewCell ? pendingViewport?.cellId : null,
+                preserveScrollY: !_pendingScrollToNewCell ? pendingViewport?.scrollY ?? null : null,
             })) {
                 return;
             }
