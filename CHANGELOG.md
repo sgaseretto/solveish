@@ -94,11 +94,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Kernel/setup status messages now render as floating toast-style notifications instead of inline messages under the toolbar
 - WebSocket reconnect, Colab attach/setup phases, and HTMX responses targeting `#status` all use the same floating notification region
 - Backend snapshot setup details now surface as progressive Colab setup toasts, and the inline status area no longer pushes notebook content down while the kernel is attaching
+- The toast region now anchors to the bottom-right corner of the window instead of the top-right corner
 
 #### Server Shutdown Kernel Cleanup
 - Added an app-level shutdown hook that cancels notebook setup/sync work, cancels queued execution, and asynchronously shuts down all kernels during server exit
 - `Ctrl+C` in the terminal is now the supported clean-exit path for Dialeng, and Colab kernels should release their Jupyter sessions and runtime assignments during that shutdown instead of being left active
 - `KernelService` now has async `shutdown_all_async()` support, and Colab kernel removal also clears the `ColabSessionManager` cache so later reconnects do not reuse a stale shutdown kernel object
+
+#### Cell Reordering Consistency
+- Cell move broadcasts now send the backend-authoritative notebook order instead of only an `up`/`down` direction
+- The browser now reorders existing cell DOM nodes from that canonical order, which fixes prompt cells with generated output getting stuck when moved down and fixes neighboring cells being unable to cross back above them
 
 #### Toolbar Dropdown Clipped by Overflow
 - YT capture button's dropdown panel was invisible because it rendered inside `.toolbar-right` which has `overflow-y: hidden`

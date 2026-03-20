@@ -29,9 +29,9 @@ This document describes how Monaco editors behave during cell lifecycle events (
 - The notebook scroll position is **preserved**
 
 ### Adding / Deleting / Moving Cells
-- These operations replace the entire `#cells` container (known limitation)
-- All editors are destroyed and recreated
-- Scroll position is preserved via save/restore mechanism
+- These operations now update the notebook DOM surgically instead of replacing the entire `#cells` container
+- Existing Monaco editors stay attached to their cells during add/delete/move operations
+- The backend is the source of truth for cell order; the browser replays that order without guessing local swaps
 
 ## Cell Lifecycle Events
 
@@ -63,7 +63,7 @@ stateDiagram-v2
 | Collapse toggle | Collapse button | JSON `cell_collapse_update` | **Preserved** |
 | Cell added | + Code button, `add_msg()` | JSON `cell_add` | **Preserved** (other cells) |
 | Cell deleted | Delete button, `D D` | JSON `cell_delete` | **Preserved** (other cells) |
-| Cell moved | Arrow buttons, `Alt+↑/↓` | JSON `cell_move` | **Preserved** (insertBefore) |
+| Cell moved | Arrow buttons, `Alt+↑/↓` | JSON `cell_move` | **Preserved** (backend-authoritative reorder) |
 | Cell type changed | Type dropdown | `CellViewOOB` | Destroyed & recreated |
 
 ## How Monaco Editors Are Managed
@@ -234,7 +234,7 @@ sequenceDiagram
 
 ## Scroll Position Preservation
 
-The notebook uses HTMX `outerHTML` swaps on the `#cells` container for structural operations (add, delete, move). This replaces the entire cells DOM tree, which can cause scroll jumps.
+The notebook used to rely on HTMX `outerHTML` swaps for structural operations. Add/delete/move now use granular JSON messages and in-place DOM moves instead, so the old full-container replacement path is no longer the normal case.
 
 ### Mitigations
 
@@ -277,7 +277,21 @@ Deletion sends a `cell_delete` JSON message. The client removes the cell element
 
 ### Cell Move
 
-Move sends a `cell_move` JSON message with direction. The client uses `insertBefore` to swap two adjacent cells — this **moves** DOM nodes without copying, so Monaco editors survive with their full state intact.
+Move sends a `cell_move` JSON message with the backend-authoritative `ordered_cell_ids` list. The client rebuilds the visual order by moving the existing cell nodes and their adjacent `.add-row` controls in that exact sequence.
+
+This is stricter than the earlier adjacent-swap approach:
+
+- the backend owns notebook order
+- the browser does not infer order from its current DOM neighbors
+- prompt cells with rendered output and the cells around them can move repeatedly without the UI getting stuck in a stale local ordering
+
+```mermaid
+flowchart LR
+    A["Move button"] --> B["Notebook.move_cell(...)"]
+    B --> C["Broadcast ordered_cell_ids"]
+    C --> D["Browser reorders existing DOM nodes"]
+    D --> E["Monaco editors preserved"]
+```
 
 ### Cell Add
 

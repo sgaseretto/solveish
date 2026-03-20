@@ -2279,18 +2279,22 @@ async def post(nb_id: str, cid: str, cell_type: str):
 @rt("/dialeng/{nb_id}/cell/{cid}/move/{direction}")
 async def post(nb_id: str, cid: str, direction: str):
     nb = get_notebook(nb_id)
-    for i, c in enumerate(nb.cells):
-        if c.id == cid:
-            if direction == "up" and i > 0:
-                nb.cells[i], nb.cells[i-1] = nb.cells[i-1], nb.cells[i]
-            elif direction == "down" and i < len(nb.cells) - 1:
-                nb.cells[i], nb.cells[i+1] = nb.cells[i+1], nb.cells[i]
-            break
+    direction_map = {"up": -1, "down": 1}
+    move_delta = direction_map.get(direction)
+    if move_delta is None:
+        return ""
 
-    # FOUST fix: broadcast granular cell_move JSON instead of AllCellsOOB.
-    # The client uses DOM insertBefore() to swap adjacent cells. insertBefore
-    # MOVES nodes (doesn't copy), so Monaco editors survive with full state.
-    await broadcast_json(nb_id, {"type": "cell_move", "cell_id": cid, "direction": direction})
+    moved = nb.move_cell(cid, move_delta)
+    if not moved:
+        return ""
+
+    # Broadcast the backend-authoritative cell order so every client reorders
+    # the existing DOM nodes from the same source of truth.
+    await broadcast_json(nb_id, {
+        "type": "cell_move",
+        "cell_id": cid,
+        "ordered_cell_ids": [cell.id for cell in nb.cells],
+    })
 
     return AllCells(nb)
 

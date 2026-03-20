@@ -2658,34 +2658,28 @@ function connectWebSocket(notebookId) {
             }
 
         } else if (data.type === 'cell_move') {
-            // Granular cell reorder: swap two adjacent cells in DOM.
-            // Key insight: insertBefore() MOVES DOM nodes (doesn't copy them), so Monaco
-            // editors survive the move with their full state.
-            // DOM structure: .add-row, #cell-A, .add-row, #cell-B, .add-row
-            // We swap the cell+addRow pair as a unit to keep add-rows aligned.
-            const cellEl = document.getElementById(`cell-${data.cell_id}`);
-            if (!cellEl) return;
-            const parent = cellEl.parentNode;
-            if (data.direction === 'up') {
-                // Move cellEl above the previous cell (skip the add-row between)
-                const addRowBefore = cellEl.previousElementSibling; // add-row between
-                const prevCell = addRowBefore?.previousElementSibling;
-                if (prevCell && prevCell.id?.startsWith('cell-')) {
-                    // Move cell before prevCell, then move the add-row after cellEl
-                    parent.insertBefore(cellEl, prevCell);
-                    // The add-row that was between them goes after cellEl
-                    cellEl.after(addRowBefore);
-                }
-            } else {
-                // Move cellEl below the next cell
-                const addRowAfter = cellEl.nextElementSibling; // add-row between
-                const nextCell = addRowAfter?.nextElementSibling;
-                if (nextCell && nextCell.id?.startsWith('cell-')) {
-                    // Move nextCell before cellEl, then add-row after nextCell
-                    parent.insertBefore(nextCell, cellEl);
-                    nextCell.after(addRowAfter);
-                }
+            // Reorder cells from the backend-authoritative notebook order.
+            // We still move the existing DOM nodes in place, so Monaco editors
+            // keep their state, but we no longer rely on local "adjacent swap"
+            // assumptions that can drift from notebook state.
+            const orderedIds = Array.isArray(data.ordered_cell_ids) ? data.ordered_cell_ids : [];
+            const cellsRoot = document.getElementById('cells');
+            const leadingAddRow = cellsRoot?.firstElementChild;
+            if (!cellsRoot || !leadingAddRow || !leadingAddRow.classList.contains('add-row') || !orderedIds.length) {
+                return;
             }
+            const fragment = document.createDocumentFragment();
+            fragment.appendChild(leadingAddRow);
+            orderedIds.forEach(cellId => {
+                const cellEl = document.getElementById(`cell-${cellId}`);
+                if (!cellEl) return;
+                const addRowAfter = cellEl.nextElementSibling;
+                fragment.appendChild(cellEl);
+                if (addRowAfter && addRowAfter.classList.contains('add-row')) {
+                    fragment.appendChild(addRowAfter);
+                }
+            });
+            cellsRoot.appendChild(fragment);
 
         } else if (data.type === 'cell_add') {
             // Granular cell insertion: add one cell + add-row at a position.

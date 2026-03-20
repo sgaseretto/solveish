@@ -435,7 +435,7 @@ button, select { font-size: var(--btn-font-size, inherit); }
 
 #status {
     position: fixed;
-    top: 20px;
+    bottom: 20px;
     right: 20px;
     display: flex;
     flex-direction: column;
@@ -517,7 +517,7 @@ button, select { font-size: var(--btn-font-size, inherit); }
 
 @media (max-width: 640px) {
     #status {
-        top: 12px;
+        bottom: 12px;
         right: 12px;
         width: calc(100vw - 24px);
     }
