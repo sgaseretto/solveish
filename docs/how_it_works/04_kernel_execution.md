@@ -555,6 +555,16 @@ await kernel_service.sync_project_files(nb_id, exported_files)
 await kernel_service.shutdown_async(nb_id)
 ```
 
+There is also an app-level shutdown path:
+
+```python
+@app.on_event("shutdown")
+async def _app_shutdown():
+    await _shutdown_server_runtime()
+```
+
+This is what makes terminal `Ctrl+C` a clean exit path for both local and Colab kernels.
+
 ### WebSocket Integration
 
 Stream output chunks to browser:

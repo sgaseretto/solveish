@@ -590,6 +590,17 @@ Colab API errors (e.g., Google returning 503) are handled at two levels:
 - **`assign_and_connect()`** — Retries transient 5xx errors up to 5 times with exponential backoff (1s, 2s, 4s, 8s, 16s)
 - **Restart endpoint** — Catches `ColabAPIError` and broadcasts `kernel_error` status to the frontend (red dot) instead of crashing with a 500
 
+### Server Shutdown Cleanup
+
+Dialeng now treats normal server shutdown as a first-class cleanup path. When the Uvicorn worker receives its shutdown signal, the app-level shutdown hook:
+
+1. cancels notebook setup and sync background tasks
+2. cancels pending execution queues
+3. asynchronously shuts down every kernel
+4. lets Colab kernels close the WebSocket, delete the Jupyter session, and unassign the runtime
+
+That means `Ctrl+C` in the terminal is now the intended way to stop Dialeng while releasing attached Colab runtimes instead of leaving them active on Google’s side.
+
 ## Integration with Multi-Kernel System
 
 `ColabSessionManager` manages `ColabKernel` instances per notebook and integrates with `KernelService`:

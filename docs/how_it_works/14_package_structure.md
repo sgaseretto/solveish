@@ -53,6 +53,8 @@ The `main()` function in `dialeng/app.py` prints startup info (credentials, conf
 
 That custom log config keeps `dialeng.*` runtime logs visible in the terminal and filters out high-volume access-log noise like static assets and `/kernel/snapshot` polling, so kernel/setup/Colab logs remain readable during interactive use.
 
+It also prints a terminal hint telling users that `Ctrl+C` is the supported way to stop Dialeng and release attached kernels. The actual cleanup happens in the app shutdown hook, which asynchronously tears down notebook kernels before process exit.
+
 ## Configurable Paths
 
 Two environment variables customize runtime paths:

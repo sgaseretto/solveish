@@ -110,11 +110,14 @@ class KernelService:
         """
         if notebook_id in self._kernels:
             old = self._kernels[notebook_id]
+            old_info = old.get_info()
             if hasattr(old, 'shutdown_async'):
                 await old.shutdown_async()
             else:
                 old.shutdown()
             del self._kernels[notebook_id]
+            if old_info.kernel_type == "colab" and self._colab_session_manager:
+                self._colab_session_manager.forget_kernel(notebook_id)
         return self.get_kernel(notebook_id, kernel_type, runtime_type)
 
     def set_kernel_instance(self, notebook_id: str, kernel: BaseKernel) -> None:
@@ -346,8 +349,12 @@ class KernelService:
             notebook_id: Notebook identifier
         """
         if notebook_id in self._kernels:
-            self._kernels[notebook_id].shutdown()
+            kernel = self._kernels[notebook_id]
+            info = kernel.get_info()
+            kernel.shutdown()
             del self._kernels[notebook_id]
+            if info.kernel_type == "colab" and self._colab_session_manager:
+                self._colab_session_manager.forget_kernel(notebook_id)
         self._execution_locks.pop(notebook_id, None)
         self._client_counts.pop(notebook_id, None)
 
@@ -355,12 +362,20 @@ class KernelService:
         """Async-safe kernel shutdown for route handlers and teardown paths."""
         if notebook_id in self._kernels:
             kernel = self._kernels.pop(notebook_id)
+            info = kernel.get_info()
             if hasattr(kernel, "shutdown_async"):
                 await kernel.shutdown_async()
             else:
                 kernel.shutdown()
+            if info.kernel_type == "colab" and self._colab_session_manager:
+                self._colab_session_manager.forget_kernel(notebook_id)
         self._execution_locks.pop(notebook_id, None)
         self._client_counts.pop(notebook_id, None)
+
+    async def shutdown_all_async(self) -> None:
+        """Async-safe shutdown for every tracked kernel."""
+        for notebook_id in list(self._kernels.keys()):
+            await self.shutdown_async(notebook_id)
 
     def shutdown_all(self):
         """Shutdown all kernels."""

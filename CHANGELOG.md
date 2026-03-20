@@ -90,6 +90,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Access-log noise from static assets, `/render-markdown`, `/favicon.ico`, and repeated `/kernel/snapshot` polling is filtered so Colab/kernel setup logs remain readable during interactive sessions
 - Access logs now render with a clearer `[http]` prefix while Dialeng runtime logs include the logger name
 
+#### Server Shutdown Kernel Cleanup
+- Added an app-level shutdown hook that cancels notebook setup/sync work, cancels queued execution, and asynchronously shuts down all kernels during server exit
+- `Ctrl+C` in the terminal is now the supported clean-exit path for Dialeng, and Colab kernels should release their Jupyter sessions and runtime assignments during that shutdown instead of being left active
+- `KernelService` now has async `shutdown_all_async()` support, and Colab kernel removal also clears the `ColabSessionManager` cache so later reconnects do not reuse a stale shutdown kernel object
+
 #### Toolbar Dropdown Clipped by Overflow
 - YT capture button's dropdown panel was invisible because it rendered inside `.toolbar-right` which has `overflow-y: hidden`
 - Fix: panel is now appended to `document.body` with `position: fixed` and positioned via `getBoundingClientRect()`

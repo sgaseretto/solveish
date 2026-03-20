@@ -67,6 +67,14 @@ class ColabSessionManager:
         for notebook_id in list(self._kernels.keys()):
             await self.shutdown(notebook_id)
 
+    def forget_kernel(self, notebook_id: str) -> None:
+        """Drop a cached kernel reference without shutting it down."""
+        self._kernels.pop(notebook_id, None)
+
+    def forget_all(self) -> None:
+        """Drop all cached kernel references without touching the runtimes."""
+        self._kernels.clear()
+
     def has_kernel(self, notebook_id: str) -> bool:
         """Check if a Colab kernel exists for the notebook."""
         return notebook_id in self._kernels

@@ -324,6 +324,7 @@ kernel_setup_state: Dict[str, Dict[str, Any]] = {}
 kernel_setup_tasks: Dict[str, asyncio.Task] = {}
 kernel_sync_tasks: Dict[str, asyncio.Task] = {}
 kernel_generations: Dict[str, int] = {}
+server_shutdown_started = False
 
 # DialogHelper data queues for bidirectional browser communication
 # Structure: {notebook_id: {data_id: asyncio.Queue}}
@@ -393,6 +394,54 @@ async def _teardown_notebook_runtime(nb_id: str, reason: str) -> None:
         reason,
         generation,
     )
+
+
+async def _shutdown_server_runtime(reason: str = "server_shutdown") -> None:
+    """Cancel notebook work and shutdown all kernels during server exit."""
+    global server_shutdown_started
+    if server_shutdown_started:
+        return
+    server_shutdown_started = True
+
+    logger.info("Starting Dialeng shutdown cleanup (reason=%s)", reason)
+
+    pending_tasks: list[asyncio.Task] = []
+    for task_map, label in (
+        (kernel_setup_tasks, "kernel_setup"),
+        (kernel_sync_tasks, "kernel_sync"),
+    ):
+        for nb_id, task in list(task_map.items()):
+            if task and not task.done():
+                logger.info(
+                    "Cancelling %s task during shutdown (notebook=%s, task=%s)",
+                    label,
+                    nb_id,
+                    task.get_name(),
+                )
+                task.cancel()
+                pending_tasks.append(task)
+        task_map.clear()
+
+    if pending_tasks:
+        results = await asyncio.gather(*pending_tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
+                logger.warning("Background task raised during shutdown cleanup: %s", result)
+
+    for nb_id, queue in list(execution_queues.items()):
+        try:
+            queue.cancel_all()
+        except Exception as e:
+            logger.warning("Failed to cancel execution queue during shutdown (notebook=%s): %s", nb_id, e)
+    execution_queues.clear()
+
+    try:
+        await kernel_service.shutdown_all_async()
+    finally:
+        kernel_setup_state.clear()
+        kernel_generations.clear()
+        data_queues.clear()
+        logger.info("Dialeng shutdown cleanup complete")
 
 
 def _assert_kernel_generation_current(nb_id: str, generation: int, source: str) -> None:
@@ -1168,6 +1217,12 @@ async def _autorun_startup():
     # Initialize Colab in the worker process (set_root_dir() only runs in the main process)
     _init_colab()
     await process_autorun(kernel_service, notebooks_dir=NOTEBOOKS_DIR)
+
+
+@app.on_event("shutdown")
+async def _app_shutdown():
+    """Release notebook kernels and background tasks on server shutdown."""
+    await _shutdown_server_runtime()
 
 # ============================================================================
 # Extension Development Endpoints
@@ -3566,6 +3621,8 @@ def main(root_dir: Path = None, port: int = 8000):
     print("   • Alt+↑/↓           - Move cell up/down")
     print("   • Escape            - Exit edit mode")
     print("   • Double-click      - Edit markdown/response")
+    print("")
+    print("   Press Ctrl+C to stop Dialeng and release attached kernels.")
     serve(
         appname="dialeng.app",
         port=port,

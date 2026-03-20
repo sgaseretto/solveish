@@ -411,3 +411,148 @@ def test_kernel_service_shutdown_async_prefers_async_kernel_shutdown():
     assert kernel.async_shutdown_called is True
     assert kernel.sync_shutdown_called is False
     assert service.has_kernel("nb") is False
+
+
+def test_kernel_service_shutdown_async_forgets_colab_session_cache():
+    class _ColabLikeKernel(_SerialFakeKernel):
+        def __init__(self):
+            super().__init__()
+            self.async_shutdown_called = False
+
+        async def shutdown_async(self):
+            self.async_shutdown_called = True
+
+        def get_info(self) -> KernelInfo:
+            return KernelInfo(
+                kernel_type="colab",
+                display_name="Colab",
+                is_remote=True,
+                supports_shell_cells=False,
+                supports_interrupt=True,
+            )
+
+    class _Manager:
+        def __init__(self):
+            self.forgotten = []
+
+        def forget_kernel(self, notebook_id: str) -> None:
+            self.forgotten.append(notebook_id)
+
+    service = KernelService()
+    manager = _Manager()
+    service.set_colab_session_manager(manager)
+    kernel = _ColabLikeKernel()
+    service.set_kernel_instance("nb", kernel)
+
+    asyncio.run(service.shutdown_async("nb"))
+
+    assert kernel.async_shutdown_called is True
+    assert manager.forgotten == ["nb"]
+
+
+def test_kernel_service_shutdown_all_async_shuts_down_every_kernel():
+    class _AsyncShutdownKernel(_SerialFakeKernel):
+        def __init__(self, kernel_type: str = "fake"):
+            super().__init__()
+            self.async_shutdown_called = False
+            self.kernel_type = kernel_type
+
+        async def shutdown_async(self):
+            self.async_shutdown_called = True
+
+        def get_info(self) -> KernelInfo:
+            return KernelInfo(
+                kernel_type=self.kernel_type,
+                display_name=self.kernel_type,
+                is_remote=self.kernel_type == "colab",
+                supports_shell_cells=True,
+                supports_interrupt=True,
+            )
+
+    service = KernelService()
+    k1 = _AsyncShutdownKernel("fake")
+    k2 = _AsyncShutdownKernel("colab")
+    service.set_kernel_instance("nb1", k1)
+    service.set_kernel_instance("nb2", k2)
+
+    asyncio.run(service.shutdown_all_async())
+
+    assert k1.async_shutdown_called is True
+    assert k2.async_shutdown_called is True
+    assert service.has_kernel("nb1") is False
+    assert service.has_kernel("nb2") is False
+
+
+def test_app_shutdown_runtime_cleans_up_background_state(monkeypatch):
+    import dialeng.app as appmod
+
+    class _Queue:
+        def __init__(self):
+            self.cancelled = False
+
+        def cancel_all(self):
+            self.cancelled = True
+
+    async def _run():
+        original_shutdown_started = appmod.server_shutdown_started
+        original_kernel_setup_tasks = dict(appmod.kernel_setup_tasks)
+        original_kernel_sync_tasks = dict(appmod.kernel_sync_tasks)
+        original_execution_queues = dict(appmod.execution_queues)
+        original_kernel_setup_state = dict(appmod.kernel_setup_state)
+        original_kernel_generations = dict(appmod.kernel_generations)
+        original_data_queues = dict(appmod.data_queues)
+
+        class _KernelService:
+            def __init__(self):
+                self.shutdown_calls = 0
+
+            async def shutdown_all_async(self):
+                self.shutdown_calls += 1
+
+        fake_kernel_service = _KernelService()
+        monkeypatch.setattr(appmod, "kernel_service", fake_kernel_service)
+
+        queue = _Queue()
+        appmod.execution_queues["nb"] = queue
+        appmod.kernel_setup_state["nb"] = {"phase": "craft"}
+        appmod.kernel_generations["nb"] = 2
+        appmod.data_queues["nb"] = {"foo": asyncio.Queue()}
+
+        async def _wait_forever():
+            await asyncio.sleep(60)
+
+        setup_task = asyncio.create_task(_wait_forever(), name="test-setup-task")
+        sync_task = asyncio.create_task(_wait_forever(), name="test-sync-task")
+        appmod.kernel_setup_tasks["nb"] = setup_task
+        appmod.kernel_sync_tasks["nb"] = sync_task
+
+        try:
+            appmod.server_shutdown_started = False
+            await appmod._shutdown_server_runtime("test")
+
+            assert queue.cancelled is True
+            assert fake_kernel_service.shutdown_calls == 1
+            assert appmod.kernel_setup_tasks == {}
+            assert appmod.kernel_sync_tasks == {}
+            assert appmod.execution_queues == {}
+            assert appmod.kernel_setup_state == {}
+            assert appmod.kernel_generations == {}
+            assert appmod.data_queues == {}
+            assert setup_task.cancelled() is True
+            assert sync_task.cancelled() is True
+        finally:
+            appmod.server_shutdown_started = original_shutdown_started
+            appmod.kernel_setup_tasks.clear()
+            appmod.kernel_setup_tasks.update(original_kernel_setup_tasks)
+            appmod.kernel_sync_tasks.clear()
+            appmod.kernel_sync_tasks.update(original_kernel_sync_tasks)
+            appmod.execution_queues.clear()
+            appmod.execution_queues.update(original_execution_queues)
+            appmod.kernel_setup_state.clear()
+            appmod.kernel_setup_state.update(original_kernel_setup_state)
+            appmod.kernel_generations.clear()
+            appmod.kernel_generations.update(original_kernel_generations)
+            appmod.data_queues.clear()
+            appmod.data_queues.update(original_data_queues)
+
+    asyncio.run(_run())
