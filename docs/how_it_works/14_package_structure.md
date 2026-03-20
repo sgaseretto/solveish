@@ -95,6 +95,7 @@ The wheel includes these packages:
 ```
 dialeng/
 ├── app.py              # Main FastHTML application + main() entry point
+├── notebook_id.py      # Shared notebook path ↔ encoded ID helpers
 ├── state.py            # Shared state module
 ├── __main__.py         # python -m support
 ├── core/               # Registry, extensions, callbacks, dispatch

@@ -391,6 +391,21 @@ notebooks/
 └── tutorial.ipynb
 ```
 
+### Notebook Identity
+
+Dialeng uses an encoded notebook id as the canonical notebook key instead of the raw
+relative path. The shared helpers live in [`dialeng/notebook_id.py`](../../dialeng/notebook_id.py).
+
+- `demo` → `demo`
+- `demo_project/colab_test` → `demo_project~colab_test`
+- literal `~` characters inside path segments are escaped as `~~`
+
+That encoded id is the single source of truth for:
+
+- `/dialeng/{nb_id}` route parameters
+- in-memory notebook and kernel dictionaries
+- file explorer active/running state matching for both root and nested notebooks
+
 ### Save Operation (`app.py:374-377`)
 
 ```python

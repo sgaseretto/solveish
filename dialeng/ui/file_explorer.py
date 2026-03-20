@@ -8,6 +8,7 @@ and notebook creation. Replaces the old flat file list.
 from fasthtml.common import *
 from pathlib import Path
 from typing import List, Tuple, Optional
+from dialeng.notebook_id import nb_id_from_relpath
 from .icons import sprites as icon_sprites
 
 
@@ -169,9 +170,10 @@ def FileListContent(path: Path, root: Path, active_notebook_id: str,
     # Notebooks
     for nb_name in notebooks:
         nb_rel_path = f"{rel}/{nb_name}" if rel and rel != "." else nb_name
-        is_active = nb_rel_path == active_notebook_id or nb_name == active_notebook_id
+        explorer_nb_id = nb_id_from_relpath(nb_rel_path)
+        is_active = explorer_nb_id == active_notebook_id
         items.append(FileItem(nb_name, rel, is_active, active_notebook_id,
-                              has_kernel=nb_rel_path in kernel_notebooks or nb_name in kernel_notebooks))
+                              has_kernel=explorer_nb_id in kernel_notebooks))
 
     if not folders and not notebooks:
         items.append(Div("Empty folder", cls="file-explorer-item",

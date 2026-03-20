@@ -20,6 +20,11 @@ from datetime import datetime
 from contextlib import redirect_stdout, redirect_stderr
 from enum import Enum
 from pathlib import Path
+from dialeng.notebook_id import (
+    nb_id_encode_part as _shared_nb_id_encode_part,
+    nb_id_from_path as _shared_nb_id_from_path,
+    nb_id_to_relpath as _shared_nb_id_to_relpath,
+)
 
 # New streaming kernel
 from dialeng.services.kernel import KernelService
@@ -647,7 +652,7 @@ def _load_notebook(path: str) -> Notebook:
 
 def _nb_id_encode_part(part: str) -> str:
     """Escape tildes in a single path component: ~ → ~~"""
-    return part.replace("~", "~~")
+    return _shared_nb_id_encode_part(part)
 
 def _nb_id_from_path(path: Path) -> str:
     """Derive a collision-proof, URL-safe notebook ID from a file path.
@@ -661,14 +666,7 @@ def _nb_id_from_path(path: Path) -> str:
               notebooks/my_project/analysis.ipynb → 'my_project~analysis'
               notebooks/has~tilde.ipynb → 'has~~tilde'
     """
-    try:
-        rel = path.resolve().relative_to(NOTEBOOKS_DIR.resolve())
-    except ValueError:
-        return _nb_id_encode_part(path.stem)
-    parts = list(rel.parts)
-    parts[-1] = rel.stem  # Remove .ipynb extension
-    encoded = [_nb_id_encode_part(p) for p in parts]
-    return "~".join(encoded) if len(encoded) > 1 else encoded[0]
+    return _shared_nb_id_from_path(path, NOTEBOOKS_DIR)
 
 def _nb_id_to_relpath(notebook_id: str) -> Path:
     """Reverse a notebook ID back to a relative path (without .ipynb extension).
@@ -682,12 +680,7 @@ def _nb_id_to_relpath(notebook_id: str) -> Path:
               'has~~tilde' → Path('has~tilde')
               'a~~b~c' → Path('a~b/c')
     """
-    # Replace ~~ with a placeholder, split on ~, restore placeholder to ~
-    placeholder = "\x00"
-    safe = notebook_id.replace("~~", placeholder)
-    parts = safe.split("~")
-    parts = [p.replace(placeholder, "~") for p in parts]
-    return Path(*parts) if len(parts) > 1 else Path(parts[0])
+    return _shared_nb_id_to_relpath(notebook_id)
 
 def _find_notebook_path(notebook_id: str) -> Optional[Path]:
     """Find a notebook file by ID using direct path reconstruction."""

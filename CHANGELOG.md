@@ -110,6 +110,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add-button, duplicate, and extract-code-block insertions now preserve the current viewport anchor instead of jumping back to the top of the notebook after the structure reconcile
 - Last-cell `Shift+Enter` now preserves the current viewport through the structural add reconcile and only then reveals the new cell with a minimal in-view adjustment, fixing the remaining jump-to-top path when creating the next code cell at the bottom
 
+#### Notebook Identity Consistency
+- Added shared `dialeng/notebook_id.py` helpers so notebook path ↔ notebook-id conversion is defined in one place instead of being reimplemented in multiple layers
+- The file explorer now uses that shared notebook-id encoding when deciding which notebook is active and which notebook has a running kernel, so nested notebooks correctly show their green running state
+
 #### Toolbar Dropdown Clipped by Overflow
 - YT capture button's dropdown panel was invisible because it rendered inside `.toolbar-right` which has `overflow-y: hidden`
 - Fix: panel is now appended to `document.body` with `position: fixed` and positioned via `getBoundingClientRect()`
