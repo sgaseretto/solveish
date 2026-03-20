@@ -459,17 +459,14 @@ function setFocusedCell(cellId) {
     selectCell(cellId);
 }
 
-function focusNextCell(cellId) {
-    // Focus a cell and optionally its editor
+function focusCellWithoutScroll(cellId) {
     setFocusedCell(cellId);
     const cell = document.getElementById(`cell-${cellId}`);
     if (!cell) return;
 
     // Suppress any pending HTMX scroll restore so it doesn't fight us
     _htmxScrollRestore = null;
-
-    // Scroll cell into view - use 'center' so the focused cell is clearly visible
-    cell.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const preserveY = window.scrollY;
 
     // If it's a code or shell cell with Monaco editor, focus the editor
     if (cell.dataset.type === 'code' || cell.dataset.type === 'shell') {
@@ -493,8 +490,23 @@ function focusNextCell(cellId) {
         // so that the previous Monaco editor loses keyboard focus.
         // Without this, Shift+Enter would re-run the previous code cell.
         cell.tabIndex = -1;
-        cell.focus();
+        cell.focus({ preventScroll: true });
     }
+
+    if (window.scrollY !== preserveY) {
+        window.scrollTo(0, preserveY);
+        requestAnimationFrame(() => window.scrollTo(0, preserveY));
+    }
+}
+
+function focusNextCell(cellId) {
+    // Focus a cell and optionally its editor
+    const cell = document.getElementById(`cell-${cellId}`);
+    if (!cell) return;
+
+    // Scroll cell into view - use 'center' so the focused cell is clearly visible
+    cell.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    focusCellWithoutScroll(cellId);
 }
 
 function getFocusedCellId() {
@@ -2825,11 +2837,11 @@ function connectWebSocket(notebookId) {
             if (_pendingScrollToNewCell) {
                 _pendingScrollToNewCell = false;
                 requestAnimationFrame(() => {
-                    focusNextCell(data.cell_id);
-                    // The new cell is at the bottom of the page — scrollIntoView
-                    // with block:'center' can't center it (nothing below to fill
-                    // the viewport). Scroll to page bottom to guarantee visibility.
+                    // This path is specific to "run last cell and create next".
+                    // Use one explicit bottom scroll, then focus the new cell
+                    // without introducing a second competing scroll action.
                     window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
+                    requestAnimationFrame(() => focusCellWithoutScroll(data.cell_id));
                 });
             }
 
