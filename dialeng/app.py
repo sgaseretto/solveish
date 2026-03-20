@@ -1066,6 +1066,46 @@ async def broadcast_all_json(data: dict):
         await broadcast_json(nb_id, data)
 
 
+def _ordered_cell_ids(nb) -> list[str]:
+    """Return the notebook's canonical cell order."""
+    return [cell.id for cell in nb.cells]
+
+
+def _cell_add_payload(nb, nb_id: str, cell_id: str) -> dict:
+    """Build a structural add payload with canonical notebook order."""
+    cell = nb.get_cell(cell_id)
+    idx = nb.get_cell_index(cell_id)
+    if cell is None or idx < 0:
+        raise ValueError(f"Cell {cell_id} not found in notebook {nb_id}")
+    cell_html = to_xml(CellView(cell, nb_id))
+    add_html = to_xml(AddButtons(idx + 1, nb_id))
+    return {
+        "type": "cell_add",
+        "cell_id": cell.id,
+        "pos": idx,
+        "html": cell_html + add_html,
+        "ordered_cell_ids": _ordered_cell_ids(nb),
+    }
+
+
+def _cell_delete_payload(nb, cell_id: str) -> dict:
+    """Build a structural delete payload with canonical notebook order."""
+    return {
+        "type": "cell_delete",
+        "cell_id": cell_id,
+        "ordered_cell_ids": _ordered_cell_ids(nb),
+    }
+
+
+def _cell_move_payload(nb, cell_id: str) -> dict:
+    """Build a structural move payload with canonical notebook order."""
+    return {
+        "type": "cell_move",
+        "cell_id": cell_id,
+        "ordered_cell_ids": _ordered_cell_ids(nb),
+    }
+
+
 async def broadcast_queue_state(nb_id: str):
     """Broadcast current queue state to all clients."""
     status = _get_queue_payload(nb_id)
@@ -2197,22 +2237,13 @@ async def post(nb_id: str, pos: int = -1, type: str = "code"):
     # FOUST fix (FOUST = Flash of Unstyled Text — Monaco renders code white first,
     # then tokenizes async via web worker; destroying/recreating the editor causes a
     # visible flash before syntax highlighting reappears).
-    # Broadcast granular cell_add JSON instead of AllCellsOOB. AllCellsOOB replaced
-    # the entire #cells container, destroying every Monaco editor. cell_add inserts
-    # a single cell via insertAdjacentHTML — existing editors are untouched.
-    # Note: the initiating tab also gets the HTMX response (AllCells). The client
-    # skips cell_add if the cell already exists in DOM to avoid duplicates.
+    # Broadcast a structural cell_add payload instead of replacing #cells. The
+    # browser reconciles its DOM from the backend-authored ordered_cell_ids list,
+    # so add/move/delete all share one structural source of truth.
     new_cell = nb.cells[pos]
-    cell_html = to_xml(CellView(new_cell, nb_id))
-    add_html = to_xml(AddButtons(pos + 1, nb_id))
-    await broadcast_json(nb_id, {
-        "type": "cell_add",
-        "cell_id": new_cell.id,
-        "pos": pos,
-        "html": cell_html + add_html
-    })
+    await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
 
-    return AllCells(nb)
+    return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}")
 async def delete(nb_id: str, cid: str):
@@ -2230,9 +2261,9 @@ async def delete(nb_id: str, cid: str):
     # FOUST fix: broadcast granular cell_delete JSON instead of AllCellsOOB.
     # The client removes just this cell + its adjacent add-row from DOM.
     # Other cells' Monaco editors are completely untouched.
-    await broadcast_json(nb_id, {"type": "cell_delete", "cell_id": cid})
+    await broadcast_json(nb_id, _cell_delete_payload(nb, cid))
 
-    return AllCells(nb)
+    return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/source")
 def post(nb_id: str, cid: str, source: str):
@@ -2290,11 +2321,7 @@ async def post(nb_id: str, cid: str, direction: str):
 
     # Broadcast the backend-authoritative cell order so every client reorders
     # the existing DOM nodes from the same source of truth.
-    await broadcast_json(nb_id, {
-        "type": "cell_move",
-        "cell_id": cid,
-        "ordered_cell_ids": [cell.id for cell in nb.cells],
-    })
+    await broadcast_json(nb_id, _cell_move_payload(nb, cid))
 
     # Move buttons use hx_swap="none"; the browser applies the canonical order
     # from the WebSocket message and keeping the HTTP response empty avoids
@@ -2315,15 +2342,8 @@ async def post(nb_id: str, cid: str):
                 is_exported=c.is_exported,
             )
             nb.cells.insert(i + 1, new_cell)
-            cell_html = to_xml(CellView(new_cell, nb_id))
-            add_html = to_xml(AddButtons(i + 2, nb_id))
-            await broadcast_json(nb_id, {
-                "type": "cell_add",
-                "cell_id": new_cell.id,
-                "pos": i + 1,
-                "html": cell_html + add_html
-            })
-            return AllCells(nb)
+            await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
+            return ""
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/clear-output")
@@ -2348,7 +2368,7 @@ async def post(nb_id: str, cid: str):
             c.clear_outputs()
             # Remove the cell below
             del nb.cells[i + 1]
-            await broadcast_json(nb_id, {"type": "cell_delete", "cell_id": below.id})
+            await broadcast_json(nb_id, _cell_delete_payload(nb, below.id))
             await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
             return CellView(c, nb.id)
     return ""
@@ -2369,15 +2389,8 @@ async def post(nb_id: str, cid: str):
             for j, block in enumerate(blocks):
                 new_cell = Cell(cell_type="code", source=block.strip())
                 nb.cells.insert(i + 1 + j, new_cell)
-                cell_html = to_xml(CellView(new_cell, nb_id))
-                add_html = to_xml(AddButtons(i + 2 + j, nb_id))
-                await broadcast_json(nb_id, {
-                    "type": "cell_add",
-                    "cell_id": new_cell.id,
-                    "pos": i + 1 + j,
-                    "html": cell_html + add_html
-                })
-            return AllCells(nb)
+                await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
+            return ""
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/collapse")
@@ -2745,38 +2758,20 @@ async def post(nb_id: str, cid: str, source: str = None):
     is_last_cell = cell_index == len(nb.cells) - 1
 
     if is_last_cell:
-        # Add a new code cell using OOB swap
+        # Add a new code cell via the structural WebSocket path.
         new_cell = Cell(cell_type="code")
         nb.cells.append(new_cell)
-        new_cell_index = len(nb.cells) - 1
         next_cell_id = new_cell.id
 
-        # FOUST fix: broadcast granular cell_add instead of AllCellsOOB.
-        # IMPORTANT: The HTMX response below ALSO appends the new cell via
-        # hx_swap_oob="beforeend:#cells". Both the WS message and HTMX response
-        # reach the initiating tab. The client's cell_add handler has a duplicate
-        # guard (checks if cell already exists in DOM) to prevent creating two
-        # copies of the same cell — without this guard, the cell appears twice
-        # and the duplicate has no HTMX bindings or Monaco editor, making it
-        # unselectable and uneditable.
-        cell_html = to_xml(CellView(new_cell, nb_id))
-        add_html = to_xml(AddButtons(new_cell_index + 1, nb_id))
-        await broadcast_json(nb_id, {
-            "type": "cell_add",
-            "cell_id": new_cell.id,
-            "pos": new_cell_index,
-            "html": cell_html + add_html
-        })
+        # Keep structural changes single-sourced: the initiating tab and every
+        # collaborator receive the same cell_add payload and reconcile from the
+        # backend-authoritative notebook order.
+        await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
 
-        # Return: updated cell (main) + new cell with AddButtons (OOB appended to #cells)
-        # Use a wrapper div with hx-swap-oob to append the new elements
+        # Return the updated run cell plus a focus handoff. The new cell itself
+        # arrives via WebSocket structure reconciliation.
         return (
             CellView(c, nb.id),  # Main response - replaces the run cell
-            Div(
-                CellView(new_cell, nb.id),
-                AddButtons(new_cell_index + 1, nb.id),
-                hx_swap_oob="beforeend:#cells"  # Append to end of #cells
-            ),
             # Script to focus the next cell after DOM settles
             Script(f"setTimeout(() => focusNextCell('{next_cell_id}'), 50);")
         )
@@ -2999,14 +2994,7 @@ async def post(dlg_name: str, content: str, placement: str = "add_after", id_: s
     # FOUST fix: broadcast granular cell_add JSON instead of AllCellsOOB.
     # This is the dialoghelper version of the add route — same pattern as /cell/add.
     try:
-        cell_html = to_xml(CellView(new_cell, dlg_name))
-        add_html = to_xml(AddButtons(insert_idx + 1, dlg_name))
-        await broadcast_json(dlg_name, {
-            "type": "cell_add",
-            "cell_id": new_cell.id,
-            "pos": insert_idx,
-            "html": cell_html + add_html
-        })
+        await broadcast_json(dlg_name, _cell_add_payload(nb, dlg_name, new_cell.id))
         print(f"[ADD_RELATIVE] Broadcast completed for {dlg_name}", flush=True)
     except Exception as e:
         print(f"[ADD_RELATIVE] Broadcast error: {e}", flush=True)
@@ -3051,7 +3039,7 @@ async def post(dlg_name: str, msid: str, log_changed: str = ""):
             })
         nb.cells.pop(idx)
         # FOUST fix: granular cell_delete instead of AllCellsOOB (dialoghelper route)
-        await broadcast_json(dlg_name, {"type": "cell_delete", "cell_id": msid})
+        await broadcast_json(dlg_name, _cell_delete_payload(nb, msid))
     return {"status": "ok", "id": msid}
 
 def _str_to_bool(val: str) -> bool:
@@ -3325,7 +3313,7 @@ async def post(dlg_name: str, ids: str = "", id_: str = "", cmd: str = "copy"):
     if cmd == "cut":
         # FOUST fix: granular cell_delete per cell instead of AllCellsOOB
         for cid in cell_ids:
-            await broadcast_json(dlg_name, {"type": "cell_delete", "cell_id": cid})
+            await broadcast_json(dlg_name, _cell_delete_payload(nb, cid))
 
     return result
 
@@ -3340,14 +3328,7 @@ async def post(dlg_name: str, id_: str = "", after: str = "True"):
         for new_id in new_ids:
             for idx, c in enumerate(nb.cells):
                 if c.id == new_id:
-                    cell_html = to_xml(CellView(c, dlg_name))
-                    add_html = to_xml(AddButtons(idx + 1, dlg_name))
-                    await broadcast_json(dlg_name, {
-                        "type": "cell_add",
-                        "cell_id": new_id,
-                        "pos": idx,
-                        "html": cell_html + add_html
-                    })
+                    await broadcast_json(dlg_name, _cell_add_payload(nb, dlg_name, new_id))
                     break
 
     return {"status": "ok", "ids": new_ids}

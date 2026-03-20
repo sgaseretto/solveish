@@ -321,10 +321,7 @@ function initMonacoEditor(cellId, mode = 'python') {
                 const idx = cells.indexOf(cell);
                 const pos = idx >= 0 ? idx + 1 : cells.length;
                 _pendingScrollToNewCell = true;
-                fetch(`${nbApiPath()}/cell/add?pos=${pos}&type=code`, {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/x-www-form-urlencoded'}
-                });
+                requestCellAdd('code', pos);
             }
         }
     });
@@ -542,10 +539,7 @@ function createNewCellAtEnd() {
     // container, destroying all Monaco editors and causing race conditions.
     // Instead, the server broadcasts a cell_add WS message, and the WS
     // handler inserts just the new cell (existing editors untouched).
-    fetch(`${nbApiPath()}/cell/add?pos=${position}&type=code`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-    });
+    requestCellAdd('code', position);
     // The WS cell_add handler will insert the cell and scroll to it
     // when it sees _pendingScrollToNewCell is true.
 }
@@ -559,11 +553,114 @@ function addCellAtRow(btn, nbId, cellType) {
     const pos = Array.from(allAddRows).indexOf(addRow);
     if (pos < 0) return;
 
-    fetch(`${nbApiPath()}/cell/add?pos=${pos}&type=${cellType}`, {
+    requestCellAdd(cellType, pos);
+    // The WS cell_add handler will insert the cell into the DOM.
+}
+
+function requestCellAdd(cellType, pos = null) {
+    const params = new URLSearchParams({ type: cellType });
+    if (Number.isInteger(pos)) {
+        params.set('pos', String(pos));
+    }
+    return fetch(`${nbApiPath()}/cell/add?${params.toString()}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
     });
-    // The WS cell_add handler will insert the cell into the DOM.
+}
+
+function snapshotCellStructure(cellsRoot) {
+    if (!cellsRoot) return null;
+    const children = Array.from(cellsRoot.children);
+    const leadingAddRow = children[0];
+    if (!leadingAddRow || !leadingAddRow.classList.contains('add-row')) {
+        return null;
+    }
+
+    const cellUnits = new Map();
+    for (let i = 1; i < children.length; i += 1) {
+        const child = children[i];
+        if (!child.classList.contains('cell')) continue;
+        const addRowAfter = children[i + 1];
+        cellUnits.set(child.id.replace('cell-', ''), {
+            cellEl: child,
+            addRowEl: addRowAfter && addRowAfter.classList.contains('add-row') ? addRowAfter : null,
+        });
+    }
+
+    return { leadingAddRow, cellUnits };
+}
+
+function buildCellUnitFromHtml(cellId, html) {
+    if (!html) return null;
+    const template = document.createElement('template');
+    template.innerHTML = html.trim();
+    const children = Array.from(template.content.children);
+    const cellEl = template.content.querySelector(`#cell-${cellId}`) || children.find(node => node.classList?.contains('cell'));
+    const addRowEl = children.find(node => node.classList?.contains('add-row')) || template.content.querySelector('.add-row');
+    if (!cellEl || !addRowEl) {
+        return null;
+    }
+    return { cellEl, addRowEl };
+}
+
+function reconcileCellStructure({ orderedIds, insertedCells = [], preserveViewportCellId = null } = {}) {
+    if (!Array.isArray(orderedIds) || !orderedIds.length) {
+        return false;
+    }
+
+    const cellsRoot = document.getElementById('cells');
+    const structure = snapshotCellStructure(cellsRoot);
+    if (!cellsRoot || !structure) {
+        return false;
+    }
+
+    const viewportCell = preserveViewportCellId ? document.getElementById(`cell-${preserveViewportCellId}`) : null;
+    const viewportTop = viewportCell ? viewportCell.getBoundingClientRect().top : null;
+    const { leadingAddRow, cellUnits } = structure;
+
+    insertedCells.forEach(({ cellId, html }) => {
+        if (!cellUnits.has(cellId)) {
+            const unit = buildCellUnitFromHtml(cellId, html);
+            if (unit) cellUnits.set(cellId, unit);
+        }
+    });
+
+    if (orderedIds.some(cellId => !cellUnits.has(cellId) || !cellUnits.get(cellId).addRowEl)) {
+        console.warn('[cells] Unable to reconcile notebook structure; refreshing notebook view');
+        window.location.reload();
+        return false;
+    }
+
+    const fragment = document.createDocumentFragment();
+    fragment.appendChild(leadingAddRow);
+    orderedIds.forEach(cellId => {
+        const unit = cellUnits.get(cellId);
+        fragment.appendChild(unit.cellEl);
+        fragment.appendChild(unit.addRowEl);
+    });
+    cellsRoot.replaceChildren(fragment);
+
+    insertedCells.forEach(({ cellId }) => {
+        const newCell = document.getElementById(`cell-${cellId}`);
+        if (!newCell) return;
+        htmx.process(newCell);
+        initCell(cellId);
+        const newAddRow = newCell.nextElementSibling;
+        if (newAddRow && newAddRow.classList.contains('add-row')) {
+            htmx.process(newAddRow);
+        }
+        renderCellPreviews(cellId);
+    });
+
+    if (preserveViewportCellId && viewportTop !== null) {
+        requestAnimationFrame(() => {
+            const liveCell = document.getElementById(`cell-${preserveViewportCellId}`);
+            if (!liveCell) return;
+            window.scrollBy(0, liveCell.getBoundingClientRect().top - viewportTop);
+        });
+    }
+
+    return true;
 }
 
 // ==================== Keyboard Shortcuts ====================
@@ -867,15 +964,15 @@ document.addEventListener('keydown', e => {
     if (!inInput && !inMonaco) {
         if (mod && e.shiftKey && e.key === 'C') {
             e.preventDefault();
-            htmx.ajax('POST', nbApiPath() + '/cell/add?type=code', {target: '#cells'});
+            requestCellAdd('code');
         }
         if (mod && e.shiftKey && e.key === 'N') {
             e.preventDefault();
-            htmx.ajax('POST', nbApiPath() + '/cell/add?type=note', {target: '#cells'});
+            requestCellAdd('note');
         }
         if (mod && e.shiftKey && e.key === 'P') {
             e.preventDefault();
-            htmx.ajax('POST', nbApiPath() + '/cell/add?type=prompt', {target: '#cells'});
+            requestCellAdd('prompt');
         }
     }
 
@@ -951,10 +1048,7 @@ document.addEventListener('keydown', e => {
             const cells = getOrderedCells();
             const idx = cells.findIndex(c => c.id === `cell-${currentCellId}`);
             const pos = idx >= 0 ? idx : 0;
-            fetch(`${nbApiPath()}/cell/add?pos=${pos}&type=code`, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/x-www-form-urlencoded'}
-            });
+            requestCellAdd('code', pos);
         }
         // b - Add cell below current
         if (e.key === 'b' && !e.shiftKey && currentCellId) {
@@ -962,10 +1056,7 @@ document.addEventListener('keydown', e => {
             const cells = getOrderedCells();
             const idx = cells.findIndex(c => c.id === `cell-${currentCellId}`);
             const pos = idx >= 0 ? idx + 1 : cells.length;
-            fetch(`${nbApiPath()}/cell/add?pos=${pos}&type=code`, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/x-www-form-urlencoded'}
-            });
+            requestCellAdd('code', pos);
         }
         // w - Extract fenced code blocks from prompt/note output
         if (e.key === 'w' && currentCellId) {
@@ -1131,10 +1222,7 @@ document.addEventListener('keydown', e => {
             const idx = cells.findIndex(c => c.id === `cell-${currentCellId}`);
             const pos = idx >= 0 ? idx + 1 : cells.length;
             _pendingScrollToNewCell = true;
-            fetch(`${nbApiPath()}/cell/add?pos=${pos}&type=code`, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/x-www-form-urlencoded'}
-            });
+            requestCellAdd('code', pos);
         }
     }
 });
@@ -1200,10 +1288,7 @@ async function _clipboardPaste() {
         const item = cellClipboard[i];
         const pos = basePos + i;
         // Create cell
-        const resp = await fetch(`${nbApiPath()}/cell/add?pos=${pos}&type=${item.type}`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/x-www-form-urlencoded'}
-        });
+        await requestCellAdd(item.type, pos);
         // Wait a bit for the WS cell_add to insert the cell
         await new Promise(r => setTimeout(r, 100));
         // Find the newly added cell and set its source
@@ -1753,11 +1838,9 @@ function initCell(cellId) {
 // does a full replacement for that tab's local state. The WS broadcasts use
 // granular messages so OTHER tabs (collaborators) don't see FOUST.
 //
-// Several operations still use HTMX outerHTML as the local response:
-//   - Adding a cell (+ Code / + Note / + Prompt buttons, or via dialoghelper)
-//   - Deleting a cell
-//   - Moving a cell up/down
-//   - Cell execution completion (OOB swap from WebSocket)
+// Structural operations (add/delete/move) now reconcile entirely from the
+// backend-authored WebSocket payloads. The remaining HTMX-driven DOM swaps are
+// cell-local operations such as type changes or execution-completion OOB swaps.
 //
 // When #cells is replaced, ALL Monaco editors inside are destroyed and
 // recreated. This causes two problems:
@@ -2612,15 +2695,12 @@ function connectWebSocket(notebookId) {
 
         } else if (data.type === 'cell_delete') {
             // Granular cell removal: delete one cell + adjacent add-row.
-            // Previously used AllCellsOOB (replaced entire #cells → FOUST on ALL cells).
-            // DOM structure: .add-row, #cell-A, .add-row, #cell-B, .add-row
             const cellEl = document.getElementById(`cell-${data.cell_id}`);
-            if (!cellEl) return; // Already deleted (e.g., HTMX response processed first)
 
             // Find neighbor to focus BEFORE removing the cell from DOM.
             // Prefer the next cell below; if this was the last cell, use the one above.
             let focusTarget = null;
-            if (focusedCellId === data.cell_id) {
+            if (cellEl && focusedCellId === data.cell_id) {
                 let sibling = cellEl.nextElementSibling;
                 while (sibling) {
                     if (sibling.classList.contains('cell')) { focusTarget = sibling.id.replace('cell-', ''); break; }
@@ -2635,15 +2715,13 @@ function connectWebSocket(notebookId) {
                 }
             }
 
-            const next = cellEl.nextElementSibling;
-            const prev = cellEl.previousElementSibling;
-            if (next && next.classList.contains('add-row')) next.remove();
-            else if (prev && prev.classList.contains('add-row')) prev.remove();
             if (monacoEditors[data.cell_id]) {
                 monacoEditors[data.cell_id].dispose();
                 delete monacoEditors[data.cell_id];
             }
-            cellEl.remove();
+            if (!reconcileCellStructure({ orderedIds: data.ordered_cell_ids || [] })) {
+                return;
+            }
 
             // Focus the neighbor cell in "command mode" (selected but not editing)
             // so the user can keep pressing DD to delete more cells.
@@ -2659,96 +2737,36 @@ function connectWebSocket(notebookId) {
 
         } else if (data.type === 'cell_move') {
             // Reorder cells from the backend-authoritative notebook order.
-            // We snapshot the current cell/add-row pairs first, then rebuild
-            // #cells from that immutable snapshot. This avoids duplicate or
-            // misplaced add-rows when the live DOM is mutated mid-reorder.
-            const orderedIds = Array.isArray(data.ordered_cell_ids) ? data.ordered_cell_ids : [];
-            const cellsRoot = document.getElementById('cells');
-            const movingCell = data.cell_id ? document.getElementById(`cell-${data.cell_id}`) : null;
-            const movingTop = movingCell ? movingCell.getBoundingClientRect().top : null;
-            const children = cellsRoot ? Array.from(cellsRoot.children) : [];
-            const leadingAddRow = children[0];
-            if (!cellsRoot || !leadingAddRow || !leadingAddRow.classList.contains('add-row') || !orderedIds.length) {
+            if (!reconcileCellStructure({
+                orderedIds: data.ordered_cell_ids || [],
+                preserveViewportCellId: data.cell_id,
+            })) {
                 return;
             }
-
-            const cellUnits = new Map();
-            for (let i = 1; i < children.length; i += 1) {
-                const child = children[i];
-                if (!child.classList.contains('cell')) continue;
-                const addRowAfter = children[i + 1];
-                cellUnits.set(child.id.replace('cell-', ''), {
-                    cellEl: child,
-                    addRowEl: addRowAfter && addRowAfter.classList.contains('add-row') ? addRowAfter : null,
-                });
-            }
-
-            if (cellUnits.size !== orderedIds.length || orderedIds.some(cellId => !cellUnits.has(cellId))) {
-                console.warn('[cells] Unable to apply backend cell order cleanly; refreshing notebook view');
-                window.location.reload();
-                return;
-            }
-
-            const fragment = document.createDocumentFragment();
-            fragment.appendChild(leadingAddRow);
-            orderedIds.forEach(cellId => {
-                const unit = cellUnits.get(cellId);
-                if (!unit) return;
-                fragment.appendChild(unit.cellEl);
-                if (unit.addRowEl) {
-                    fragment.appendChild(unit.addRowEl);
-                }
-            });
-            cellsRoot.replaceChildren(fragment);
-
-            if (movingCell) {
+            if (data.cell_id) {
                 setFocusedCell(data.cell_id);
-            }
-            if (movingCell && movingTop !== null) {
-                requestAnimationFrame(() => {
-                    const newTop = movingCell.getBoundingClientRect().top;
-                    window.scrollBy(0, newTop - movingTop);
-                });
             }
 
         } else if (data.type === 'cell_add') {
             // Granular cell insertion: add one cell + add-row at a position.
-            // Previously used AllCellsOOB (replaced entire #cells → FOUST on ALL cells).
-            //
-            // DUPLICATE GUARD: The initiating tab receives BOTH the HTMX response
-            // (which may include OOB content adding this cell) AND this WS message.
-            // Without this check, the cell appears twice — the duplicate has no HTMX
-            // bindings or Monaco editor, making it unselectable and uneditable.
-            if (document.getElementById(`cell-${data.cell_id}`)) return;
-            const cells = document.getElementById('cells');
-            if (!cells) return;
-            const addRows = cells.querySelectorAll('.add-row');
-            const target = addRows[data.pos];
-            if (target) {
-                target.insertAdjacentHTML('afterend', data.html);
-                const newCell = document.getElementById(`cell-${data.cell_id}`);
-                if (newCell) {
-                    htmx.process(newCell); // Enable hx-post/hx-get on new elements
-                    initCell(data.cell_id); // Initialize Monaco editor + event listeners
-                    const newAddRow = newCell.nextElementSibling;
-                    if (newAddRow && newAddRow.classList.contains('add-row')) {
-                        htmx.process(newAddRow);
-                    }
-                }
-                renderCellPreviews(data.cell_id); // Render markdown if note cell
+            if (!reconcileCellStructure({
+                orderedIds: data.ordered_cell_ids || [],
+                insertedCells: [{ cellId: data.cell_id, html: data.html }],
+            })) {
+                return;
+            }
 
-                // If Shift+Enter created this cell, scroll to it now that it's
-                // in the DOM with its Monaco editor fully initialized.
-                if (_pendingScrollToNewCell) {
-                    _pendingScrollToNewCell = false;
-                    requestAnimationFrame(() => {
-                        focusNextCell(data.cell_id);
-                        // The new cell is at the bottom of the page — scrollIntoView
-                        // with block:'center' can't center it (nothing below to fill
-                        // the viewport). Scroll to page bottom to guarantee visibility.
-                        window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
-                    });
-                }
+            // If Shift+Enter created this cell, scroll to it now that it's
+            // in the DOM with its Monaco editor fully initialized.
+            if (_pendingScrollToNewCell) {
+                _pendingScrollToNewCell = false;
+                requestAnimationFrame(() => {
+                    focusNextCell(data.cell_id);
+                    // The new cell is at the bottom of the page — scrollIntoView
+                    // with block:'center' can't center it (nothing below to fill
+                    // the viewport). Scroll to page bottom to guarantee visibility.
+                    window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
+                });
             }
 
         // Extension system: page refresh after hot-reload

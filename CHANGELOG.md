@@ -101,10 +101,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Ctrl+C` in the terminal is now the supported clean-exit path for Dialeng, and Colab kernels should release their Jupyter sessions and runtime assignments during that shutdown instead of being left active
 - `KernelService` now has async `shutdown_all_async()` support, and Colab kernel removal also clears the `ColabSessionManager` cache so later reconnects do not reuse a stale shutdown kernel object
 
-#### Cell Reordering Consistency
+#### Cell Structure Consistency
 - Cell move broadcasts now send the backend-authoritative notebook order instead of only an `up`/`down` direction
 - The browser now reorders existing cell DOM nodes from that canonical order, which fixes prompt cells with generated output getting stuck when moved down and fixes neighboring cells being unable to cross back above them
 - Cell move requests now return an empty HTMX response, and the browser rebuilds `#cells` from a stable snapshot of existing cell/add-row pairs, preventing duplicate add-row controls, move-induced scroll wiggles, and broken follow-up reordering after prompt-cell moves
+- Cell add/delete broadcasts now also carry `ordered_cell_ids`, and the browser reconciles add/delete/move through the same structure-sync path instead of three separate DOM heuristics
+- Keyboard add shortcuts no longer use a local HTMX `#cells` swap; they now use the same WebSocket-backed add flow as button clicks and prompt/code auto-insertions
 
 #### Toolbar Dropdown Clipped by Overflow
 - YT capture button's dropdown panel was invisible because it rendered inside `.toolbar-right` which has `overflow-y: hidden`

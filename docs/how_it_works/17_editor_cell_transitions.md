@@ -61,9 +61,9 @@ stateDiagram-v2
 | Source edit (dialoghelper) | `msg_str_replace_`, etc. | JSON `cell_source_update` | **Preserved** (setValue) |
 | State toggle | Toggle button | `CellHeaderOOB` + JSON `cell_class_update` | **Preserved** |
 | Collapse toggle | Collapse button | JSON `cell_collapse_update` | **Preserved** |
-| Cell added | + Code button, `add_msg()` | JSON `cell_add` | **Preserved** (other cells) |
-| Cell deleted | Delete button, `D D` | JSON `cell_delete` | **Preserved** (other cells) |
-| Cell moved | Arrow buttons, `Alt+↑/↓` | JSON `cell_move` | **Preserved** (backend-authoritative reorder) |
+| Cell added | + Code button, `add_msg()`, `a`/`b` | JSON `cell_add` | **Preserved** (structure reconcile) |
+| Cell deleted | Delete button, `D D`, cut | JSON `cell_delete` | **Preserved** (structure reconcile) |
+| Cell moved | Arrow buttons, `Alt+↑/↓` | JSON `cell_move` | **Preserved** (structure reconcile) |
 | Cell type changed | Type dropdown | `CellViewOOB` | Destroyed & recreated |
 
 ## How Monaco Editors Are Managed
@@ -273,7 +273,7 @@ Collapse toggling sends a `cell_collapse_update` JSON message. The client-side `
 
 ### Cell Delete
 
-Deletion sends a `cell_delete` JSON message. The client removes the cell element and one adjacent `.add-row`, and disposes the Monaco editor.
+Deletion sends a `cell_delete` JSON message with the updated `ordered_cell_ids`. The client disposes the deleted cell's Monaco editor, then reconciles the full cell/add-row structure from the backend order instead of heuristically removing one nearby `.add-row`.
 
 ### Cell Move
 
@@ -296,7 +296,25 @@ flowchart LR
 
 ### Cell Add
 
-Addition sends a `cell_add` JSON message with pre-rendered HTML. The client uses `insertAdjacentHTML` to insert the new cell and add-row after the correct position, then calls `htmx.process()` and `initCell()` on the new element.
+Addition sends a `cell_add` JSON message with both `ordered_cell_ids` and the rendered HTML for the newly inserted cell. The client folds that new cell into the same structure-reconciliation pass used by delete/move, then initializes HTMX bindings and Monaco only for the inserted cell.
+
+### Structural Invariant
+
+Add, delete, and move now share one invariant:
+
+- the backend notebook list is the sole source of truth for cell order
+- structural WebSocket messages always carry `ordered_cell_ids`
+- the browser reconciles the entire `#cells` structure from a stable snapshot of existing cells plus any newly provided cell HTML
+- structural HTTP responses are empty, so the initiating tab does not mix HTMX swaps with WebSocket structure updates
+
+```mermaid
+flowchart LR
+    A["Backend notebook state"] --> B["ordered_cell_ids payload"]
+    B --> C["Browser snapshot existing cell units"]
+    C --> D["Merge inserted cell HTML if needed"]
+    D --> E["replaceChildren(fragment)"]
+    E --> F["Editors preserved for untouched cells"]
+```
 
 ### Prompt Cell Completion
 
