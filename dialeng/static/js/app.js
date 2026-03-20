@@ -690,13 +690,17 @@ function reconcileCellStructure({
         renderCellPreviews(cellId);
     });
 
+    const restoreViewportAnchor = () => {
+        const liveCell = document.getElementById(`cell-${preserveViewportCellId}`);
+        if (!liveCell) return;
+        window.scrollBy(0, liveCell.getBoundingClientRect().top - viewportTop);
+    };
+
     if (preserveViewportCellId && viewportTop !== null) {
-        requestAnimationFrame(() => {
-            const liveCell = document.getElementById(`cell-${preserveViewportCellId}`);
-            if (!liveCell) return;
-            window.scrollBy(0, liveCell.getBoundingClientRect().top - viewportTop);
-        });
+        restoreViewportAnchor();
+        requestAnimationFrame(restoreViewportAnchor);
     } else if (preserveScrollY !== null) {
+        window.scrollTo(0, preserveScrollY);
         requestAnimationFrame(() => window.scrollTo(0, preserveScrollY));
     }
 
