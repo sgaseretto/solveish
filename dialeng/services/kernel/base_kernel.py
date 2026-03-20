@@ -6,6 +6,7 @@ Both SubprocessKernel (local) and ColabKernel (remote) inherit from this.
 from abc import ABC, abstractmethod
 from typing import AsyncIterator, Optional
 from dataclasses import dataclass, field
+import time
 
 from dialeng.document.cell import CellOutput
 
@@ -104,3 +105,83 @@ class BaseKernel(ABC):
     async def complete(self, code: str, timeout: float = 3.0) -> list[str]:
         """Get code completions for code text up to cursor position."""
         return []
+
+    def set_client_count(self, count: int) -> None:
+        """Track active UI clients attached to this kernel."""
+        self._client_count = max(0, count)
+
+    @property
+    def client_count(self) -> int:
+        """Number of active UI clients attached to this kernel."""
+        return getattr(self, "_client_count", 0)
+
+    def mark_activity(self, reason: str = "") -> None:
+        """Record kernel activity for keep-alive and debugging decisions."""
+        self._last_activity_at = time.time()
+        self._last_activity_reason = reason
+
+    @property
+    def last_activity_at(self) -> float:
+        """Unix timestamp of the last observed kernel activity."""
+        return getattr(self, "_last_activity_at", 0.0)
+
+    @property
+    def last_activity_reason(self) -> str:
+        """Short label for the last observed kernel activity."""
+        return getattr(self, "_last_activity_reason", "")
+
+    async def run_setup_code(
+        self,
+        code: str,
+        *,
+        notebook_id: str = "",
+        cell_id: str = "",
+        description: str = "",
+    ) -> list[CellOutput]:
+        """Execute hidden setup code against the kernel and collect outputs."""
+        self.mark_activity(f"setup:{description}" if description else "setup")
+        outputs = []
+        async for output in self.execute_streaming(code, notebook_id=notebook_id, cell_id=cell_id):
+            outputs.append(output)
+        return outputs
+
+    async def ensure_project_path(
+        self,
+        project_root: str,
+        *,
+        notebook_id: str = "",
+        remote_root: str = ".",
+    ) -> dict:
+        """Ensure the project root is importable inside the kernel."""
+        setup_code = (
+            f"import sys; "
+            f"sys.path.insert(0, {project_root!r}) if {project_root!r} not in sys.path else None"
+        )
+        await self.run_setup_code(
+            setup_code,
+            notebook_id=notebook_id,
+            cell_id="_kernel_project_path",
+            description="ensure_project_path",
+        )
+        return {
+            "status": "ok",
+            "project_root": project_root,
+            "remote_root": remote_root,
+        }
+
+    async def sync_project_files(
+        self,
+        files: list[tuple[str, str]],
+        *,
+        notebook_id: str = "",
+        remote_root: str = ".",
+    ) -> dict:
+        """Sync project files into the kernel environment when needed."""
+        total_bytes = sum(len(content.encode("utf-8")) for _, content in files)
+        return {
+            "status": "noop",
+            "remote_root": remote_root,
+            "file_count": len(files),
+            "total_bytes": total_bytes,
+            "reason": "kernel uses workspace files directly",
+        }

@@ -153,6 +153,12 @@ This means `from my_pkg.helpers import ...` works identically on local and Colab
 
 The upload path is now serialized with other kernel work. If a save happens while the Colab kernel is still attaching or executing notebook setup, Dialeng queues the upload behind that work instead of racing the same Jupyter WebSocket. The notebook status dot and kernel snapshot will show the temporary setup/sync state while that happens.
 
+Dialeng now routes this through the kernel abstraction:
+- `ensure_project_path(...)` prepares imports for any kernel backend
+- `sync_project_files(...)` uploads exported modules only when the backend needs it
+
+For Colab, the server logs now include the runtime id, exported file count, total bytes, sample paths, and phase durations for both LIB sync and CRAFT execution. That makes it much easier to confirm that the exported package actually reached the remote VM.
+
 ### Example notebook
 
 ```python

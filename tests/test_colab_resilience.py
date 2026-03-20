@@ -141,6 +141,63 @@ def test_colab_kernel_degraded_connection_counts_as_alive():
     assert kernel.get_status().connection_state == "degraded"
 
 
+def test_colab_kernel_keep_alive_is_activity_aware():
+    from dialeng.services.colab.colab_kernel import ColabKernel, KEEP_ALIVE_ACTIVITY_GRACE
+
+    kernel = ColabKernel(api_client=SimpleNamespace())
+    kernel._assignment = SimpleNamespace(endpoint="runtime-1")
+    kernel._is_busy = False
+    kernel.set_client_count(0)
+    kernel._last_activity_at = time.time() - (KEEP_ALIVE_ACTIVITY_GRACE + 30)
+
+    assert kernel._should_keep_alive() is False
+
+    kernel.set_client_count(1)
+    assert kernel._should_keep_alive() is True
+
+    kernel.set_client_count(0)
+    kernel.mark_activity("test")
+    assert kernel._should_keep_alive() is True
+
+
+def test_colab_kernel_defers_recycle_while_busy():
+    from dialeng.services.colab.colab_kernel import ColabKernel, FAILURE_RECYCLE_THRESHOLD
+
+    kernel = ColabKernel(api_client=SimpleNamespace())
+    kernel._assignment = SimpleNamespace(endpoint="runtime-1")
+    kernel._is_busy = True
+
+    kernel._request_connection_recycle("keep_alive", FAILURE_RECYCLE_THRESHOLD)
+
+    assert kernel.connection_state == "degraded"
+    assert kernel._recycle_reason == "keep_alive"
+    assert kernel._recovery_task is None
+
+
+def test_colab_kernel_recycles_idle_connection():
+    from dialeng.services.colab.colab_kernel import ColabKernel, FAILURE_RECYCLE_THRESHOLD
+
+    kernel = ColabKernel(api_client=SimpleNamespace())
+    kernel._assignment = SimpleNamespace(endpoint="runtime-1")
+    calls = []
+
+    async def _fake_close_runtime_resources(*, cancel_background_tasks: bool):
+        calls.append(cancel_background_tasks)
+        kernel._assignment = None
+
+    kernel._close_runtime_resources = _fake_close_runtime_resources
+
+    async def _run():
+        kernel._request_connection_recycle("keep_alive", FAILURE_RECYCLE_THRESHOLD)
+        await kernel._recovery_task
+
+    asyncio.run(_run())
+
+    assert calls == [True]
+    assert kernel._recovery_task is None
+    assert kernel._recycle_reason == ""
+
+
 def test_normalize_cell_outputs_merges_display_updates_and_wait_clear():
     outputs = [
         CellOutput(
@@ -320,3 +377,37 @@ def test_kernel_service_treats_formatter_only_error_with_rich_output_as_success(
 
     assert any(output.output_type == "error" for output in outputs)
     assert cell.state == "success"
+
+
+def test_kernel_service_applies_cached_client_count_to_kernel_instances():
+    service = KernelService()
+    service.set_client_count("nb", 3)
+    kernel = _SerialFakeKernel()
+
+    service.set_kernel_instance("nb", kernel)
+
+    assert kernel.client_count == 3
+
+
+def test_kernel_service_shutdown_async_prefers_async_kernel_shutdown():
+    class _AsyncShutdownKernel(_SerialFakeKernel):
+        def __init__(self):
+            super().__init__()
+            self.sync_shutdown_called = False
+            self.async_shutdown_called = False
+
+        def shutdown(self):
+            self.sync_shutdown_called = True
+
+        async def shutdown_async(self):
+            self.async_shutdown_called = True
+
+    service = KernelService()
+    kernel = _AsyncShutdownKernel()
+    service.set_kernel_instance("nb", kernel)
+
+    asyncio.run(service.shutdown_async("nb"))
+
+    assert kernel.async_shutdown_called is True
+    assert kernel.sync_shutdown_called is False
+    assert service.has_kernel("nb") is False

@@ -42,6 +42,7 @@ class KernelService:
         self._lazy_start = lazy_start
         self._colab_session_manager = None
         self._execution_locks: Dict[str, asyncio.Lock] = {}
+        self._client_counts: Dict[str, int] = {}
 
     def set_colab_session_manager(self, manager):
         """Inject the Colab session manager for remote kernel support."""
@@ -78,6 +79,7 @@ class KernelService:
                 self._kernels[notebook_id] = SubprocessKernel(
                     start_immediately=self._lazy_start
                 )
+            self._kernels[notebook_id].set_client_count(self._client_counts.get(notebook_id, 0))
         return self._kernels[notebook_id]
 
     def _get_execution_lock(self, notebook_id: str) -> asyncio.Lock:
@@ -118,6 +120,7 @@ class KernelService:
     def set_kernel_instance(self, notebook_id: str, kernel: BaseKernel) -> None:
         """Replace the kernel object for a notebook without touching the lock."""
         self._kernels[notebook_id] = kernel
+        kernel.set_client_count(self._client_counts.get(notebook_id, 0))
 
     def get_kernel_type(self, notebook_id: str) -> str:
         """Get the kernel type for a notebook."""
@@ -140,6 +143,12 @@ class KernelService:
         if notebook_id not in self._kernels:
             return False
         return self._kernels[notebook_id].is_busy
+
+    def set_client_count(self, notebook_id: str, count: int) -> None:
+        """Propagate active UI client count to the kernel, if it exists."""
+        self._client_counts[notebook_id] = max(0, count)
+        if notebook_id in self._kernels:
+            self._kernels[notebook_id].set_client_count(count)
 
     async def execute_cell(
         self,
@@ -239,6 +248,40 @@ class KernelService:
                 if cell.state == CellState.RUNNING:  # Wasn't interrupted
                     cell.state = CellState.ERROR if has_error else CellState.SUCCESS
 
+    async def ensure_project_path(
+        self,
+        notebook_id: str,
+        project_root: str,
+        *,
+        remote_root: str = ".",
+    ) -> dict:
+        """Ensure the project root is importable within the notebook kernel."""
+        lock = self._get_execution_lock(notebook_id)
+        async with lock:
+            kernel = self.get_kernel(notebook_id)
+            return await kernel.ensure_project_path(
+                project_root,
+                notebook_id=notebook_id,
+                remote_root=remote_root,
+            )
+
+    async def sync_project_files(
+        self,
+        notebook_id: str,
+        files: list[tuple[str, str]],
+        *,
+        remote_root: str = ".",
+    ) -> dict:
+        """Sync project files into the notebook kernel using the backend contract."""
+        lock = self._get_execution_lock(notebook_id)
+        async with lock:
+            kernel = self.get_kernel(notebook_id)
+            return await kernel.sync_project_files(
+                files,
+                notebook_id=notebook_id,
+                remote_root=remote_root,
+            )
+
     def interrupt(self, notebook_id: str) -> bool:
         """
         Interrupt the kernel for a notebook.
@@ -306,6 +349,18 @@ class KernelService:
             self._kernels[notebook_id].shutdown()
             del self._kernels[notebook_id]
         self._execution_locks.pop(notebook_id, None)
+        self._client_counts.pop(notebook_id, None)
+
+    async def shutdown_async(self, notebook_id: str) -> None:
+        """Async-safe kernel shutdown for route handlers and teardown paths."""
+        if notebook_id in self._kernels:
+            kernel = self._kernels.pop(notebook_id)
+            if hasattr(kernel, "shutdown_async"):
+                await kernel.shutdown_async()
+            else:
+                kernel.shutdown()
+        self._execution_locks.pop(notebook_id, None)
+        self._client_counts.pop(notebook_id, None)
 
     def shutdown_all(self):
         """Shutdown all kernels."""

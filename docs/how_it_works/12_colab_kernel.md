@@ -83,6 +83,10 @@ classDiagram
         +get_status() KernelStatus
         +get_info() KernelInfo
         +get_namespace_info() dict
+        +ensure_project_path(project_root, remote_root) dict
+        +sync_project_files(files, remote_root) dict
+        +set_client_count(count) void
+        +mark_activity(reason) void
     }
 
     class SubprocessKernel {
@@ -244,8 +248,8 @@ sequenceDiagram
 3. **Connect WebSocket** — Open `wss://<proxy>/api/kernels/<kernel_id>/channels?session_id=<session>` with proxy token in headers.
 4. **Kernel readiness handshake** — Send `kernel_info_request`, wait for `kernel_info_reply` (30s timeout).
 5. **Initialize kernel** — Multi-step silent init: `%matplotlib inline`, `pip install dialoghelper`, and dialoghelper proxy setup. Init now waits for `status: idle`, not just `execute_reply`, so Colab's multiplexed socket cannot report a step complete before late IOPub traffic arrives.
-6. **Start background tasks** — Keep-alive pings (5 min) and proxy token refresh (before expiry).
-7. **Track runtime health** — repeated keep-alive or proxy-refresh failures mark the connection as `degraded`, and runtime replacement is logged explicitly instead of being silently hidden from the UI.
+6. **Start background tasks** — Keep-alive pings (5 min) and proxy token refresh (before expiry). Keep-alive is activity-aware: busy kernels, notebooks with live browser clients, and recently active notebooks stay warm; long-idle kernels stop spending keep-alive quota.
+7. **Track runtime health** — repeated keep-alive or proxy-refresh failures first mark the connection as `degraded`, then trigger a connection recycle so the next execute reconnects against a clean Colab assignment. Runtime replacement is logged explicitly instead of being silently hidden from the UI.
 
 Dialeng no longer unassigns every active Colab runtime before attaching a notebook. That old behavior could tear down unrelated Colab sessions on the same Google account. Runtime cleanup is now limited to the notebook/kernel being shut down or restarted.
 
@@ -440,7 +444,7 @@ Kernel attachment is only the first stage of getting a notebook ready. Dialeng a
 - upload exported modules to the Colab VM
 - execute pending CRAFT code cells
 
-Those notebook-level steps now run through one tracked setup runner and one backend snapshot that the browser receives over WebSocket and polls over HTTP.
+Those notebook-level steps now run through one tracked setup runner, one per-notebook execution lock, and one backend snapshot that the browser receives over WebSocket and polls over HTTP.
 
 ```mermaid
 sequenceDiagram
@@ -451,12 +455,37 @@ sequenceDiagram
 
     UI->>App: Apply kernel selection
     App->>CK: assign_and_connect()
+    App->>App: capture kernel generation
     App->>App: set kernel_setup_state = inject_lib/upload_lib/craft
-    App->>KS: execute_cell(_lib_syspath_setup)
-    App->>KS: execute_cell(_lib_colab_upload)
+    App->>KS: ensure_project_path(project_root, remote_root=".")
+    App->>KS: sync_project_files(exported .py files, remote_root=".")
     App->>KS: execute_cell(CRAFT code cells...)
     App-->>UI: kernel_snapshot {kernel, queue, setup, auth}
     UI->>UI: Dot/status derived from snapshot, not from client timeouts
+```
+
+### Setup Contract
+
+`KernelService` now exposes notebook-setup primitives through the kernel abstraction instead of hardcoding Colab upload behavior in `app.py`:
+
+- `ensure_project_path(project_root, remote_root=".")`
+- `sync_project_files(files, remote_root=".")`
+
+Local kernels implement those as no-op/local-path operations. Colab overrides them to inject a Colab-side path and upload the exported package files into the remote VM. That makes future remote kernels follow the same setup contract.
+
+### Generation-Based Cancellation
+
+Notebook setup and save-triggered sync tasks capture a notebook generation number when they start. Kernel restarts, kernel-type changes, runtime changes, and notebook teardown all bump that generation and cancel any stale setup/sync task.
+
+```mermaid
+flowchart LR
+    A["kernel_select / kernel_restart / save"] --> B["capture generation"]
+    B --> C["inject lib path"]
+    C --> D["sync exported files"]
+    D --> E["run CRAFT cells"]
+
+    X["kernel type change / runtime change / restart / notebook delete"] --> Y["bump generation + cancel tasks"]
+    Y --> Z["stale task exits before touching new kernel"]
 ```
 
 ### Why the Snapshot Exists
@@ -477,7 +506,13 @@ Two asyncio tasks run continuously while the kernel is connected:
 
 ### Keep-Alive Pings
 
-Every 5 minutes, we send an HTTP GET to `/tun/m/{endpoint}/keep-alive/`. Without this, Colab's idle timeout (default 30 minutes) will disconnect the runtime.
+Every 5 minutes, we send an HTTP GET to `/tun/m/{endpoint}/keep-alive/`, but only when the notebook still looks active:
+
+- the kernel is currently busy
+- at least one browser WebSocket client is attached
+- or the notebook had recent kernel activity within the grace window
+
+Without this, Colab's idle timeout (default 30 minutes) will disconnect the runtime. With the activity gate, long-idle notebooks stop consuming keep-alive quota.
 
 ### Proxy Token Refresh
 
@@ -485,14 +520,32 @@ The proxy token has a TTL (typically 1 hour). We refresh it 5 minutes before exp
 
 ```mermaid
 graph LR
-    KA[Keep-Alive Task<br/>every 5 min] -->|"HTTP GET"| CA[Colab API]
-    TR[Token Refresh Task<br/>before expiry] -->|"GET /v1/runtime-proxy-token"| GP[Colab GAPI]
-    TR -->|"update"| PI[proxy_info.token]
+    KA["Keep-Alive Task"] --> G{"Busy, connected clients,<br/>or recent activity?"}
+    G -->|Yes| CA[Colab API keep-alive]
+    G -->|No| Skip[Skip keep-alive]
+    TR["Token Refresh Task"] --> GP[Colab GAPI token refresh]
+    GP --> PI[Update proxy token]
+    CA --> H{"Repeated failures?"}
+    GP --> H
+    H -->|Yes| RC[Recycle runtime/session]
+    H -->|No| OK[Keep connection]
 ```
 
 ### Serialized Kernel Access
 
 Notebook setup work, save-triggered Colab module uploads, and queued code execution all share the same per-notebook execution lock in `KernelService`. This is critical for Colab because all code execution shares one Jupyter WebSocket. Without serialization, background setup and user-triggered cells can interleave and produce misleading GUI states.
+
+### Structured Logging
+
+Notebook setup now emits structured log lines for:
+
+- CRAFT discovery counts
+- project path injection
+- exported package syncs
+- per-CRAFT-cell execution
+- total setup completion
+
+Those logs include notebook id, source, generation, kernel type, runtime id, file counts, byte counts, and durations so Colab-specific failures can be debugged from server logs without reproducing them interactively.
 
 ## Startup Initialization
 

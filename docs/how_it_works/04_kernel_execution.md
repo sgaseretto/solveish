@@ -23,6 +23,7 @@ The kernel execution system uses a **subprocess-based architecture** to enable:
 - One kernel per notebook with persistent namespace
 - A backend-authoritative kernel snapshot for queue/setup/auth state
 - Serialized non-queue kernel setup work (CRAFT, lib sync, Colab uploads)
+- Backend-specific project-path and exported-file sync through the kernel abstraction
 
 ### Kernel Selection (Kernel-First Flow)
 
@@ -88,8 +89,9 @@ Service layer managing kernels per notebook:
 ```python
 class KernelService:
     def __init__(self):
-        self._kernels: Dict[str, SubprocessKernel] = {}
+        self._kernels: Dict[str, BaseKernel] = {}
         self._execution_locks: Dict[str, asyncio.Lock] = {}
+        self._client_counts: Dict[str, int] = {}
 
     def get_kernel(self, notebook_id: str) -> SubprocessKernel:
         """Get or create kernel for notebook."""
@@ -102,6 +104,12 @@ class KernelService:
             async for output in kernel.execute_streaming(cell.source):
                 cell.outputs.append(output)
                 yield output
+
+    async def ensure_project_path(self, notebook_id: str, project_root: str) -> dict:
+        """Backend-specific setup hook used by notebook initialization."""
+
+    async def sync_project_files(self, notebook_id: str, files: list[tuple[str, str]]) -> dict:
+        """Backend-specific file sync for exported modules."""
 ```
 
 ### ExecutionQueue (`services/kernel/execution_queue.py`)
@@ -288,6 +296,18 @@ flowchart LR
     C["CRAFT / restart setup"] --> L
     S["Save-triggered Colab sync"] --> L
     L --> K["Notebook kernel transport"]
+```
+
+### Generation-Based Setup Cancellation
+
+Background setup work is also generation-guarded. When Dialeng restarts a kernel, changes kernel type/runtime, or tears a notebook down, it increments a notebook generation counter and cancels any in-flight setup/sync task. Each setup phase checks that the generation it started with is still current before it touches the kernel.
+
+```mermaid
+flowchart LR
+    A["Setup task starts"] --> B["capture generation"]
+    B --> C["inject path / sync files / run CRAFT"]
+    X["restart / kernel switch / notebook delete"] --> Y["bump generation + cancel task"]
+    Y --> Z["stale task aborts before next phase"]
 ```
 
 ```python
@@ -525,6 +545,14 @@ async def run_cell(nb_id: str, cid: str):
         await broadcast_output(nb_id, cell, output)
 
     return CellView(cell)
+```
+
+Notebook setup and teardown routes now use the same service layer:
+
+```python
+await kernel_service.ensure_project_path(nb_id, project_root)
+await kernel_service.sync_project_files(nb_id, exported_files)
+await kernel_service.shutdown_async(nb_id)
 ```
 
 ### WebSocket Integration

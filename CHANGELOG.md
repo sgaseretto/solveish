@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - OAuth callback now validates single-use `state` tokens before exchanging the authorization code
 
 #### Colab Resilience Tests
-- Added `tests/test_colab_resilience.py` covering per-notebook kernel serialization, Colab auth state handling, and degraded Colab connection liveness
+- Added `tests/test_colab_resilience.py` covering per-notebook kernel serialization, Colab auth state handling, degraded Colab connection liveness, connection recycle behavior, and async kernel teardown
 
 #### Solveit-style Keyboard Shortcuts
 - **Navigation**: Arrow keys / `j`/`k` to navigate cells, `Shift+Arrow` for multi-selection, `Cmd+A` select all, `Enter` to edit, `Escape` to exit
@@ -63,10 +63,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed the global "cleanup all runtimes before attach" behavior that could tear down unrelated Colab sessions on the same Google account
 - Colab init steps now wait for `status: idle` instead of treating `execute_reply` as completion, avoiding premature setup transitions on Colab's multiplexed WebSocket
 - Notebook setup work (`sys.path` injection, Colab module upload, CRAFT execution, restart setup) now shares the same per-notebook execution lock as regular cell execution, preventing races on the Colab kernel transport
+- Notebook setup and save-triggered sync work now carry a per-notebook generation id, so kernel switches, runtime changes, restarts, and notebook teardown cancel stale background tasks before they touch the new kernel
+- Notebook deletion/removal now tears down the attached kernel plus pending setup/sync work instead of leaving remote sessions and execution state behind
 - Quiet long-running code cells no longer get marked finished by a 30-second browser inactivity timeout; completion now comes from backend kernel state
 - WebSocket reconnect now rehydrates queue/kernel state from the backend snapshot instead of inferring readiness from queue emptiness alone
 - Stored Colab sessions are validated on startup before Dialeng treats them as authenticated, and invalid/revoked sessions are cleared instead of being reused silently
-- Keep-alive and proxy-token-refresh failures now mark Colab connections as degraded and emit richer server logs for runtime replacement, setup phases, reconnects, and sync operations
+- Keep-alive is now activity-aware, using live browser-client counts and recent kernel activity to avoid keeping long-idle Colab runtimes warm unnecessarily
+- Repeated keep-alive and proxy-token-refresh failures now trigger a Colab connection recycle so the next execute reconnects against a clean runtime/session
+- Project-path setup and exported-module sync now flow through `BaseKernel` / `KernelService` abstractions, so local and Colab kernels share one setup contract and future remote kernels can plug into the same hooks
+- Server logs for CRAFT discovery, LIB path injection, LIB sync, and per-CRAFT execution now include runtime id, generation, file counts, byte counts, sample paths, and durations
 - Final OOB rendering and notebook saves now normalize `update_display_data` and `clear_output` events, so fastprogress/tqdm progress bars keep their last visible state instead of collapsing into blank `<progress value="0">` placeholders after execution
 - Formatter-only IPython `__repr__ returned non-string` errors are now treated as benign when the cell also produced rich display output, preventing fastai/fastprogress visual cells from ending in duplicate error tracebacks while still rendering their images/widgets
 
