@@ -139,7 +139,7 @@ The browser no longer infers kernel readiness from queue emptiness or client-sid
 - notebook setup state (`inject_lib`, `upload_lib`, `craft`, `restart`)
 - Colab auth state
 
-The frontend receives that snapshot over WebSocket and also polls it periodically so reconnects can restore the true kernel state.
+The frontend receives that snapshot over WebSocket and also polls it periodically so reconnects can restore the true kernel state. The same snapshot now drives floating toast notifications for attach/reconnect/setup phases, replacing the old inline status block under the toolbar.
 
 ### kernel_worker_main (`services/kernel/kernel_worker.py`)
 

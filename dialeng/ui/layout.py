@@ -164,7 +164,7 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                     ),
                     cls="toolbar-container"
                 ),
-                Div(id="status"),
+                Div(id="status", aria_live="polite", aria_atomic="true"),
                 AllCells(nb),
                 Script(f"""
                     window.NOTEBOOK_ID = '{nb.id}';

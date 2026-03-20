@@ -90,6 +90,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Access-log noise from static assets, `/render-markdown`, `/favicon.ico`, and repeated `/kernel/snapshot` polling is filtered so Colab/kernel setup logs remain readable during interactive sessions
 - Access logs now render with a clearer `[http]` prefix while Dialeng runtime logs include the logger name
 
+#### Floating Kernel Notifications
+- Kernel/setup status messages now render as floating toast-style notifications instead of inline messages under the toolbar
+- WebSocket reconnect, Colab attach/setup phases, and HTMX responses targeting `#status` all use the same floating notification region
+- Backend snapshot setup details now surface as progressive Colab setup toasts, and the inline status area no longer pushes notebook content down while the kernel is attaching
+
 #### Server Shutdown Kernel Cleanup
 - Added an app-level shutdown hook that cancels notebook setup/sync work, cancels queued execution, and asynchronously shuts down all kernels during server exit
 - `Ctrl+C` in the terminal is now the supported clean-exit path for Dialeng, and Colab kernels should release their Jupyter sessions and runtime assignments during that shutdown instead of being left active

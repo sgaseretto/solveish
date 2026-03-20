@@ -1812,6 +1812,9 @@ document.addEventListener('htmx:afterSwap', (e) => {
     if (_htmxScrollRestore !== null && !_pendingScrollToNewCell) {
         window.scrollTo(0, _htmxScrollRestore);
     }
+    if (e.detail?.target?.id === 'status') {
+        armStatusToastDismiss(e.detail.target);
+    }
 });
 
 // After HTMX settles (fires after all HTMX processing is complete)
@@ -2291,16 +2294,53 @@ function canRunCurrentKernel() {
     return !!state.kernel?.can_run;
 }
 
+function clearKernelStatusMessage() {
+    const statusEl = document.getElementById('status');
+    if (kernelStatusMessageTimeoutId) {
+        clearTimeout(kernelStatusMessageTimeoutId);
+        kernelStatusMessageTimeoutId = null;
+    }
+    if (statusEl) statusEl.innerHTML = '';
+}
+
+function getStatusPersistMs(statusNode) {
+    if (!statusNode) return 0;
+    const explicit = Number(statusNode.dataset.persistMs || 0);
+    if (Number.isFinite(explicit) && explicit > 0) return explicit;
+    if (statusNode.classList.contains('error')) return 8000;
+    if (statusNode.classList.contains('warning')) return 6000;
+    if (statusNode.classList.contains('success')) return 2800;
+    return 4000;
+}
+
+function scheduleKernelStatusDismiss(message, persistMs) {
+    if (kernelStatusMessageTimeoutId) clearTimeout(kernelStatusMessageTimeoutId);
+    if (persistMs > 0) {
+        kernelStatusMessageTimeoutId = setTimeout(() => {
+            const statusEl = document.getElementById('status');
+            if (statusEl && statusEl.textContent.trim() === message) clearKernelStatusMessage();
+        }, persistMs);
+    }
+}
+
+function armStatusToastDismiss(target) {
+    const statusEl = target?.id === 'status' ? target : document.getElementById('status');
+    if (!statusEl) return;
+    const toast = statusEl.querySelector('.status');
+    if (!toast) return;
+    const message = toast.textContent.trim();
+    if (!message) {
+        clearKernelStatusMessage();
+        return;
+    }
+    scheduleKernelStatusDismiss(message, getStatusPersistMs(toast));
+}
+
 function showKernelStatusMessage(message, tone = 'warning', persistMs = 5000) {
     const statusEl = document.getElementById('status');
     if (!statusEl) return;
     statusEl.innerHTML = `<div class="status ${tone}">${escapeHtml(message)}</div>`;
-    if (kernelStatusMessageTimeoutId) clearTimeout(kernelStatusMessageTimeoutId);
-    if (persistMs > 0) {
-        kernelStatusMessageTimeoutId = setTimeout(() => {
-            if (statusEl.textContent === message) statusEl.innerHTML = '';
-        }, persistMs);
-    }
+    scheduleKernelStatusDismiss(message, persistMs);
 }
 
 async function fetchKernelSnapshot(notebookId, source = 'poll') {
@@ -2380,9 +2420,18 @@ function applyKernelSnapshot(snapshot, source = 'ws') {
         }
     }
 
+    const prevSetupDetail = previous?.setup?.detail;
+    const nextSetupDetail = snapshot.setup?.detail;
+    if (snapshot.setup?.is_active && nextSetupDetail && nextSetupDetail !== prevSetupDetail) {
+        showKernelStatusMessage(nextSetupDetail, 'warning', 4500);
+    }
+
     const prevCanRun = !!previous?.kernel?.can_run;
     const nextCanRun = !!snapshot.kernel?.can_run;
     if (!prevCanRun && nextCanRun) {
+        if (previous?.setup?.is_active && previous?.setup?.source && ['kernel_select', 'kernel_restart'].includes(previous.setup.source)) {
+            showKernelStatusMessage('Kernel is ready.', 'success', 2600);
+        }
         document.body.dispatchEvent(new CustomEvent('kernel-connected'));
         _runPendingCell();
     }
