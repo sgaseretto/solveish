@@ -656,6 +656,12 @@ function reconcileCellStructure({
     const viewportTop = viewportCell ? viewportCell.getBoundingClientRect().top : null;
     const { leadingAddRow, cellUnits } = structure;
 
+    // Structural reconciles are WebSocket-authored, not HTMX swaps. Clear any
+    // stale HTMX scroll restore state so htmx.process(newCell/newAddRow) cannot
+    // fight the explicit viewport preservation below.
+    _htmxScrollRestore = null;
+    _suppressHtmxScrollRestoreUntil = Date.now() + 250;
+
     insertedCells.forEach(({ cellId, html }) => {
         if (!cellUnits.has(cellId)) {
             const unit = buildCellUnitFromHtml(cellId, html);
@@ -1902,6 +1908,7 @@ function initCell(cellId) {
 // ---------------------------------------------------------------------------
 let _htmxScrollRestore = null;
 let _pendingScrollToNewCell = false;
+let _suppressHtmxScrollRestoreUntil = 0;
 
 document.addEventListener('htmx:beforeSwap', (e) => {
     const target = e.detail.target;
@@ -1938,6 +1945,10 @@ document.addEventListener('htmx:beforeSwap', (e) => {
 
 // Restore scroll immediately after DOM swap (before inline scripts run)
 document.addEventListener('htmx:afterSwap', (e) => {
+    if (Date.now() < _suppressHtmxScrollRestoreUntil) {
+        _htmxScrollRestore = null;
+        return;
+    }
     if (_htmxScrollRestore !== null && !_pendingScrollToNewCell) {
         window.scrollTo(0, _htmxScrollRestore);
     }
@@ -1979,6 +1990,10 @@ document.addEventListener('htmx:afterSettle', (e) => {
 });
 
 function _restoreScrollPosition() {
+    if (Date.now() < _suppressHtmxScrollRestoreUntil) {
+        _htmxScrollRestore = null;
+        return;
+    }
     if (_pendingScrollToNewCell) {
         // Don't restore old scroll — we're about to scroll to the new cell
         _htmxScrollRestore = null;
