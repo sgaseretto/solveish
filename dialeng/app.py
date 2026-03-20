@@ -53,6 +53,7 @@ from dialeng.ui import (
     TypeSelect, CollapseBtn, get_collapse_class, get_cell_state_classes
 )
 from dialeng.ui.mime import render_mime_bundle
+from dialeng.logging_config import build_log_config
 
 # Extension system
 from dialeng.core.extensions import load_extensions
@@ -3565,7 +3566,12 @@ def main(root_dir: Path = None, port: int = 8000):
     print("   • Alt+↑/↓           - Move cell up/down")
     print("   • Escape            - Exit edit mode")
     print("   • Double-click      - Edit markdown/response")
-    serve(appname="dialeng.app", port=port, reload_dirs=["dialeng"])
+    serve(
+        appname="dialeng.app",
+        port=port,
+        reload_dirs=["dialeng"],
+        log_config=build_log_config(),
+    )
 
 
 if __name__ == "__main__":

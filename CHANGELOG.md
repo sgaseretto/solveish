@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Colab Resilience Tests
 - Added `tests/test_colab_resilience.py` covering per-notebook kernel serialization, Colab auth state handling, degraded Colab connection liveness, connection recycle behavior, and async kernel teardown
+- Added `tests/test_logging_config.py` covering console log filtering and Dialeng logger registration
 
 #### Solveit-style Keyboard Shortcuts
 - **Navigation**: Arrow keys / `j`/`k` to navigate cells, `Shift+Arrow` for multi-selection, `Cmd+A` select all, `Enter` to edit, `Escape` to exit
@@ -83,6 +84,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Uvicorn Reload Loop on Generated Files
 - Running `!pip install` or other commands that create files in `.venv`/`.autorun_modules` triggered uvicorn's file watcher, causing infinite reload loops
 - Fix: `serve()` now uses `reload_dirs=["dialeng"]` to only watch the source code directory instead of excluding patterns from a broad watch
+
+#### Terminal Logging Visibility
+- Dialeng now installs a custom Uvicorn log config so `dialeng.*` logger output appears in the terminal alongside startup/server logs
+- Access-log noise from static assets, `/render-markdown`, `/favicon.ico`, and repeated `/kernel/snapshot` polling is filtered so Colab/kernel setup logs remain readable during interactive sessions
+- Access logs now render with a clearer `[http]` prefix while Dialeng runtime logs include the logger name
 
 #### Toolbar Dropdown Clipped by Overflow
 - YT capture button's dropdown panel was invisible because it rendered inside `.toolbar-right` which has `overflow-y: hidden`
