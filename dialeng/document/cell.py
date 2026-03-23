@@ -267,6 +267,19 @@ class Cell:
             return True
         return False
 
+    def update_output(self, new_output: str) -> bool:
+        """Update cell output with change tracking.
+
+        Returns True if output changed.
+        """
+        current_output = self.output
+        if current_output != new_output:
+            self.output = new_output
+            self.version += 1
+            self.last_modified = datetime.now()
+            return True
+        return False
+
     def append_output(self, output: CellOutput):
         """Append a new output (for streaming)."""
         self.outputs.append(output)

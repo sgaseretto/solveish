@@ -329,3 +329,11 @@ Prompt completion sends `CellHeaderOOB` + `cell_class_update` JSON. The output w
 | Cell type change | `CellViewOOB` | Yes | Inherent — input section changes fundamentally (Monaco ↔ textarea) |
 
 Cell type change is the only remaining case and is intentional: the entire input section changes structure, so full DOM replacement is correct.
+
+The initiating tab still uses `hx_swap="none"` for the type selector. That keeps the route backend-authoritative:
+
+- the POST mutates notebook state
+- the server broadcasts `CellViewOOB`
+- every tab, including the one that triggered the change, applies the same replacement path
+
+That avoids mixing a local HTMX swap on one tab with an OOB replacement on the others.

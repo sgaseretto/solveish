@@ -2042,6 +2042,7 @@ function resetCellOnError(e, errorMsg) {
                 }
             }
         }
+        clearPendingRunRequest(cellId);
     }
 
     // Fallback: reset prompt streaming if we have a streaming cell
@@ -2135,60 +2136,103 @@ function toggleModelSelect(mode) {
     }
 }
 
+let kernelModalDismissed = false;
+
+function shouldKeepKernelModalOpen() {
+    if (kernelModalDismissed) return false;
+    const kernelState = getKernelState();
+    const kernel = kernelState?.kernel;
+    return !kernel?.exists || !!kernel?.auth_required;
+}
+
+function refreshKernelChrome({ refreshModal = true } = {}) {
+    if (!window.NOTEBOOK_ID || typeof htmx === 'undefined') return;
+    htmx.ajax('GET', `${nbApiPath()}/kernel/info`, { target: '#kernel-status-bar', swap: 'outerHTML' });
+    if (refreshModal) {
+        const modal = document.getElementById('kernel-modal-overlay');
+        if (modal) {
+            const keepOpen = modal.classList.contains('visible') || shouldKeepKernelModalOpen();
+            if (keepOpen) {
+                const restoreVisible = function(event) {
+                    const target = event.detail?.target;
+                    if (target?.id === 'kernel-modal-overlay') {
+                        target.classList.add('visible');
+                        document.body.removeEventListener('htmx:afterSwap', restoreVisible);
+                    }
+                };
+                document.body.addEventListener('htmx:afterSwap', restoreVisible);
+            }
+            htmx.ajax('GET', `${nbApiPath()}/kernel/modal`, { target: '#kernel-modal-overlay', swap: 'outerHTML' });
+        }
+    }
+}
+
+function applyNotebookSnapshot(notebook, previousNotebook = null) {
+    if (!notebook) return;
+
+    const modeSelect = document.getElementById('mode-select');
+    if (modeSelect && modeSelect.value !== notebook.dialog_mode) {
+        modeSelect.value = notebook.dialog_mode;
+    }
+    toggleModelSelect(notebook.dialog_mode);
+
+    const modelSelect = document.getElementById('model-select');
+    if (modelSelect) {
+        const nextModel = notebook.model || '';
+        if (modelSelect.value !== nextModel) {
+            modelSelect.value = nextModel;
+        }
+    }
+
+    const safeModeBtn = document.getElementById('safe-mode-toggle');
+    if (safeModeBtn) {
+        safeModeBtn.classList.toggle('active', !!notebook.safe_mode);
+        const use = safeModeBtn.querySelector('use');
+        if (use) use.setAttribute('href', notebook.safe_mode ? '#shield-check' : '#shield-off');
+    }
+
+    if (!previousNotebook || previousNotebook.kernel_type !== notebook.kernel_type) {
+        handleKernelTypeChanged(notebook.kernel_type);
+    }
+}
+
+function syncCurrentExplorerKernelState(snapshot) {
+    if (!window.NOTEBOOK_ID) return;
+    const item = document.querySelector(`.file-explorer-item[data-notebook-id="${window.NOTEBOOK_ID}"]`);
+    if (!item) return;
+    item.classList.toggle('has-kernel', !!snapshot?.kernel?.is_alive);
+}
+
 // ==================== Safe Mode Toggle ====================
 function toggleSafeMode(nbId) {
     const btn = document.getElementById('safe-mode-toggle');
     if (!btn) return;
     const isActive = btn.classList.contains('active');
     const newState = !isActive;
-
-    // Toggle visual state
-    btn.classList.toggle('active');
-    const use = btn.querySelector('use');
-    if (use) use.setAttribute('href', newState ? '#shield-check' : '#shield-off');
+    btn.disabled = true;
 
     // Send to server
     fetch(`/dialeng/${nbId}/safe_mode`, {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: `safe_mode=${newState}`
+    }).finally(() => {
+        btn.disabled = false;
     });
 }
 
 // ==================== Colab Auth State Listener ====================
 function onColabAuthenticated() {
-    // Swap button to Disconnect (with after-swap hook for disconnect flow)
-    const container = document.getElementById('colab-auth-container');
-    if (container) {
-        container.innerHTML = '<button class="btn btn-sm" id="colab-disconnect-btn" '
-            + 'title="Disconnect Colab account" '
-            + 'hx-post="/auth/google/logout" hx-target="#colab-auth-container" '
-            + 'hx-on::after-swap="onColabDisconnected()">'
-            + 'Disconnect</button>';
-        htmx.process(container);
-    }
-    // Show runtime dropdown now that we're authenticated
-    const runtimeSelect = document.getElementById('runtime-select');
-    if (runtimeSelect) runtimeSelect.style.display = '';
-    // Status dot → green
-    const statusDot = document.getElementById('colab-status-dot');
-    if (statusDot) statusDot.className = 'colab-status-dot connected';
     if (window.NOTEBOOK_ID) {
         fetchKernelSnapshot(window.NOTEBOOK_ID, 'auth');
-        htmx.ajax('GET', `/dialeng/${window.NOTEBOOK_ID}/kernel/modal`, {target: '#kernel-modal-overlay', swap: 'outerHTML'});
+        refreshKernelChrome({ refreshModal: true });
     }
 }
 
 function onColabDisconnected() {
-    // Hide runtime dropdown (can't pick runtime without auth)
-    const runtimeSelect = document.getElementById('runtime-select');
-    if (runtimeSelect) runtimeSelect.style.display = 'none';
-    // Status dot → gray
-    const statusDot = document.getElementById('colab-status-dot');
-    if (statusDot) statusDot.className = 'colab-status-dot disconnected';
     if (window.NOTEBOOK_ID) {
         fetchKernelSnapshot(window.NOTEBOOK_ID, 'auth');
-        htmx.ajax('GET', `/dialeng/${window.NOTEBOOK_ID}/kernel/modal`, {target: '#kernel-modal-overlay', swap: 'outerHTML'});
+        refreshKernelChrome({ refreshModal: true });
     }
 }
 
@@ -2253,7 +2297,7 @@ function handleKernelTypeChanged(kernelType) {
     });
 
     // Update safe mode toggle visibility (only relevant for local kernel)
-    const safeModeToggle = document.querySelector('.safe-mode-toggle');
+    const safeModeToggle = document.getElementById('safe-mode-toggle');
     if (safeModeToggle) {
         safeModeToggle.style.display = kernelType === 'local' ? '' : 'none';
     }
@@ -2517,6 +2561,8 @@ function applyKernelSnapshot(snapshot, source = 'ws') {
     const previous = getKernelState();
     window.KERNEL_STATE = snapshot;
     window.KERNEL_ALIVE = !!snapshot.kernel?.can_run;
+    applyNotebookSnapshot(snapshot.notebook, previous?.notebook || null);
+    syncCurrentExplorerKernelState(snapshot);
 
     handleQueueUpdate({
         running_cell_id: snapshot.queue?.running_cell_id || null,
@@ -2571,6 +2617,19 @@ function applyKernelSnapshot(snapshot, source = 'ws') {
         }
     }
 
+    const prevOutlineRevision = previous?.outline?.revision ?? null;
+    const nextOutlineRevision = snapshot.outline?.revision ?? null;
+    if (
+        prevOutlineRevision !== null &&
+        nextOutlineRevision !== null &&
+        prevOutlineRevision !== nextOutlineRevision
+    ) {
+        const outlineSidebar = document.getElementById('outline-sidebar');
+        if (outlineSidebar && outlineSidebar.classList.contains('outline-open')) {
+            refreshOutline();
+        }
+    }
+
     const prevSetupDetail = previous?.setup?.detail;
     const nextSetupDetail = snapshot.setup?.detail;
     if (snapshot.setup?.is_active && nextSetupDetail && nextSetupDetail !== prevSetupDetail) {
@@ -2579,6 +2638,28 @@ function applyKernelSnapshot(snapshot, source = 'ws') {
 
     const prevCanRun = !!previous?.kernel?.can_run;
     const nextCanRun = !!snapshot.kernel?.can_run;
+    const prevAuthEnabled = !!previous?.auth?.enabled;
+    const nextAuthEnabled = !!snapshot.auth?.enabled;
+    const prevAuthenticated = !!previous?.auth?.authenticated;
+    const nextAuthenticated = !!snapshot.auth?.authenticated;
+    const prevSelectedType = previous?.kernel?.selected_type;
+    const nextSelectedType = snapshot.kernel?.selected_type;
+    const prevRuntime = previous?.notebook?.colab_runtime_type;
+    const nextRuntime = snapshot.notebook?.colab_runtime_type;
+
+    if (
+        previous &&
+        (
+            prevCanRun !== nextCanRun ||
+            prevAuthEnabled !== nextAuthEnabled ||
+            prevAuthenticated !== nextAuthenticated ||
+            prevSelectedType !== nextSelectedType ||
+            prevRuntime !== nextRuntime
+        )
+    ) {
+        refreshKernelChrome({ refreshModal: false });
+    }
+
     if (!prevCanRun && nextCanRun) {
         if (previous?.setup?.is_active && previous?.setup?.source && ['kernel_select', 'kernel_restart'].includes(previous.setup.source)) {
             showKernelStatusMessage('Kernel is ready.', 'success', 2600);
@@ -3045,6 +3126,8 @@ function startCodeStreaming(cellId) {
     const cell = document.getElementById(`cell-${cellId}`);
     const outputEl = document.getElementById(`output-${cellId}`);
 
+    clearPendingRunRequest(cellId);
+
     if (!cell) {
         console.error('[Code] Cell element not found:', `cell-${cellId}`);
         return;
@@ -3206,6 +3289,8 @@ function finishCodeStreaming(cellId, hasError) {
     const cell = document.getElementById(`cell-${cellId}`);
     const outputEl = document.getElementById(`output-${cellId}`);
 
+    clearPendingRunRequest(cellId);
+
     if (cell) {
         cell.classList.remove('streaming');
         const cancelBtn = cell.querySelector('.btn-cancel');
@@ -3231,12 +3316,6 @@ function finishCodeStreaming(cellId, hasError) {
     // Clear the streaming timeout
     clearCodeStreamingTimeout(cellId);
 
-    // Refresh outline sidebar if it's open (to update variables/functions)
-    const outlineSidebar = document.getElementById('outline-sidebar');
-    if (outlineSidebar && outlineSidebar.classList.contains('outline-open')) {
-        refreshOutline();
-    }
-
     console.log('[Code] Finished streaming for cell:', cellId, hasError ? '(with errors)' : '');
 }
 
@@ -3246,6 +3325,22 @@ function finishCodeStreaming(cellId, hasError) {
 
 // Track queue state for cells
 const cellQueueState = new Map(); // cellId -> {state: 'queued'|'running'|'idle', position: number}
+const pendingRunRequests = new Set();
+
+function markPendingRunRequest(cellId) {
+    pendingRunRequests.add(cellId);
+    const cell = document.getElementById(`cell-${cellId}`);
+    const runBtn = cell?.querySelector('.btn-run');
+    if (runBtn) runBtn.disabled = true;
+}
+
+function clearPendingRunRequest(cellId) {
+    if (!pendingRunRequests.has(cellId)) return;
+    pendingRunRequests.delete(cellId);
+    const cell = document.getElementById(`cell-${cellId}`);
+    const runBtn = cell?.querySelector('.btn-run');
+    if (runBtn) runBtn.disabled = false;
+}
 
 // Kernel status dot — updates the dot next to notebook title
 // States: (no class)=grey/disconnected, connected=green, busy=yellow, error=red
@@ -3306,6 +3401,7 @@ function updateCellVisualState(cellId, state, queuePosition) {
 
     // Remove queued class only - streaming is managed by startCodeStreaming/stopCodeStreaming
     cell.classList.remove('queued');
+    if (state !== 'idle') clearPendingRunRequest(cellId);
 
     switch(state) {
         case 'queued':
@@ -3328,6 +3424,7 @@ function updateCellVisualState(cellId, state, queuePosition) {
 
         case 'idle':
         default:
+            clearPendingRunRequest(cellId);
             if (runBtn) {
                 runBtn.style.display = '';
                 runBtn.innerHTML = '▶';
@@ -3372,25 +3469,7 @@ function prepareCodeRun(cellId) {
         return;
     }
 
-    const cell = document.getElementById(`cell-${cellId}`);
-    const outputEl = document.getElementById(`output-${cellId}`);
-
-    if (cell) {
-        cell.classList.add('streaming');
-        const cancelBtn = cell.querySelector('.btn-cancel');
-        const runBtn = cell.querySelector('.btn-run');
-        if (cancelBtn) cancelBtn.style.display = '';
-        if (runBtn) runBtn.style.display = 'none';
-    }
-
-    // Clear output and show "Queuing..." indicator (queue_update will update to "Queued (position N)...")
-    if (outputEl) {
-        outputEl.innerHTML = '<pre class="stream-output" style="color: var(--text-muted);">Queuing...</pre>';
-        outputEl.classList.remove('error');
-    }
-
-    // Reset text content tracker
-    streamTextContent.set(cellId, '');
+    markPendingRunRequest(cellId);
 
     console.log('[Code] Preparing to run cell:', cellId);
 }
@@ -3418,6 +3497,7 @@ function interruptCodeCell(notebookId, cellId) {
 
     // Clear the streaming timeout for this cell
     clearCodeStreamingTimeout(cellId);
+    clearPendingRunRequest(cellId);
 
     // Wait a bit for server to finish, then check if cell is still stuck
     setTimeout(() => {
@@ -3966,10 +4046,18 @@ function toggleKernelModal(nbId) {
     if (!overlay) return;
     const wasVisible = overlay.classList.contains('visible');
     overlay.classList.toggle('visible');
-    // If closing the modal, clear any pending cell run
     if (wasVisible) {
+        kernelModalDismissed = true;
         pendingCellRunId = null;
+    } else {
+        kernelModalDismissed = false;
     }
+}
+
+function closeKernelModalForApply() {
+    const overlay = document.getElementById('kernel-modal-overlay');
+    if (!overlay) return;
+    overlay.classList.remove('visible');
 }
 
 function selectKernelOption(el, kernelType) {
@@ -4037,9 +4125,7 @@ function applyKernelSelection(nbId) {
     console.log('[Kernel] applyKernelSelection:', kernelType, runtimeType);
 
     // Close modal immediately and show initializing state (yellow dot)
-    const savedPendingCell = pendingCellRunId;
-    toggleKernelModal();
-    pendingCellRunId = savedPendingCell;
+    closeKernelModalForApply();
     window.KERNEL_ALIVE = false;
     window.KERNEL_STATE = window.KERNEL_STATE || {};
     window.KERNEL_STATE.kernel = Object.assign({}, window.KERNEL_STATE.kernel, {
@@ -4141,8 +4227,7 @@ document.body.addEventListener('htmx:beforeRequest', function(e) {
             if (cancelBtn) cancelBtn.style.display = 'none';
             if (runBtn) runBtn.style.display = '';
         }
-        const outputEl = document.getElementById(`output-${cellId}`);
-        if (outputEl) outputEl.innerHTML = '';
+        clearPendingRunRequest(cellId);
         clearCodeStreamingTimeout(cellId);
     }
 
@@ -4159,6 +4244,7 @@ document.body.addEventListener('htmx:beforeRequest', function(e) {
     }
     const overlay = document.getElementById('kernel-modal-overlay');
     if (overlay && !overlay.classList.contains('visible')) {
+        kernelModalDismissed = false;
         overlay.classList.add('visible');
     }
 });
@@ -4178,12 +4264,14 @@ document.body.addEventListener('kernel-required', function(e) {
             if (cancelBtn) cancelBtn.style.display = 'none';
             if (runBtn) runBtn.style.display = '';
         }
+        clearPendingRunRequest(cellId);
         clearCodeStreamingTimeout(cellId);
     }
 
     pendingCellRunId = cellId;
     const overlay = document.getElementById('kernel-modal-overlay');
     if (overlay && !overlay.classList.contains('visible')) {
+        kernelModalDismissed = false;
         overlay.classList.add('visible');
     }
 });
@@ -4207,7 +4295,8 @@ function toggleFileExplorer() {
 
 function refreshFileExplorer() {
     const currentPath = document.getElementById('current-explorer-path')?.value || '';
-    htmx.ajax('GET', `/files?path=${encodeURIComponent(currentPath)}`, '#file-list-content');
+    const activeNotebookId = document.getElementById('current-explorer-active-notebook')?.value || window.NOTEBOOK_ID || '';
+    htmx.ajax('GET', `/files?path=${encodeURIComponent(currentPath)}&active_notebook_id=${encodeURIComponent(activeNotebookId)}`, '#file-list-content');
 }
 
 function toggleNewItemModal() {
@@ -4240,13 +4329,14 @@ function createNewItem() {
 
     // Read current path from hidden input updated by HTMX folder navigation
     const currentPath = document.getElementById('current-explorer-path')?.value || '';
+    const activeNotebookId = document.getElementById('current-explorer-active-notebook')?.value || window.NOTEBOOK_ID || '';
 
     if (type === 'folder') {
         // Create folder via HTMX-style fetch
         fetch('/files/new-folder', {
             method: 'POST',
             headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            body: `path=${encodeURIComponent(currentPath)}&name=${encodeURIComponent(name)}`
+            body: `path=${encodeURIComponent(currentPath)}&name=${encodeURIComponent(name)}&active_notebook_id=${encodeURIComponent(activeNotebookId)}`
         }).then(r => r.text()).then(html => {
             const container = document.getElementById('file-list-content');
             if (container) {
@@ -4283,10 +4373,11 @@ function hideDeleteConfirm() {
 function confirmDeleteFile() {
     const filePath = document.getElementById('delete-file-path')?.value;
     if (!filePath) return;
+    const activeNotebookId = document.getElementById('current-explorer-active-notebook')?.value || window.NOTEBOOK_ID || '';
     fetch('/files/delete', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: `path=${encodeURIComponent(filePath)}`
+        body: `path=${encodeURIComponent(filePath)}&active_notebook_id=${encodeURIComponent(activeNotebookId)}`
     }).then(r => r.text()).then(html => {
         const container = document.getElementById('file-list-content');
         if (container) {

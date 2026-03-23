@@ -138,8 +138,16 @@ The browser no longer infers kernel readiness from queue emptiness or client-sid
 - queue state
 - notebook setup state (`inject_lib`, `upload_lib`, `craft`, `restart`)
 - Colab auth state
+- notebook toolbar state (`mode`, `model`, `safe_mode`, selected kernel type, selected Colab runtime)
+- an outline revision number used to invalidate stale outline views without guessing from client-side events
 
 The frontend receives that snapshot over WebSocket and also polls it periodically so reconnects can restore the true kernel state. The same snapshot now drives floating toast notifications for attach/reconnect/setup phases, replacing the old inline status block under the toolbar.
+
+The snapshot also became the shared control plane for notebook chrome:
+
+- toolbar selects/buttons update from the backend snapshot rather than optimistic local mutation
+- the file explorer's current notebook indicator updates from the same snapshot
+- outline refresh is triggered when the backend bumps the outline revision after note edits, structural cell changes, kernel restart, or code execution
 
 ### kernel_worker_main (`services/kernel/kernel_worker.py`)
 
@@ -219,6 +227,17 @@ class StreamingDisplayPublisher:
             'metadata': metadata
         })
 ```
+
+## Client Run-State Model
+
+The browser still gives immediate feedback when a run is requested, but it no longer upgrades that request into queued/running state on its own.
+
+- `prepareCodeRun()` records only a local "request pending" marker
+- queue placement and running state come from backend `queue_update` / `kernel_snapshot` messages
+- previous cell output stays visible until the backend confirms the new execution state
+- "kernel required" or request-error paths clear the pending marker instead of wiping visible output optimistically
+
+This avoids earlier drift where the UI could show a cell as finished or newly queued before the backend had actually confirmed the transition.
 
 ## Hard Interrupt (SIGINT)
 

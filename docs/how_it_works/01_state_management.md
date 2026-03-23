@@ -228,12 +228,13 @@ sequenceDiagram
     participant Dict as notebooks dict
     participant WS as WebSocket
 
-    User->>Route: Type in cell (blur triggers POST)
+    User->>Route: Type in cell (blur or run triggers POST)
     Route->>Dict: get_notebook(nb_id)
-    Route->>Dict: Find cell, update source
+    Route->>Dict: Find cell, commit source, bump version
+    Route->>WS: Broadcast committed cell state
     Route-->>User: Empty response (hx-swap="none")
-    Note over Dict: State updated in memory
-    Note over User: No UI change (already typed)
+    Note over Dict: State updated in memory and marks notebook modified
+    Note over User: Initiating tab keeps local editor DOM; other tabs receive canonical committed state
 ```
 
 ### 4. Save to Disk
@@ -258,7 +259,7 @@ sequenceDiagram
 
 ## CRUD Operations
 
-### Create Cell (`app.py:2234-2248`)
+### Create Cell
 
 ```python
 @rt("/dialeng/{nb_id}/cell/add")
@@ -273,17 +274,20 @@ async def post(nb_id: str, pos: int = -1, type: str = "code"):
     else:
         nb.cells.insert(pos, Cell(cell_type=type))
 
-    # Broadcast to collaborators
-    await broadcast_to_notebook(nb_id, AllCellsOOB(nb))
+    nb.modified = True
 
-    return AllCells(nb)
+    # Broadcast backend-authoritative structure payload
+    await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
+    await _mark_outline_dirty(nb_id, reason="cell_add")
+
+    return ""
 ```
 
 **Key points:**
 - `pos=-1` means append to end
 - Code cells default to `output_collapse=1` (scrollable)
-- Returns full `AllCells()` for HTMX to replace `#cells`
-- Broadcasts to WebSocket for collaboration
+- Returns an empty HTTP response; structure updates are applied from the WebSocket payload
+- The payload includes canonical `ordered_cell_ids`, so the browser rebuilds `#cells` from backend order
 
 ### Read Cell
 
@@ -296,72 +300,95 @@ def CellView(cell: Cell, notebook_id: str):
     # Returns FastHTML component
 ```
 
-### Update Cell Source (`app.py:2260-2267`)
+### Update Cell Source
 
 ```python
 @rt("/dialeng/{nb_id}/cell/{cid}/source")
-def post(nb_id: str, cid: str, source: str):
+async def post(nb_id: str, cid: str, source: str):
     nb = get_notebook(nb_id)
     for c in nb.cells:
         if c.id == cid:
-            c.source = source
+            changed = c.update_source(source)
+            if not changed:
+                break
+            nb.modified = True
+
+            if c.cell_type in {"code", "shell"}:
+                await broadcast_json(nb_id, {
+                    "type": "cell_source_update",
+                    "cell_id": c.id,
+                    "source": c.source,
+                    "version": c.version,
+                })
+                await broadcast_to_notebook(nb_id, CellOutputOOB(c))
+                await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
+            else:
+                await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
+
+            if c.cell_type == "note":
+                await _mark_outline_dirty(nb_id, reason="note_source_commit")
             break
-    return ""  # hx-swap="none" - no UI update needed
+    return ""
 ```
 
 **Key points:**
-- Triggered on blur with `hx-trigger="blur changed"`
-- Returns empty string (UI already shows typed content)
-- Does NOT broadcast to collaborators (typing not synced)
+- Triggered on blur with `hx-trigger="blur changed"` and also when running a cell with fresher in-editor source
+- Only committed state is synchronized; keystroke-by-keystroke typing is still local
+- Code/shell source commits clear outputs and execution metadata via `CellOutputOOB` + `CellHeaderOOB`
+- Note/prompt commits re-render the full cell so rendered markdown stays authoritative across tabs
 
-### Update Cell Output (`app.py:2269-2276`)
+### Update Cell Output
 
 ```python
 @rt("/dialeng/{nb_id}/cell/{cid}/output")
-def post(nb_id: str, cid: str, output: str):
+async def post(nb_id: str, cid: str, output: str):
     nb = get_notebook(nb_id)
     for c in nb.cells:
         if c.id == cid:
-            c.output = output
+            changed = c.update_output(output)
+            if not changed:
+                break
+            nb.modified = True
+            if c.cell_type in {"code", "shell"}:
+                await broadcast_to_notebook(nb_id, CellOutputOOB(c))
+                await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
+            else:
+                await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
             break
     return ""
 ```
 
 **Use case:** Editing AI response in prompt cells (double-click to edit).
 
-### Delete Cell (`app.py:2250-2258`)
+### Delete Cell
 
 ```python
 @rt("/dialeng/{nb_id}/cell/{cid}")
 async def delete(nb_id: str, cid: str):
     nb = get_notebook(nb_id)
     nb.cells = [c for c in nb.cells if c.id != cid]
-
-    # Broadcast to collaborators
-    await broadcast_to_notebook(nb_id, AllCellsOOB(nb))
-
-    return AllCells(nb)
+    nb.modified = True
+    await broadcast_json(nb_id, _cell_delete_payload(nb, cid))
+    await _mark_outline_dirty(nb_id, reason="cell_delete")
+    return ""
 ```
 
-### Move Cell (`app.py:2293-2307`)
+### Move Cell
 
 ```python
 @rt("/dialeng/{nb_id}/cell/{cid}/move/{direction}")
 async def post(nb_id: str, cid: str, direction: str):
     nb = get_notebook(nb_id)
-    for i, c in enumerate(nb.cells):
-        if c.id == cid:
-            if direction == "up" and i > 0:
-                nb.cells[i], nb.cells[i-1] = nb.cells[i-1], nb.cells[i]
-            elif direction == "down" and i < len(nb.cells) - 1:
-                nb.cells[i], nb.cells[i+1] = nb.cells[i+1], nb.cells[i]
-            break
+    moved = nb.move_cell(cid, {"up": -1, "down": 1}[direction])
+    if not moved:
+        return ""
 
-    await broadcast_to_notebook(nb_id, AllCellsOOB(nb))
-    return AllCells(nb)
+    await broadcast_json(nb_id, _cell_move_payload(nb, cid))
+    await _mark_outline_dirty(nb_id, reason="cell_move")
+    return ""
 ```
 
-### Change Cell Type (`app.py:2278-2291`)
+### Change Cell Type
 
 ```python
 @rt("/dialeng/{nb_id}/cell/{cid}/type")
@@ -370,9 +397,13 @@ async def post(nb_id: str, cid: str, cell_type: str):
     for c in nb.cells:
         if c.id == cid:
             c.cell_type = cell_type
-            c.output = ""  # Clear output when type changes
+            c.clear_outputs()
+            c.version += 1
+            c.last_modified = datetime.now()
+            nb.modified = True
             await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
-            return CellView(c, nb_id)
+            await _mark_outline_dirty(nb_id, reason="cell_type_change")
+            return ""
     return ""
 ```
 
@@ -452,18 +483,19 @@ def list_notebooks() -> List[str]:
 
 | Action | In-Memory | To Disk | To Collaborators |
 |--------|-----------|---------|------------------|
-| Type in cell | Immediate | Manual save | **No** (too expensive) |
+| Type in cell | Local draft immediately; committed on blur or run | Manual save | **Yes** on commit |
 | Run cell | Immediate | Manual save | **Yes** (OOB swap) |
-| Add cell | Immediate | Manual save | **Yes** (OOB swap) |
-| Delete cell | Immediate | Manual save | **Yes** (OOB swap) |
-| Move cell | Immediate | Manual save | **Yes** (OOB swap) |
+| Add cell | Immediate | Manual save | **Yes** (ordered structure payload) |
+| Delete cell | Immediate | Manual save | **Yes** (ordered structure payload) |
+| Move cell | Immediate | Manual save | **Yes** (ordered structure payload) |
 | Change type | Immediate | Manual save | **Yes** (OOB swap) |
 | Collapse | Immediate | Manual save | **Yes** (OOB swap) |
+| Mode / model / safe mode | Immediate | Manual save | **Yes** (kernel snapshot) |
 | Save | N/A | Immediate | **No** |
 
 ### Broadcast Pattern
 
-Routes that modify state follow this pattern:
+Routes that modify shared notebook state now follow one of three backend-authoritative patterns:
 
 ```python
 @rt("/dialeng/{nb_id}/cell/{cid}/some-action")
@@ -476,14 +508,20 @@ async def post(nb_id: str, cid: str, ...):
             # Modify state
             break
 
-    # 2. Broadcast to collaborators (OOB swap)
-    await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
-    # OR for full cells container:
-    await broadcast_to_notebook(nb_id, AllCellsOOB(nb))
+    # 2. Broadcast canonical state from the backend
+    await broadcast_json(nb_id, {...})          # in-place cell or structure updates
+    await broadcast_to_notebook(nb_id, ...)     # OOB fragments when full section HTML is needed
+    await broadcast_kernel_snapshot(nb_id)      # notebook/kernel toolbar state
 
-    # 3. Return HTML for requesting client
-    return CellView(c, nb_id)
+    # 3. Return an empty HTTP response when the browser should rely on the broadcast
+    return ""
 ```
+
+In practice:
+
+- Structural operations (`add`, `delete`, `move`) broadcast `ordered_cell_ids` and the browser reconciles the whole `#cells` structure from backend order.
+- Committed content changes (`source`, `output`) broadcast the committed cell state so other tabs converge on the backend version instead of trusting local draft DOM.
+- Notebook-level controls (`mode`, `model`, `safe_mode`, kernel selection/auth/setup state) are synchronized through the kernel snapshot instead of ad hoc client-side mutation.
 
 ---
 

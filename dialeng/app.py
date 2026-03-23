@@ -256,6 +256,10 @@ async def finalize_cell_execution(nb_id: str, cell, has_error: bool):
     await broadcast_to_notebook(nb_id, CellOutputOOB(cell))
     await broadcast_to_notebook(nb_id, CellHeaderOOB(cell, nb_id))
 
+    cell_type = str(getattr(cell, "cell_type", ""))
+    if cell_type in {"code", "shell"}:
+        await _mark_outline_dirty(nb_id, reason=f"{cell_type}_execution_complete")
+
 # ============================================================================
 # Mock LLM with Streaming
 # ============================================================================
@@ -329,6 +333,7 @@ kernel_setup_state: Dict[str, Dict[str, Any]] = {}
 kernel_setup_tasks: Dict[str, asyncio.Task] = {}
 kernel_sync_tasks: Dict[str, asyncio.Task] = {}
 kernel_generations: Dict[str, int] = {}
+outline_revisions: Dict[str, int] = {}
 server_shutdown_started = False
 
 # DialogHelper data queues for bidirectional browser communication
@@ -391,6 +396,7 @@ async def _teardown_notebook_runtime(nb_id: str, reason: str) -> None:
     kernel_sync_tasks.pop(nb_id, None)
     kernel_setup_state.pop(nb_id, None)
     kernel_generations.pop(nb_id, None)
+    outline_revisions.pop(nb_id, None)
     data_queues.pop(nb_id, None)
     ws_connections.pop(nb_id, None)
     logger.info(
@@ -489,6 +495,24 @@ def _get_queue_payload(nb_id: str) -> dict:
     }
 
 
+def _build_notebook_snapshot(nb_id: str) -> dict:
+    """Return notebook-level state that should stay consistent across tabs."""
+    nb = get_notebook(nb_id)
+    return {
+        "title": nb.title,
+        "dialog_mode": nb.dialog_mode,
+        "model": nb.model,
+        "safe_mode": nb.safe_mode,
+        "kernel_type": getattr(nb, "kernel_type", "local"),
+        "colab_runtime_type": getattr(nb, "colab_runtime_type", "cpu"),
+    }
+
+
+def _get_outline_revision(nb_id: str) -> int:
+    """Return the current outline revision for a notebook."""
+    return outline_revisions.get(nb_id, 0)
+
+
 def _parse_kernel_connection_state(raw_state: Optional[str]) -> tuple[str, Optional[str]]:
     """Split a kernel connection_state into machine state + detail."""
     if not raw_state:
@@ -548,6 +572,7 @@ def _build_kernel_snapshot(nb_id: str) -> dict:
         "type": "kernel_snapshot",
         "notebook_id": nb_id,
         "timestamp": datetime.utcnow().isoformat() + "Z",
+        "notebook": _build_notebook_snapshot(nb_id),
         "kernel": {
             "selected_type": selected_kernel_type,
             "exists": kernel_exists,
@@ -567,6 +592,9 @@ def _build_kernel_snapshot(nb_id: str) -> dict:
             "source": setup_payload.get("source"),
             "phase": setup_payload.get("phase"),
             "detail": setup_payload.get("detail"),
+        },
+        "outline": {
+            "revision": _get_outline_revision(nb_id),
         },
         "auth": auth_payload,
     }
@@ -596,6 +624,34 @@ async def broadcast_all_kernel_snapshots():
     """Broadcast refreshed kernel snapshots for every notebook with clients."""
     for nb_id in list(ws_connections.keys()):
         await broadcast_kernel_snapshot(nb_id)
+
+
+async def _mark_outline_dirty(nb_id: str, reason: str, *, broadcast_snapshot: bool = True) -> None:
+    """Bump the outline revision when server state changes can affect it."""
+    outline_revisions[nb_id] = outline_revisions.get(nb_id, 0) + 1
+    logger.info(
+        "Outline marked dirty (notebook=%s, revision=%s, reason=%s)",
+        nb_id,
+        outline_revisions[nb_id],
+        reason,
+    )
+    if broadcast_snapshot:
+        await broadcast_kernel_snapshot(nb_id)
+
+
+async def _mark_all_outlines_dirty(reason: str) -> None:
+    """Bump outline revisions for all active notebooks, then broadcast snapshots once."""
+    notebook_ids = set(notebooks.keys()) | set(ws_connections.keys()) | set(kernel_service._kernels.keys())
+    for nb_id in notebook_ids:
+        outline_revisions[nb_id] = outline_revisions.get(nb_id, 0) + 1
+        logger.info(
+            "Outline marked dirty (notebook=%s, revision=%s, reason=%s)",
+            nb_id,
+            outline_revisions[nb_id],
+            reason,
+        )
+    if notebook_ids:
+        await broadcast_all_kernel_snapshots()
 
 
 async def _set_kernel_setup_state(
@@ -1381,7 +1437,7 @@ def get(dir: str = "", name: str = ""):
 # ============================================================================
 
 @rt("/files")
-def get(path: str = ""):
+def get(path: str = "", active_notebook_id: str = ""):
     """Get file list content for HTMX swap."""
     from dialeng.ui.file_explorer import FileListContent
     target = NOTEBOOKS_DIR / path if path else NOTEBOOKS_DIR
@@ -1389,10 +1445,10 @@ def get(path: str = ""):
     if not target.resolve().is_relative_to(NOTEBOOKS_DIR.resolve()):
         target = NOTEBOOKS_DIR
     kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
-    return FileListContent(target, NOTEBOOKS_DIR, "", kernel_notebooks=kernel_nbs)
+    return FileListContent(target, NOTEBOOKS_DIR, active_notebook_id, kernel_notebooks=kernel_nbs)
 
 @rt("/files/new-folder")
-def post(path: str = "", name: str = ""):
+def post(path: str = "", name: str = "", active_notebook_id: str = ""):
     """Create a new folder and return updated file list."""
     from dialeng.ui.file_explorer import FileListContent
     if not name or '/' in name or name.startswith('.'):
@@ -1403,10 +1459,10 @@ def post(path: str = "", name: str = ""):
     new_folder = target / name
     new_folder.mkdir(parents=True, exist_ok=True)
     kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
-    return FileListContent(target, NOTEBOOKS_DIR, "", kernel_notebooks=kernel_nbs)
+    return FileListContent(target, NOTEBOOKS_DIR, active_notebook_id, kernel_notebooks=kernel_nbs)
 
 @rt("/files/delete")
-async def post(path: str = ""):
+async def post(path: str = "", active_notebook_id: str = ""):
     """Delete a notebook file and return updated file list."""
     from dialeng.ui.file_explorer import FileListContent
     if not path or '..' in path:
@@ -1423,7 +1479,7 @@ async def post(path: str = ""):
             del notebooks[nb_id]
     parent = target.parent
     kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
-    return FileListContent(parent, NOTEBOOKS_DIR, "", kernel_notebooks=kernel_nbs)
+    return FileListContent(parent, NOTEBOOKS_DIR, active_notebook_id, kernel_notebooks=kernel_nbs)
 
 # ============================================================================
 # Notebook Routes
@@ -1480,23 +1536,29 @@ def post(nb_id: str):
     return Div("✓ Saved", cls="status success")
 
 @rt("/dialeng/{nb_id}/mode")
-def post(nb_id: str, mode: str):
+async def post(nb_id: str, mode: str):
     nb = get_notebook(nb_id)
     nb.dialog_mode = mode
+    nb.modified = True
+    await broadcast_kernel_snapshot(nb_id)
     return ""
 
 @rt("/dialeng/{nb_id}/model")
-def post(nb_id: str, model: str):
+async def post(nb_id: str, model: str):
     nb = get_notebook(nb_id)
     nb.model = model
+    nb.modified = True
+    await broadcast_kernel_snapshot(nb_id)
     return ""
 
 @rt("/dialeng/{nb_id}/safe_mode")
-def post(nb_id: str, safe_mode: str = "false"):
+async def post(nb_id: str, safe_mode: str = "false"):
     """Toggle safe mode for shell commands in this notebook."""
     nb = get_notebook(nb_id)
     # Convert string to boolean (checkbox sends "true" or "false")
     nb.safe_mode = safe_mode.lower() in ("true", "on", "1", "yes")
+    nb.modified = True
+    await broadcast_kernel_snapshot(nb_id)
     return ""
 
 # ============================================================================
@@ -1872,6 +1934,7 @@ async def post(nb_id: str, kernel_type: str):
             except Exception:
                 pass
 
+    await _mark_outline_dirty(nb_id, reason="kernel_type_change", broadcast_snapshot=False)
     await broadcast_kernel_snapshot(nb_id)
 
     return Div(f"Kernel: {reg.label}", cls="status success")
@@ -1899,6 +1962,7 @@ async def post(nb_id: str, runtime_type: str):
         kernel_service.set_kernel_instance(nb_id, new_kernel)
 
     logger.info("Updated Colab runtime type (notebook=%s, runtime_type=%s)", nb_id, runtime_type)
+    await _mark_outline_dirty(nb_id, reason="kernel_runtime_change", broadcast_snapshot=False)
     await broadcast_kernel_snapshot(nb_id)
 
     labels = {"cpu": "CPU", "gpu": "GPU (T4)", "tpu": "TPU"}
@@ -1943,7 +2007,8 @@ def get(nb_id: str):
     from dialeng.ui.kernel_modal import KernelModal
     nb = get_notebook(nb_id)
     colab_auth = colab_auth_service.is_authenticated if colab_auth_service else False
-    return KernelModal(nb.id, nb.kernel_type, colab_auth, nb.colab_runtime_type)
+    colab_email = colab_auth_service.account_email if colab_auth_service else None
+    return KernelModal(nb.id, nb.kernel_type, colab_auth, nb.colab_runtime_type, colab_email)
 
 @rt("/dialeng/{nb_id}/kernel/craft-init")
 async def post(nb_id: str):
@@ -2006,7 +2071,7 @@ async def get(request, code: str = "", error: str = "", state: str = ""):
         # Redirect URI must match what was used in get_auth_url()
         redirect_uri = f"{request.url.scheme}://{request.url.netloc}/auth/google/callback"
         await colab_auth_service.handle_callback(code, redirect_uri=redirect_uri)
-        await broadcast_all_kernel_snapshots()
+        await _mark_all_outlines_dirty("colab_auth_success")
         # Notify the parent window and close the popup
         from starlette.responses import HTMLResponse
         return HTMLResponse("""<!DOCTYPE html><html><body>
@@ -2030,7 +2095,7 @@ async def post():
     """Disconnect from Google / clear Colab tokens."""
     if colab_auth_service:
         colab_auth_service.logout()
-    await broadcast_all_kernel_snapshots()
+    await _mark_all_outlines_dirty("colab_logout")
     return Div(
         Button("Connect Colab", cls="btn btn-sm btn-colab", id="colab-auth-btn",
                onclick="window.open('/auth/google', '_blank', 'width=500,height=700')",
@@ -2104,7 +2169,7 @@ async def get(nb_id: str):
                 variables = ns_info.get('variables', [])
                 functions = ns_info.get('functions', [])
         except Exception as e:
-            print(f"Error getting kernel namespace: {e}")
+            logger.warning("Failed to build outline namespace info (notebook=%s): %s", nb_id, e)
 
     return OutlineSidebar(nb_id, headings, variables, functions, is_open=True)
 
@@ -2199,13 +2264,11 @@ async def post(request):
             colab_changed = True
 
         if colab_changed:
-            await broadcast_all_kernel_snapshots()
+            await _mark_all_outlines_dirty("colab_settings_change")
 
-        # If Colab state changed, reload the page so toolbar updates
         if colab_changed:
             return Div(
-                "Settings saved! Reloading...",
-                Script("setTimeout(() => window.location.reload(), 500);"),
+                "Settings saved. Kernel controls refreshed.",
                 cls="settings-status success"
             )
 
@@ -2226,6 +2289,7 @@ async def post(nb_id: str, pos: int = -1, type: str = "code"):
     if pos < 0:
         pos = len(nb.cells)
     nb.cells.insert(pos, Cell(cell_type=type))
+    nb.modified = True
 
     # FOUST fix (FOUST = Flash of Unstyled Text — Monaco renders code white first,
     # then tokenizes async via web worker; destroying/recreating the editor causes a
@@ -2235,6 +2299,7 @@ async def post(nb_id: str, pos: int = -1, type: str = "code"):
     # so add/move/delete all share one structural source of truth.
     new_cell = nb.cells[pos]
     await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
+    await _mark_outline_dirty(nb_id, reason="cell_add")
 
     return ""
 
@@ -2247,6 +2312,7 @@ async def delete(nb_id: str, cid: str):
     queue.cancel_queued(nb_id, cid)
 
     nb.cells = [c for c in nb.cells if c.id != cid]
+    nb.modified = True
 
     # Broadcast queue state update
     await broadcast_queue_state(nb_id)
@@ -2255,31 +2321,70 @@ async def delete(nb_id: str, cid: str):
     # The client removes just this cell + its adjacent add-row from DOM.
     # Other cells' Monaco editors are completely untouched.
     await broadcast_json(nb_id, _cell_delete_payload(nb, cid))
+    await _mark_outline_dirty(nb_id, reason="cell_delete")
 
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/source")
-def post(nb_id: str, cid: str, source: str):
+async def post(nb_id: str, cid: str, source: str):
     nb = get_notebook(nb_id)
     for c in nb.cells:
         if c.id == cid:
-            old_source = c.source
-            c.source = source
-            # CRITICAL: Clear output when source changes to prevent stale data in context
-            # This ensures that when context is built for subsequent cells,
-            # we don't include an old assistant response that doesn't match the new source.
-            if old_source != source:
-                c.clear_outputs()
-                print(f"[SOURCE UPDATE] Cell {cid}: Source changed, cleared outputs to prevent stale context")
+            changed = c.update_source(source)
+            if not changed:
+                break
+
+            nb.modified = True
+            cell_type = str(getattr(c, "cell_type", ""))
+            logger.info(
+                "Cell source committed (notebook=%s, cell=%s, cell_type=%s, version=%s)",
+                nb_id,
+                cid,
+                cell_type,
+                c.version,
+            )
+
+            if cell_type in {"code", "shell"}:
+                await broadcast_json(nb_id, {
+                    "type": "cell_source_update",
+                    "cell_id": c.id,
+                    "source": c.source,
+                    "version": c.version,
+                })
+                await broadcast_to_notebook(nb_id, CellOutputOOB(c))
+                await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
+            else:
+                await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
+
+            if cell_type == "note":
+                await _mark_outline_dirty(nb_id, reason="note_source_commit")
             break
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/output")
-def post(nb_id: str, cid: str, output: str):
+async def post(nb_id: str, cid: str, output: str):
     nb = get_notebook(nb_id)
     for c in nb.cells:
         if c.id == cid:
-            c.output = output
+            changed = c.update_output(output)
+            if not changed:
+                break
+
+            nb.modified = True
+            cell_type = str(getattr(c, "cell_type", ""))
+            logger.info(
+                "Cell output committed (notebook=%s, cell=%s, cell_type=%s, version=%s)",
+                nb_id,
+                cid,
+                cell_type,
+                c.version,
+            )
+
+            if cell_type in {"code", "shell"}:
+                await broadcast_to_notebook(nb_id, CellOutputOOB(c))
+                await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
+            else:
+                await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
             break
     return ""
 
@@ -2289,15 +2394,18 @@ async def post(nb_id: str, cid: str, cell_type: str):
     for c in nb.cells:
         if c.id == cid:
             c.cell_type = cell_type
-            c.output = ""
-            c.execution_count = None
+            c.clear_outputs()
+            c.version += 1
+            c.last_modified = datetime.now()
+            nb.modified = True
 
             # Cell type change is the ONE case where CellViewOOB is correct:
             # the input section fundamentally changes (Monaco editor ↔ textarea),
             # so full DOM replacement is unavoidable and expected.
             await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
+            await _mark_outline_dirty(nb_id, reason="cell_type_change")
 
-            return CellView(c, nb.id)
+            return ""
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/move/{direction}")
@@ -2311,10 +2419,12 @@ async def post(nb_id: str, cid: str, direction: str):
     moved = nb.move_cell(cid, move_delta)
     if not moved:
         return ""
+    nb.modified = True
 
     # Broadcast the backend-authoritative cell order so every client reorders
     # the existing DOM nodes from the same source of truth.
     await broadcast_json(nb_id, _cell_move_payload(nb, cid))
+    await _mark_outline_dirty(nb_id, reason="cell_move")
 
     # Move buttons use hx_swap="none"; the browser applies the canonical order
     # from the WebSocket message and keeping the HTTP response empty avoids
@@ -2335,7 +2445,9 @@ async def post(nb_id: str, cid: str):
                 is_exported=c.is_exported,
             )
             nb.cells.insert(i + 1, new_cell)
+            nb.modified = True
             await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
+            await _mark_outline_dirty(nb_id, reason="cell_duplicate")
             return ""
     return ""
 
@@ -2346,8 +2458,14 @@ async def post(nb_id: str, cid: str):
     for c in nb.cells:
         if c.id == cid:
             c.clear_outputs()
-            await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
-            return CellView(c, nb.id)
+            nb.modified = True
+            cell_type = str(getattr(c, "cell_type", ""))
+            if cell_type in {"code", "shell"}:
+                await broadcast_to_notebook(nb_id, CellOutputOOB(c))
+                await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
+            else:
+                await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
+            return ""
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/merge-below")
@@ -2357,13 +2475,25 @@ async def post(nb_id: str, cid: str):
     for i, c in enumerate(nb.cells):
         if c.id == cid and i + 1 < len(nb.cells):
             below = nb.cells[i + 1]
-            c.source = c.source.rstrip('\n') + '\n' + below.source
-            c.clear_outputs()
+            c.update_source(c.source.rstrip('\n') + '\n' + below.source)
+            nb.modified = True
             # Remove the cell below
             del nb.cells[i + 1]
             await broadcast_json(nb_id, _cell_delete_payload(nb, below.id))
-            await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
-            return CellView(c, nb.id)
+            cell_type = str(getattr(c, "cell_type", ""))
+            if cell_type in {"code", "shell"}:
+                await broadcast_json(nb_id, {
+                    "type": "cell_source_update",
+                    "cell_id": c.id,
+                    "source": c.source,
+                    "version": c.version,
+                })
+                await broadcast_to_notebook(nb_id, CellOutputOOB(c))
+                await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
+            else:
+                await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
+            await _mark_outline_dirty(nb_id, reason="cell_merge_below")
+            return ""
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/extract-code-blocks")
@@ -2382,7 +2512,9 @@ async def post(nb_id: str, cid: str):
             for j, block in enumerate(blocks):
                 new_cell = Cell(cell_type="code", source=block.strip())
                 nb.cells.insert(i + 1 + j, new_cell)
+                nb.modified = True
                 await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
+            await _mark_outline_dirty(nb_id, reason="extract_code_blocks")
             return ""
     return ""
 
@@ -2459,9 +2591,31 @@ async def post(nb_id: str, cid: str, source: str = None):
 
     c = target_cell
 
-    # Update source if provided (from Monaco editor via hx-vals)
-    if source is not None:
+    # Running a cell from the editor can submit fresher source than the last blur
+    # commit. Persist that source first so every tab converges on the same input,
+    # but keep the previous output visible until queue/running state is confirmed.
+    if source is not None and source != c.source:
         c.source = source
+        c.version += 1
+        c.last_modified = datetime.now()
+        nb.modified = True
+        cell_type = str(getattr(c, "cell_type", ""))
+        logger.info(
+            "Cell source committed during run (notebook=%s, cell=%s, cell_type=%s, version=%s)",
+            nb_id,
+            cid,
+            cell_type,
+            c.version,
+        )
+        if cell_type in {"code", "shell"}:
+            await broadcast_json(nb_id, {
+                "type": "cell_source_update",
+                "cell_id": c.id,
+                "source": c.source,
+                "version": c.version,
+            })
+        else:
+            await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
 
     if c.cell_type == "code":
         queue = get_execution_queue(nb_id)
@@ -2807,6 +2961,7 @@ async def post(nb_id: str):
         craft_cells=craft_cells,
         craft_paths=craft_paths,
     )
+    await _mark_outline_dirty(nb_id, reason="kernel_restart")
 
     return Div(cls="status")
 

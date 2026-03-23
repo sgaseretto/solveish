@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `tests/test_colab_resilience.py` covering per-notebook kernel serialization, Colab auth state handling, degraded Colab connection liveness, connection recycle behavior, and async kernel teardown
 - Added `tests/test_logging_config.py` covering console log filtering and Dialeng logger registration
 
+#### Backend-Authoritative Notebook Snapshots
+- Kernel snapshots now also carry notebook toolbar state (`mode`, `model`, `safe_mode`, selected kernel type/runtime) plus an outline revision counter
+- Toolbar controls now refresh from backend state instead of relying on optimistic client-side mutation
+- File explorer refresh requests now preserve the active notebook id so highlighting and current notebook kernel state stay correct while browsing folders
+- Nested and current notebook explorer items now use canonical encoded notebook ids consistently when syncing running-kernel indicators
+
 #### Solveit-style Keyboard Shortcuts
 - **Navigation**: Arrow keys / `j`/`k` to navigate cells, `Shift+Arrow` for multi-selection, `Cmd+A` select all, `Enter` to edit, `Escape` to exit
 - **Multi-selection**: Click, Shift+click (range), Cmd+click (toggle) — multi-select applies to h/p/e toggles, clipboard ops, and clear outputs
@@ -78,6 +84,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Interactive HTML Widgets Not Rendering on Re-run
 - Code cells producing HTML with `<script>` tags (e.g., YouTube embeds, custom JS visualizations) only worked on the first execution — subsequent runs showed an empty output
+
+#### Shared Notebook State Drift
+- Committed cell source/output edits now broadcast canonical backend state to every open tab instead of assuming the initiating tab's DOM is the source of truth
+- Running a code or prompt cell with fresher in-editor text now commits and broadcasts that source before execution, so other tabs no longer see only the new output while keeping stale or empty input
+- Code and shell source commits now clear outputs and execution metadata consistently in all tabs because the backend owns the committed cell version
+- Notebook toolbar settings (`mode`, `model`, `safe_mode`) now synchronize across tabs via kernel snapshots
+- Outline refresh is now driven by a backend revision bump after note edits, structural cell changes, kernel restarts, and completed code execution instead of local client guesses
+- Structural cell routes and type changes now avoid mixing local HTMX swaps with authoritative WebSocket/OOB updates, reducing another class of notebook-state divergence
+- Code run requests keep prior output visible until the backend confirms queued/running state, eliminating another source of optimistic UI drift
+- Kernel modal HTMX refresh now preserves its visible/open state instead of replacing the overlay and immediately closing it on page startup or state refresh
 - Root cause: the OOB swap that finalizes cell output uses `replaceWith()`, which does not execute `<script>` tags. On first run, async API loading (e.g., YouTube IFrame API) happened to fire after the OOB swap. On re-runs, the API was already loaded and created the widget synchronously during streaming, but the OOB swap then destroyed it
 - Fix: `processOOBSwap()` now clones `<script>` tags into fresh elements after replacing `output-*` divs, mirroring the pattern already used in `appendDisplayData()` during streaming
 
