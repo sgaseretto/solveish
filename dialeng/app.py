@@ -50,6 +50,7 @@ from dialeng.services.dialeng_config import (
 from dialeng.services.shell_service import (
     SHFMT_AVAILABLE, warn_missing_shfmt, print_shfmt_status
 )
+from dialeng.services.file_editor_service import FileEditorService
 
 # UI Components (extracted to ui/ package)
 from dialeng.ui import (
@@ -57,6 +58,7 @@ from dialeng.ui import (
     AllCellsOOB, CellViewOOB, CellOutputOOB, CellHeaderOOB, AddButtons,
     TypeSelect, CollapseBtn, get_collapse_class, get_cell_state_classes
 )
+from dialeng.ui.file_editor import FileEditorPage, FileEditorPane
 from dialeng.ui.mime import render_mime_bundle
 from dialeng.logging_config import build_log_config
 
@@ -304,6 +306,7 @@ This is a **demo response**. In production, connect to Claude, OpenAI, or local 
 notebooks: Dict[str, Notebook] = {}
 NOTEBOOKS_DIR = Path(os.environ.get("DIALENG_NOTEBOOKS_DIR", "notebooks"))
 NOTEBOOKS_DIR.mkdir(exist_ok=True)
+file_editor_service = FileEditorService(NOTEBOOKS_DIR)
 
 def set_root_dir(root: Path):
     """Set the notebooks root directory. Called by CLI before main().
@@ -314,6 +317,7 @@ def set_root_dir(root: Path):
     global NOTEBOOKS_DIR, DIALENG_CONFIG
     NOTEBOOKS_DIR = root
     NOTEBOOKS_DIR.mkdir(exist_ok=True)
+    file_editor_service.set_root(NOTEBOOKS_DIR)
 
     # Reload config from the project directory
     DIALENG_CONFIG = load_config(config_path=NOTEBOOKS_DIR / "dialeng_config.json", force_reload=True)
@@ -1437,7 +1441,7 @@ def get(dir: str = "", name: str = ""):
 # ============================================================================
 
 @rt("/files")
-def get(path: str = "", active_notebook_id: str = ""):
+def get(path: str = "", active_notebook_id: str = "", active_file_relpath: str = ""):
     """Get file list content for HTMX swap."""
     from dialeng.ui.file_explorer import FileListContent
     target = NOTEBOOKS_DIR / path if path else NOTEBOOKS_DIR
@@ -1445,10 +1449,16 @@ def get(path: str = "", active_notebook_id: str = ""):
     if not target.resolve().is_relative_to(NOTEBOOKS_DIR.resolve()):
         target = NOTEBOOKS_DIR
     kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
-    return FileListContent(target, NOTEBOOKS_DIR, active_notebook_id, kernel_notebooks=kernel_nbs)
+    return FileListContent(
+        target,
+        NOTEBOOKS_DIR,
+        active_notebook_id,
+        active_file_relpath=active_file_relpath,
+        kernel_notebooks=kernel_nbs,
+    )
 
 @rt("/files/new-folder")
-def post(path: str = "", name: str = "", active_notebook_id: str = ""):
+def post(path: str = "", name: str = "", active_notebook_id: str = "", active_file_relpath: str = ""):
     """Create a new folder and return updated file list."""
     from dialeng.ui.file_explorer import FileListContent
     if not name or '/' in name or name.startswith('.'):
@@ -1459,27 +1469,95 @@ def post(path: str = "", name: str = "", active_notebook_id: str = ""):
     new_folder = target / name
     new_folder.mkdir(parents=True, exist_ok=True)
     kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
-    return FileListContent(target, NOTEBOOKS_DIR, active_notebook_id, kernel_notebooks=kernel_nbs)
+    return FileListContent(
+        target,
+        NOTEBOOKS_DIR,
+        active_notebook_id,
+        active_file_relpath=active_file_relpath,
+        kernel_notebooks=kernel_nbs,
+    )
 
 @rt("/files/delete")
-async def post(path: str = "", active_notebook_id: str = ""):
-    """Delete a notebook file and return updated file list."""
+async def post(path: str = "", active_notebook_id: str = "", active_file_relpath: str = ""):
+    """Delete a file and return updated file list."""
     from dialeng.ui.file_explorer import FileListContent
     if not path or '..' in path:
         return Div("Invalid path", cls="status error")
-    target = NOTEBOOKS_DIR / f"{path}.ipynb"
+    target = NOTEBOOKS_DIR / path
     if not target.resolve().is_relative_to(NOTEBOOKS_DIR.resolve()):
         return Div("Invalid path", cls="status error")
     if target.exists() and target.is_file():
         target.unlink()
-        # Remove from in-memory notebooks if loaded
-        nb_id = _nb_id_from_path(target)
-        await _teardown_notebook_runtime(nb_id, reason="file_delete")
-        if nb_id in notebooks:
-            del notebooks[nb_id]
+        if target.suffix == ".ipynb":
+            nb_id = _nb_id_from_path(target)
+            await _teardown_notebook_runtime(nb_id, reason="file_delete")
+            if nb_id in notebooks:
+                del notebooks[nb_id]
     parent = target.parent
     kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
-    return FileListContent(parent, NOTEBOOKS_DIR, active_notebook_id, kernel_notebooks=kernel_nbs)
+    next_active_file = "" if active_file_relpath == path else active_file_relpath
+    return FileListContent(
+        parent,
+        NOTEBOOKS_DIR,
+        active_notebook_id,
+        active_file_relpath=next_active_file,
+        kernel_notebooks=kernel_nbs,
+    )
+
+
+@rt("/dialeng/file")
+def get(path: str = ""):
+    """Render a standalone text-file editor shell."""
+    if not path:
+        return RedirectResponse("/dialeng/default", status_code=302)
+    target = file_editor_service.resolve_rel_path(path)
+    if target is None or not target.exists() or not target.is_file():
+        return Titled("File not found - Dialeng", Div("File not found.", cls="status error"))
+    if target.suffix == ".ipynb":
+        rel = target.resolve().relative_to(NOTEBOOKS_DIR.resolve())
+        notebook_name = str(rel.with_suffix(""))
+        return RedirectResponse(f"/dialeng/?name={notebook_name}", status_code=302)
+    return FileEditorPage(rel_path=file_editor_service.rel_path_for(target), root_dir=NOTEBOOKS_DIR, config=get_config())
+
+
+@rt("/dialeng/file/view")
+def get(path: str = "", client_id: str = ""):
+    """Return the backend-authoritative editor fragment for a file."""
+    if not path:
+        return HTMLResponse(to_xml(FileEditorPane(file_editor_service.open_file("", client_id or ""))))
+    if not client_id:
+        from dialeng.services.file_editor_service import FileOpenResult
+        return HTMLResponse(to_xml(FileEditorPane(
+            FileOpenResult(
+                status="locked",
+                rel_path=path,
+                reason="Dialeng could not establish a file-edit session for this tab.",
+            )
+        )))
+    return HTMLResponse(to_xml(FileEditorPane(file_editor_service.open_file(path, client_id))))
+
+
+@rt("/dialeng/file/save")
+def post(path: str = "", client_id: str = "", content: str = ""):
+    """Save an open file if the current client owns its edit lease."""
+    result = file_editor_service.save_file(path, client_id, content)
+    if result.status == "editable":
+        return {"ok": True, "message": "File saved.", "language": result.language}
+    return {"ok": False, "message": result.reason or "File could not be saved.", "status": result.status}
+
+
+@rt("/dialeng/file/heartbeat")
+def post(path: str = "", client_id: str = ""):
+    """Refresh the edit lease for a file."""
+    ok = file_editor_service.heartbeat(path, client_id)
+    return {"ok": ok}
+
+
+@rt("/dialeng/file/release")
+def post(path: str = "", client_id: str = ""):
+    """Release a file-edit lease for the current client."""
+    file_editor_service.release(path, client_id)
+    return {"ok": True}
 
 # ============================================================================
 # Notebook Routes

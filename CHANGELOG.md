@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - File explorer refresh requests now preserve the active notebook id so highlighting and current notebook kernel state stay correct while browsing folders
 - Nested and current notebook explorer items now use canonical encoded notebook ids consistently when syncing running-kernel indicators
 
+#### Standalone Plain-File Editing
+- Non-notebook plain-text files shown in the file explorer now open in a separate file-editor page instead of notebook/dialog mode
+- Added backend-authoritative single-writer file leases with heartbeat/release so only one Dialeng browser tab/session can edit a plain file at a time
+- Added standalone Monaco-backed editing for supported text files such as `.md`, `.json`, `.txt`, `.py`, `.js`, `.ts`, `.html`, `.css`, `.yaml`, and `.toml`
+- Added non-editable fallback screens for binary/non-text files so unsupported files open with a clear message instead of a broken editor
+- Added `tests/test_file_editor_service.py` covering lease ownership, save authorization, binary detection, and notebook/file separation
+- Added `docs/how_it_works/18_file_editor_mode.md` and `docs/guides/editing_plain_files.md`
+
 #### Solveit-style Keyboard Shortcuts
 - **Navigation**: Arrow keys / `j`/`k` to navigate cells, `Shift+Arrow` for multi-selection, `Cmd+A` select all, `Enter` to edit, `Escape` to exit
 - **Multi-selection**: Click, Shift+click (range), Cmd+click (toggle) — multi-select applies to h/p/e toggles, clipboard ops, and clear outputs
@@ -96,6 +104,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Kernel modal HTMX refresh now preserves its visible/open state instead of replacing the overlay and immediately closing it on page startup or state refresh
 - Root cause: the OOB swap that finalizes cell output uses `replaceWith()`, which does not execute `<script>` tags. On first run, async API loading (e.g., YouTube IFrame API) happened to fire after the OOB swap. On re-runs, the API was already loaded and created the widget synchronously during streaming, but the OOB swap then destroyed it
 - Fix: `processOOBSwap()` now clones `<script>` tags into fresh elements after replacing `output-*` divs, mirroring the pattern already used in `appendDisplayData()` during streaming
+
+#### File Editor Fragment Loading
+- The standalone file-editor fragment route now returns fragment-only HTML instead of a full FastHTML document, so clicking a text file in the explorer no longer injects `<!doctype html>...` into the editor container and fall into the generic "File editor error" path
+- The file-page fetch now explicitly sends `HX-Request: true`, matching FastHTML's partial-response expectations for fragment injection
+- The file-page bootstrap no longer runs `htmx.process(...)` on the injected fragment, because file-editor fragments are plain DOM content and HTMX post-processing could still trip the load path after a successful fetch
+- Shared notebook/file event listeners now attach to `document` instead of `document.body`, preventing file pages from crashing during initial script evaluation before `<body>` exists and leaving file-editor globals uninitialized
 
 #### Uvicorn Reload Loop on Generated Files
 - Running `!pip install` or other commands that create files in `.venv`/`.autorun_modules` triggered uvicorn's file watcher, causing infinite reload loops

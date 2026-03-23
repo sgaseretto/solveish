@@ -23,6 +23,10 @@ function nbApiPath() {
     return `/dialeng/${window.NOTEBOOK_ID}`;
 }
 
+function isFilePage() {
+    return window.DIALENG_PAGE_KIND === 'file';
+}
+
 // ==================== DialogHelper Bidirectional Data ====================
 // Used by screenshot.js and other dialoghelper event handlers to push data
 // back to Python via the /push_data_blocking_ endpoint.
@@ -58,8 +62,10 @@ document.addEventListener('mousedown', (e) => {
 
 // ==================== Monaco Editor Management ====================
 const monacoEditors = {};
+const standaloneMonacoEditors = {};
 let monacoReady = false;
 const pendingEditorInits = [];
+const pendingStandaloneEditorInits = [];
 
 // Monaco AMD loader initialization
 require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' }});
@@ -117,6 +123,8 @@ require(['vs/editor/editor.main'], function() {
     // Initialize any editors that were requested before Monaco loaded
     pendingEditorInits.forEach(args => initMonacoEditor(...args));
     pendingEditorInits.length = 0;
+    pendingStandaloneEditorInits.forEach(args => initStandaloneMonacoEditor(...args));
+    pendingStandaloneEditorInits.length = 0;
 });
 
 // ---------------------------------------------------------------------------
@@ -357,6 +365,123 @@ function destroyMonacoEditor(cellId) {
     if (monacoEditors[cellId]) {
         monacoEditors[cellId].dispose();
         delete monacoEditors[cellId];
+    }
+}
+
+function initStandaloneMonacoEditor(containerId, textareaId, mode = 'plaintext') {
+    if (!monacoReady) {
+        pendingStandaloneEditorInits.push([containerId, textareaId, mode]);
+        return null;
+    }
+
+    const container = document.getElementById(containerId);
+    const textarea = document.getElementById(textareaId);
+    if (!container || !textarea) return null;
+
+    if (standaloneMonacoEditors[containerId]) {
+        if (container.querySelector('.monaco-editor')) {
+            return standaloneMonacoEditors[containerId];
+        }
+        standaloneMonacoEditors[containerId].dispose();
+        delete standaloneMonacoEditors[containerId];
+    }
+
+    container.innerHTML = '';
+    container.className = 'monaco-container file-monaco-editor';
+    container.style.opacity = '0';
+
+    const isDark = (document.documentElement.getAttribute('data-theme') || 'dark') !== 'light';
+    const editor = monaco.editor.create(container, {
+        value: textarea.value || '',
+        language: mode || 'plaintext',
+        theme: isDark ? 'vs-dark' : 'vs',
+        fontSize: 14,
+        fontFamily: "'SF Mono', 'Fira Code', 'Consolas', monospace",
+        tabSize: 4,
+        insertSpaces: true,
+        wordWrap: 'off',
+        minimap: { enabled: false },
+        lineNumbers: 'on',
+        scrollBeyondLastLine: false,
+        automaticLayout: true,
+        overviewRulerLanes: 0,
+        hideCursorInOverviewRuler: true,
+        renderLineHighlight: 'line',
+        glyphMargin: false,
+        folding: true,
+        scrollbar: { vertical: 'auto', horizontal: 'auto', alwaysConsumeMouseWheel: false },
+    });
+
+    textarea.value = editor.getValue();
+    editor.onDidChangeModelContent(() => {
+        textarea.value = editor.getValue();
+    });
+
+    const minHeight = 320;
+    const maxHeight = Math.max(window.innerHeight - 220, minHeight);
+    let heightRaf = null;
+    function updateEditorHeight() {
+        if (heightRaf) return;
+        heightRaf = requestAnimationFrame(() => {
+            heightRaf = null;
+            const nextHeight = Math.max(minHeight, Math.min(maxHeight, editor.getContentHeight()));
+            const newHeight = `${nextHeight}px`;
+            if (container.style.height !== newHeight) {
+                container.style.height = newHeight;
+                editor.layout();
+            }
+        });
+    }
+    editor.onDidContentSizeChange(updateEditorHeight);
+    container.style.height = `${Math.max(minHeight, Math.min(maxHeight, editor.getContentHeight()))}px`;
+    editor.layout();
+
+    if (textarea.value.trim()) {
+        let attempts = 0;
+        const pollTokens = () => {
+            attempts++;
+            const tokenSpans = container.querySelectorAll('.view-lines [class*="mtk"]');
+            let hasColoredTokens = false;
+            for (const span of tokenSpans) {
+                if (span.className !== 'mtk1') {
+                    hasColoredTokens = true;
+                    break;
+                }
+            }
+            if (hasColoredTokens || attempts >= 30) {
+                container.style.opacity = '1';
+            } else {
+                requestAnimationFrame(pollTokens);
+            }
+        };
+        requestAnimationFrame(pollTokens);
+    } else {
+        container.style.opacity = '1';
+    }
+
+    editor.addAction({
+        id: `dialeng-file-save-${containerId}`,
+        label: 'Save File',
+        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
+        run: () => saveOpenFile(),
+    });
+
+    standaloneMonacoEditors[containerId] = editor;
+    return editor;
+}
+
+function syncStandaloneMonacoToTextarea(containerId, textareaId) {
+    const editor = standaloneMonacoEditors[containerId];
+    const textarea = document.getElementById(textareaId);
+    if (editor && textarea) {
+        textarea.value = editor.getValue();
+    }
+}
+
+function destroyStandaloneMonacoEditor(containerId) {
+    if (standaloneMonacoEditors[containerId]) {
+        standaloneMonacoEditors[containerId].dispose();
+        delete standaloneMonacoEditors[containerId];
     }
 }
 
@@ -769,6 +894,18 @@ document.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'E') {
         e.preventDefault();
         toggleFileExplorer();
+        return;
+    }
+
+    if (isFilePage()) {
+        if (mod && e.key === 's') {
+            e.preventDefault();
+            saveOpenFile();
+            return;
+        }
+        if (e.key === 'Escape' && document.activeElement) {
+            document.activeElement.blur();
+        }
         return;
     }
 
@@ -4184,8 +4321,10 @@ function applyKernelSelection(nbId) {
     });
 }
 
-// Refresh kernel status bar after first cell execution
-document.body.addEventListener('kernel-connected', function(e) {
+// Refresh kernel status bar after first cell execution.
+// Use document instead of document.body because this shared bundle is loaded
+// from <head>, before body is guaranteed to exist on both notebook and file pages.
+document.addEventListener('kernel-connected', function(e) {
     const nbId = window.NOTEBOOK_ID;
     if (nbId) {
         htmx.ajax('GET', `/dialeng/${nbId}/kernel/info`, {target: '#kernel-status-bar', swap: 'outerHTML'});
@@ -4204,7 +4343,7 @@ document.addEventListener('keydown', function(e) {
 });
 
 // Intercept cell run requests when no kernel is selected
-document.body.addEventListener('htmx:beforeRequest', function(e) {
+document.addEventListener('htmx:beforeRequest', function(e) {
     // Get request path from HTMX element or requestConfig
     const elt = e.detail.elt;
     const path = elt?.getAttribute('hx-post') || e.detail.requestConfig?.path || e.detail.pathInfo?.requestPath || '';
@@ -4250,7 +4389,7 @@ document.body.addEventListener('htmx:beforeRequest', function(e) {
 });
 
 // Server-side safety net: kernel-required HX-Trigger
-document.body.addEventListener('kernel-required', function(e) {
+document.addEventListener('kernel-required', function(e) {
     const detail = e.detail || {};
     const cellId = detail.cellId || null;
 
@@ -4276,6 +4415,149 @@ document.body.addEventListener('kernel-required', function(e) {
     }
 });
 
+// ==================== Standalone File Editor ====================
+let fileEditorHeartbeatId = null;
+let fileEditorOwnsLock = false;
+
+function getDialengClientId() {
+    let clientId = sessionStorage.getItem('dialeng-client-id');
+    if (!clientId) {
+        clientId = (window.crypto?.randomUUID?.() || `dialeng-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+        sessionStorage.setItem('dialeng-client-id', clientId);
+    }
+    return clientId;
+}
+
+function stopFileEditorHeartbeat() {
+    if (fileEditorHeartbeatId) {
+        clearInterval(fileEditorHeartbeatId);
+        fileEditorHeartbeatId = null;
+    }
+}
+
+function startFileEditorHeartbeat() {
+    stopFileEditorHeartbeat();
+    const path = document.getElementById('file-editor-path')?.value || window.DIALENG_FILE_PATH;
+    if (!path || !fileEditorOwnsLock) return;
+    const clientId = getDialengClientId();
+    fileEditorHeartbeatId = setInterval(async () => {
+        try {
+            const resp = await fetch('/dialeng/file/heartbeat', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: `path=${encodeURIComponent(path)}&client_id=${encodeURIComponent(clientId)}`
+            });
+            const data = await resp.json();
+            if (!data.ok) {
+                fileEditorOwnsLock = false;
+                stopFileEditorHeartbeat();
+                showKernelStatusMessage('This file is no longer locked by this tab. Reloading editor state…', 'warning', 5000);
+                reloadFileEditorView();
+            }
+        } catch (err) {
+            console.warn('[FileEditor] Heartbeat failed:', err);
+        }
+    }, 10000);
+}
+
+function applyFileEditorFragmentState() {
+    destroyStandaloneMonacoEditor('file-monaco');
+    stopFileEditorHeartbeat();
+
+    const saveBtn = document.getElementById('save-btn');
+    const state = document.getElementById('file-editor-state')?.value || 'missing';
+    fileEditorOwnsLock = state === 'editable';
+
+    if (saveBtn) saveBtn.disabled = !fileEditorOwnsLock;
+
+    if (fileEditorOwnsLock) {
+        const language = document.getElementById('file-editor-language')?.value || 'plaintext';
+        initStandaloneMonacoEditor('file-monaco', 'file-source', language);
+        startFileEditorHeartbeat();
+    }
+}
+
+async function reloadFileEditorView() {
+    if (!window.DIALENG_FILE_PATH) return;
+
+    const container = document.getElementById('file-editor-container');
+    if (!container) return;
+
+    container.innerHTML = '<div class="file-editor-loading">Loading file…</div>';
+    const clientId = getDialengClientId();
+    try {
+        const resp = await fetch(`/dialeng/file/view?path=${encodeURIComponent(window.DIALENG_FILE_PATH)}&client_id=${encodeURIComponent(clientId)}`, {
+            headers: {'HX-Request': 'true'},
+            cache: 'no-store'
+        });
+        if (!resp.ok) throw new Error(`view failed: ${resp.status}`);
+        const fragmentHtml = await resp.text();
+        container.innerHTML = fragmentHtml;
+        applyFileEditorFragmentState();
+    } catch (err) {
+        console.error('[FileEditor] Failed to load file view:', err);
+        container.innerHTML = '<div class="file-editor-message error"><h3 class="file-editor-message-title">File editor error</h3><p class="file-editor-message-body">Dialeng could not load this file.</p></div>';
+        fileEditorOwnsLock = false;
+        const saveBtn = document.getElementById('save-btn');
+        if (saveBtn) saveBtn.disabled = true;
+    }
+}
+
+function initializeFileEditorPage(path) {
+    window.DIALENG_PAGE_KIND = 'file';
+    window.DIALENG_FILE_PATH = path;
+    reloadFileEditorView();
+}
+
+async function saveOpenFile() {
+    if (!fileEditorOwnsLock) {
+        showKernelStatusMessage('This file is not editable in the current tab.', 'warning', 3500);
+        return;
+    }
+    const path = document.getElementById('file-editor-path')?.value || window.DIALENG_FILE_PATH;
+    const textarea = document.getElementById('file-source');
+    if (!path || !textarea) return;
+
+    syncStandaloneMonacoToTextarea('file-monaco', 'file-source');
+    const clientId = getDialengClientId();
+    const saveBtn = document.getElementById('save-btn');
+    if (saveBtn) saveBtn.disabled = true;
+
+    try {
+        const resp = await fetch('/dialeng/file/save', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: `path=${encodeURIComponent(path)}&client_id=${encodeURIComponent(clientId)}&content=${encodeURIComponent(textarea.value)}`
+        });
+        const data = await resp.json();
+        showKernelStatusMessage(data.message || (data.ok ? 'File saved.' : 'Save failed.'), data.ok ? 'success' : 'error', 3000);
+        if (!data.ok && data.status === 'locked') {
+            fileEditorOwnsLock = false;
+            reloadFileEditorView();
+        }
+    } catch (err) {
+        console.error('[FileEditor] Save failed:', err);
+        showKernelStatusMessage('File save failed.', 'error', 4000);
+    } finally {
+        if (saveBtn) saveBtn.disabled = !fileEditorOwnsLock;
+    }
+}
+
+function releaseOpenFileLock() {
+    if (!fileEditorOwnsLock || !window.DIALENG_FILE_PATH) return;
+    const params = new URLSearchParams({
+        path: window.DIALENG_FILE_PATH,
+        client_id: getDialengClientId(),
+    });
+    navigator.sendBeacon('/dialeng/file/release', new Blob([params.toString()], {
+        type: 'application/x-www-form-urlencoded;charset=UTF-8'
+    }));
+}
+
+window.addEventListener('beforeunload', () => {
+    releaseOpenFileLock();
+});
+
 // ==================== File Explorer ====================
 function toggleFileExplorer() {
     const sidebar = document.getElementById('file-explorer-sidebar');
@@ -4296,7 +4578,8 @@ function toggleFileExplorer() {
 function refreshFileExplorer() {
     const currentPath = document.getElementById('current-explorer-path')?.value || '';
     const activeNotebookId = document.getElementById('current-explorer-active-notebook')?.value || window.NOTEBOOK_ID || '';
-    htmx.ajax('GET', `/files?path=${encodeURIComponent(currentPath)}&active_notebook_id=${encodeURIComponent(activeNotebookId)}`, '#file-list-content');
+    const activeFileRelpath = document.getElementById('current-explorer-active-file')?.value || window.DIALENG_FILE_PATH || '';
+    htmx.ajax('GET', `/files?path=${encodeURIComponent(currentPath)}&active_notebook_id=${encodeURIComponent(activeNotebookId)}&active_file_relpath=${encodeURIComponent(activeFileRelpath)}`, '#file-list-content');
 }
 
 function toggleNewItemModal() {
@@ -4330,13 +4613,14 @@ function createNewItem() {
     // Read current path from hidden input updated by HTMX folder navigation
     const currentPath = document.getElementById('current-explorer-path')?.value || '';
     const activeNotebookId = document.getElementById('current-explorer-active-notebook')?.value || window.NOTEBOOK_ID || '';
+    const activeFileRelpath = document.getElementById('current-explorer-active-file')?.value || window.DIALENG_FILE_PATH || '';
 
     if (type === 'folder') {
         // Create folder via HTMX-style fetch
         fetch('/files/new-folder', {
             method: 'POST',
             headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            body: `path=${encodeURIComponent(currentPath)}&name=${encodeURIComponent(name)}&active_notebook_id=${encodeURIComponent(activeNotebookId)}`
+            body: `path=${encodeURIComponent(currentPath)}&name=${encodeURIComponent(name)}&active_notebook_id=${encodeURIComponent(activeNotebookId)}&active_file_relpath=${encodeURIComponent(activeFileRelpath)}`
         }).then(r => r.text()).then(html => {
             const container = document.getElementById('file-list-content');
             if (container) {
@@ -4374,10 +4658,11 @@ function confirmDeleteFile() {
     const filePath = document.getElementById('delete-file-path')?.value;
     if (!filePath) return;
     const activeNotebookId = document.getElementById('current-explorer-active-notebook')?.value || window.NOTEBOOK_ID || '';
+    const activeFileRelpath = document.getElementById('current-explorer-active-file')?.value || window.DIALENG_FILE_PATH || '';
     fetch('/files/delete', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: `path=${encodeURIComponent(filePath)}&active_notebook_id=${encodeURIComponent(activeNotebookId)}`
+        body: `path=${encodeURIComponent(filePath)}&active_notebook_id=${encodeURIComponent(activeNotebookId)}&active_file_relpath=${encodeURIComponent(activeFileRelpath)}`
     }).then(r => r.text()).then(html => {
         const container = document.getElementById('file-list-content');
         if (container) {
