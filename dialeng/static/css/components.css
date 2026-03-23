@@ -2335,3 +2335,84 @@ button, select { font-size: var(--btn-font-size, inherit); }
 .file-explorer-item.has-kernel .file-explorer-item-link svg {
     stroke: var(--accent-green, #2ea043);
 }
+
+.file-editor-page-body {
+    width: min(100%, var(--notebook-width, 1400px));
+    margin: 0 auto;
+}
+
+.file-editor-shell {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    min-height: 420px;
+    padding: 18px;
+    box-shadow: var(--shadow-sm);
+}
+
+.file-editor-loading {
+    color: var(--text-muted);
+    font-size: 0.95rem;
+}
+
+.file-editor-fragment {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.file-monaco {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    background: var(--surface-0);
+}
+
+.file-monaco-editor {
+    min-height: 320px;
+}
+
+.file-editor-note {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: 0.88rem;
+}
+
+.file-editor-message {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 260px;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 24px;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-md);
+    background: linear-gradient(180deg, var(--surface-0), var(--surface-1));
+}
+
+.file-editor-message.locked {
+    border-color: color-mix(in srgb, var(--warning) 35%, var(--border));
+}
+
+.file-editor-message.noneditable {
+    border-color: color-mix(in srgb, var(--text-muted) 45%, var(--border));
+}
+
+.file-editor-message.error,
+.file-editor-message.missing {
+    border-color: color-mix(in srgb, var(--error) 45%, var(--border));
+}
+
+.file-editor-message-title {
+    margin: 0;
+    font-size: 1.1rem;
+}
+
+.file-editor-message-body {
+    margin: 0;
+    color: var(--text-muted);
+    max-width: 70ch;
+}

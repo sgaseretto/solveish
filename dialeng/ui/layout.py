@@ -73,6 +73,7 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
         nb_path = nb.path
         nb_dir = Path(nb_path).parent if nb_path else notebooks_dir
         file_sidebar = FileExplorerSidebar(nb_dir, notebooks_dir, nb.id,
+                                           active_file_relpath="",
                                            kernel_notebooks=kernel_notebooks or set())
 
     # Initial kernel dot state
