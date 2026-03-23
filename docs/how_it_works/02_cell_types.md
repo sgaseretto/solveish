@@ -588,7 +588,13 @@ The separator `##### 🤖Reply🤖<!-- SOLVEIT_SEPARATOR_xxx -->` divides:
 - **Before**: User's prompt
 - **After**: AI's response
 
-### Deserialization (`app.py:130-165`)
+Dialeng saves prompt cells with the `🤖Reply🤖` separator and loads them via the
+shared helpers in [prompt_utils.py](/Users/sgaseretto/computer-science/aiml/agentic_coding/vibecoding/codex_vibes/solveish/dialeng/document/prompt_utils.py).
+The loader also accepts the older `##### Reply<!-- SOLVEIT_SEPARATOR_xxx -->`
+format so notebooks saved by legacy prompt serialization paths still open with
+the correct split between prompt and assistant response.
+
+### Deserialization
 
 ```python
 @classmethod

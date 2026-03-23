@@ -2859,6 +2859,9 @@ function connectWebSocket(notebookId) {
             console.log('[WS] stream_end received for cell:', data.cell_id);
             cancelledCells.delete(data.cell_id);
             finishStreaming(data.cell_id);
+        } else if (data.type === 'prompt_output_update') {
+            console.log('[WS] prompt_output_update received for cell:', data.cell_id, 'version:', data.version);
+            applyPromptOutputUpdate(data.cell_id, data.output);
         } else if (data.type === 'prompt_stream_start') {
             // Prompt cell LLM generation started (e.g., from _add_msg_unsafe with run_mode='run').
             // Shows "Generating..." indicator so the user knows the LLM is working.
@@ -3144,6 +3147,25 @@ function finishStreaming(cellId) {
 let streamingTimeoutId = null;
 const STREAMING_TIMEOUT_MS = 120000; // 2 minutes safety timeout
 
+function applyPromptOutputUpdate(cellId, output) {
+    const textarea = document.getElementById(`output-${cellId}`);
+    if (textarea) {
+        textarea.value = output || '';
+    }
+
+    const preview = document.querySelector(`[data-cell-id="${cellId}"][data-field="output"]`);
+    if (preview) {
+        if (output && output.trim()) {
+            preview.innerHTML = renderMarkdown(output);
+            renderMarkdownServer(output, preview);
+        } else {
+            preview.innerHTML = '<p style="color: var(--text-muted);">Click to edit...</p>';
+        }
+    }
+
+    ToolUI.clear(cellId);
+}
+
 function startStreaming(cellId, useThinking) {
     const cell = document.getElementById(`cell-${cellId}`);
     if (cell) {
@@ -3163,6 +3185,7 @@ function startStreaming(cellId, useThinking) {
     if (preview && useThinking) {
         preview.innerHTML = '<div class="thinking-indicator"><span>🧠</span> Thinking...</div>';
     }
+    ToolUI.clear(cellId);
 
     // Set safety timeout to reset streaming state
     if (streamingTimeoutId) clearTimeout(streamingTimeoutId);

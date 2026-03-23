@@ -228,20 +228,14 @@ class LLMService:
                             "value": info.get('repr', '')[:100]
                         }
 
-            # Determine if we actually need tool calling
-            needs_tool_loop = len(func_names) > 0
-
             # Get tool registry and build tool list
             registry = get_tool_registry()
-
-            # For claudette provider, include builtins; for others, only if we have func refs
-            effective_builtins = include_builtins if self._provider_name == "claudette" else (include_builtins and needs_tool_loop)
 
             tools = await registry.get_tools_for_prompt(
                 func_names,
                 kernel,
                 notebook_id,
-                include_builtins=effective_builtins
+                include_builtins=include_builtins
             )
 
             # Notify about available tools

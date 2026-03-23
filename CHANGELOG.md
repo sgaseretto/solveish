@@ -105,6 +105,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Root cause: the OOB swap that finalizes cell output uses `replaceWith()`, which does not execute `<script>` tags. On first run, async API loading (e.g., YouTube IFrame API) happened to fire after the OOB swap. On re-runs, the API was already loaded and created the widget synchronously during streaming, but the OOB swap then destroyed it
 - Fix: `processOOBSwap()` now clones `<script>` tags into fresh elements after replacing `output-*` divs, mirroring the pattern already used in `appendDisplayData()` during streaming
 
+#### Prompt Cell Persistence
+- Prompt cells now use one shared prompt separator helper for both save and load paths instead of mixing two parallel separator formats
+- Notebook saves continue to use the current `##### 🤖Reply🤖<!-- SOLVEIT_SEPARATOR_xxx -->` format, while notebook loads now also accept the older `##### Reply<!-- SOLVEIT_SEPARATOR_xxx -->` format for backward compatibility
+- Added `tests/test_prompt_persistence.py` covering prompt-cell round-tripping through the active `Notebook.save()` / `Notebook.load()` path plus legacy separator compatibility
+- Prompt completion and manual prompt-output edits now broadcast a canonical `prompt_output_update` payload, so connected tabs converge on the backend-committed final response instead of relying only on streamed chunks or full-cell swaps
+- `claude-agent-sdk` prompt execution now preserves notebook image context by sending real multimodal blocks through `query()` instead of flattening those images to `[Image]` placeholders in the text transcript
+- Added `tests/test_sdk_query_payload.py` covering the SDK prompt builder for both multimodal notebook context and plain text fallback
+- Built-in LLM tools now route consistently across `claudette` and `claude-agent-sdk`; if built-ins are enabled, both providers enter the tool loop even without an explicit `&\`func\`` reference
+- Added `tests/test_llm_tool_routing.py` to verify provider-independent built-in tool routing
+
 #### File Editor Fragment Loading
 - The standalone file-editor fragment route now returns fragment-only HTML instead of a full FastHTML document, so clicking a text file in the explorer no longer injects `<!doctype html>...` into the editor container and fall into the generic "File editor error" path
 - The file-page fetch now explicitly sends `HX-Request: true`, matching FastHTML's partial-response expectations for fragment injection

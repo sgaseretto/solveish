@@ -3,11 +3,12 @@
 These are stateless functions extracted from the monolithic LLMService class.
 Any provider can import and use them without needing a reference to the service.
 """
-from typing import List, Dict
+from typing import List, Dict, Any, Tuple
 import logging
 import os
 import json
 import re
+from copy import deepcopy
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,93 @@ Now respond to my latest message:
 {prompt}"""
 
     return full_prompt
+
+
+def _extract_sdk_text_and_images(content, starting_image_index: int = 1) -> Tuple[str, List[Dict[str, Any]], int]:
+    """Extract text plus numbered image placeholders for SDK prompt building."""
+    if isinstance(content, str):
+        return content, [], starting_image_index
+
+    if not isinstance(content, list):
+        return str(content), [], starting_image_index
+
+    parts: List[str] = []
+    image_blocks: List[Dict[str, Any]] = []
+    image_index = starting_image_index
+
+    for block in content:
+        if not isinstance(block, dict):
+            parts.append(str(block))
+            continue
+
+        block_type = block.get('type')
+        if block_type == 'text':
+            text = block.get('text', '')
+            if text:
+                parts.append(text)
+        elif block_type == 'image':
+            parts.append(f"[Notebook image {image_index}]")
+            image_blocks.append(deepcopy(block))
+            image_index += 1
+
+    return ' '.join(p for p in parts if p).strip(), image_blocks, image_index
+
+
+def build_sdk_query_payload(
+    prompt: str,
+    context_messages: List[Dict],
+    system_prompt: str,
+) -> Tuple[str, str | List[Dict[str, Any]]]:
+    """Build a stateless Claude Agent SDK payload preserving notebook images.
+
+    The SDK `query()` path is kept stateless by encoding the authoritative
+    notebook transcript into the system prompt while passing notebook images as
+    real multimodal blocks in the current user turn. This mirrors the working
+    pattern from `test_claude_agent_query.ipynb`.
+    """
+    transcript_parts: List[str] = []
+    image_blocks: List[Dict[str, Any]] = []
+    next_image_index = 1
+
+    for msg in context_messages:
+        role = msg.get('role', 'user')
+        content = msg.get('content', '')
+        content_text, content_images, next_image_index = _extract_sdk_text_and_images(
+            content, next_image_index
+        )
+        image_blocks.extend(content_images)
+
+        if not content_text:
+            continue
+
+        if role == 'assistant':
+            transcript_parts.append(f"Assistant: {content_text}")
+        else:
+            transcript_parts.append(f"User: {content_text}")
+
+    effective_system_prompt = system_prompt
+    if transcript_parts:
+        transcript = "\n\n".join(transcript_parts)
+        effective_system_prompt = (
+            f"{system_prompt}\n\n"
+            "Authoritative current notebook context:\n"
+            f"{transcript}\n\n"
+            "Treat the notebook context above as the sole conversation history. "
+            "Use the notebook's current state only, and ignore any prior session memory."
+        )
+
+    if not image_blocks:
+        return effective_system_prompt, prompt
+
+    image_refs = ', '.join(f"[Notebook image {i}]" for i in range(1, len(image_blocks) + 1))
+    prompt_block = {
+        "type": "text",
+        "text": (
+            "The attached notebook images correspond to these placeholders from the "
+            f"authoritative notebook context: {image_refs}.\n\n{prompt}"
+        ),
+    }
+    return effective_system_prompt, image_blocks + [prompt_block]
 
 
 async def execute_tool(tool_name: str, tool_input: dict, kernel, notebook_id: str, registry) -> dict:

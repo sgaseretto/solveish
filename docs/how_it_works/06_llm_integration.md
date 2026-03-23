@@ -480,6 +480,12 @@ async for item in llm_service.stream_response_with_tools(
     ...
 ```
 
+Built-in tool routing is now provider-independent: if built-ins are enabled in
+Dialeng config, both `claudette` and `claude-agent-sdk` enter the tool path
+even when the prompt does not contain an explicit `&\`func\`` reference. The
+coordinator still falls back to plain streaming when the tool registry returns
+no tools.
+
 ### Base Provider (`BaseLLMProvider`)
 
 All providers implement this abstract base class:
@@ -760,7 +766,9 @@ INFO:services.llm_service:claudette-agent: Usage=Usage(input_tokens=1234, output
 3. **If real mode** → Build context with `build_context_messages()`
 4. **Stream response** via `llm_service.stream_response()`
 5. **WebSocket broadcast** → Chunks sent to all connected clients
-6. **Error handling** → Errors shown in cell output
+6. **Canonical prompt sync** → Final prompt output is broadcast once as the
+   backend-committed cell state
+7. **Error handling** → Errors shown in cell output
 
 ### WebSocket Message Types
 
@@ -772,8 +780,28 @@ INFO:services.llm_service:claudette-agent: Usage=Usage(input_tokens=1234, output
 
 // Regular response
 {"type": "stream_chunk", "cell_id": "abc123", "chunk": "..."}
+{"type": "prompt_output_update", "cell_id": "abc123", "output": "...", "version": 4}
 {"type": "stream_end", "cell_id": "abc123"}
 ```
+
+`prompt_output_update` is the backend-authoritative final prompt payload. It is
+sent after Dialeng has finished assembling the saved prompt output, so tabs that
+miss intermediate chunks still converge on the same committed response.
+
+### Claude Agent SDK Multimodal Context
+
+Dialeng keeps prompt cells stateless when using `claude-agent-sdk` by encoding
+the authoritative notebook transcript into the system prompt and passing any
+notebook image outputs as real multimodal blocks in the current `query()`
+message payload.
+
+This preserves the notebook-as-context model while avoiding persistent provider
+sessions:
+- edited prompt/note/code cells still define the current authoritative context
+- edited prior AI responses still shape later answers
+- notebook image outputs are available to the SDK path as actual image blocks
+  instead of collapsing to a plain `[Image]` placeholder
+  when the provider supports multimodal `query()` content
 
 ## Error Handling
 
