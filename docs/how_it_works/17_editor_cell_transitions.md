@@ -29,9 +29,9 @@ This document describes how Monaco editors behave during cell lifecycle events (
 - The notebook scroll position is **preserved**
 
 ### Adding / Deleting / Moving Cells
-- These operations replace the entire `#cells` container (known limitation)
-- All editors are destroyed and recreated
-- Scroll position is preserved via save/restore mechanism
+- These operations now update the notebook DOM surgically instead of replacing the entire `#cells` container
+- Existing Monaco editors stay attached to their cells during add/delete/move operations
+- The backend is the source of truth for cell order; the browser replays that order without guessing local swaps
 
 ## Cell Lifecycle Events
 
@@ -61,9 +61,9 @@ stateDiagram-v2
 | Source edit (dialoghelper) | `msg_str_replace_`, etc. | JSON `cell_source_update` | **Preserved** (setValue) |
 | State toggle | Toggle button | `CellHeaderOOB` + JSON `cell_class_update` | **Preserved** |
 | Collapse toggle | Collapse button | JSON `cell_collapse_update` | **Preserved** |
-| Cell added | + Code button, `add_msg()` | JSON `cell_add` | **Preserved** (other cells) |
-| Cell deleted | Delete button, `D D` | JSON `cell_delete` | **Preserved** (other cells) |
-| Cell moved | Arrow buttons, `Alt+↑/↓` | JSON `cell_move` | **Preserved** (insertBefore) |
+| Cell added | + Code button, `add_msg()`, `a`/`b` | JSON `cell_add` | **Preserved** (structure reconcile) |
+| Cell deleted | Delete button, `D D`, cut | JSON `cell_delete` | **Preserved** (structure reconcile) |
+| Cell moved | Arrow buttons, `Alt+↑/↓` | JSON `cell_move` | **Preserved** (structure reconcile) |
 | Cell type changed | Type dropdown | `CellViewOOB` | Destroyed & recreated |
 
 ## How Monaco Editors Are Managed
@@ -234,7 +234,7 @@ sequenceDiagram
 
 ## Scroll Position Preservation
 
-The notebook uses HTMX `outerHTML` swaps on the `#cells` container for structural operations (add, delete, move). This replaces the entire cells DOM tree, which can cause scroll jumps.
+The notebook used to rely on HTMX `outerHTML` swaps for structural operations. Add/delete/move now use granular JSON messages and in-place DOM moves instead, so the old full-container replacement path is no longer the normal case.
 
 ### Mitigations
 
@@ -273,15 +273,50 @@ Collapse toggling sends a `cell_collapse_update` JSON message. The client-side `
 
 ### Cell Delete
 
-Deletion sends a `cell_delete` JSON message. The client removes the cell element and one adjacent `.add-row`, and disposes the Monaco editor.
+Deletion sends a `cell_delete` JSON message with the updated `ordered_cell_ids`. The client disposes the deleted cell's Monaco editor, then reconciles the full cell/add-row structure from the backend order instead of heuristically removing one nearby `.add-row`.
 
 ### Cell Move
 
-Move sends a `cell_move` JSON message with direction. The client uses `insertBefore` to swap two adjacent cells — this **moves** DOM nodes without copying, so Monaco editors survive with their full state intact.
+Move sends a `cell_move` JSON message with the backend-authoritative `ordered_cell_ids` list. The client snapshots the current `cell + trailing .add-row` units first, then rebuilds `#cells` from that stable snapshot in the exact backend order.
+
+This is stricter than the earlier adjacent-swap approach:
+
+- the backend owns notebook order
+- the browser does not infer order from its current DOM neighbors
+- the initiating tab does not perform an HTMX swap for moves; it only applies the WebSocket order update
+- prompt cells with rendered output and the cells around them can move repeatedly without the UI getting stuck in a stale local ordering
+
+```mermaid
+flowchart LR
+    A["Move button"] --> B["Notebook.move_cell(...)"]
+    B --> C["Broadcast ordered_cell_ids"]
+    C --> D["Browser reorders existing DOM nodes"]
+    D --> E["Monaco editors preserved"]
+```
 
 ### Cell Add
 
-Addition sends a `cell_add` JSON message with pre-rendered HTML. The client uses `insertAdjacentHTML` to insert the new cell and add-row after the correct position, then calls `htmx.process()` and `initCell()` on the new element.
+Addition sends a `cell_add` JSON message with both `ordered_cell_ids` and the rendered HTML for the newly inserted cell. The client folds that new cell into the same structure-reconciliation pass used by delete/move, initializes HTMX bindings and Monaco only for the inserted cell, and preserves the current viewport anchor during the reconcile before doing any follow-up reveal/focus work for the new cell.
+
+### Structural Invariant
+
+Add, delete, and move now share one invariant:
+
+- the backend notebook list is the sole source of truth for cell order
+- structural WebSocket messages always carry `ordered_cell_ids`
+- the browser reconciles the entire `#cells` structure from a stable snapshot of existing cells plus any newly provided cell HTML
+- structural HTTP responses are empty, so the initiating tab does not mix HTMX swaps with WebSocket structure updates
+- structural adds preserve the user's current viewport context by anchoring on the focused or nearby visible cell
+- last-cell `Shift+Enter` keeps that same viewport anchor during the structural add, then reveals the newly inserted cell with a minimal `scrollIntoView({block: 'nearest'})` adjustment before focusing its editor
+
+```mermaid
+flowchart LR
+    A["Backend notebook state"] --> B["ordered_cell_ids payload"]
+    B --> C["Browser snapshot existing cell units"]
+    C --> D["Merge inserted cell HTML if needed"]
+    D --> E["replaceChildren(fragment)"]
+    E --> F["Editors preserved for untouched cells"]
+```
 
 ### Prompt Cell Completion
 
@@ -294,3 +329,11 @@ Prompt completion sends `CellHeaderOOB` + `cell_class_update` JSON. The output w
 | Cell type change | `CellViewOOB` | Yes | Inherent — input section changes fundamentally (Monaco ↔ textarea) |
 
 Cell type change is the only remaining case and is intentional: the entire input section changes structure, so full DOM replacement is correct.
+
+The initiating tab still uses `hx_swap="none"` for the type selector. That keeps the route backend-authoritative:
+
+- the POST mutates notebook state
+- the server broadcasts `CellViewOOB`
+- every tab, including the one that triggered the change, applies the same replacement path
+
+That avoids mixing a local HTMX swap on one tab with an OOB replacement on the others.

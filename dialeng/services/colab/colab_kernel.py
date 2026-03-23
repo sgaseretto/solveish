@@ -10,11 +10,13 @@ Connects to a Google Colab runtime via:
 Lifecycle: assign → create session → connect WS → execute → keep-alive → disconnect
 """
 import asyncio
+import base64
 import json
 import uuid
 import logging
 import time
 from typing import AsyncIterator, Optional
+from pathlib import Path
 
 import aiohttp
 
@@ -26,6 +28,9 @@ logger = logging.getLogger(__name__)
 
 KEEP_ALIVE_INTERVAL = 300  # 5 minutes
 TOKEN_REFRESH_BUFFER = 300  # Refresh proxy token 5 min before expiry
+WS_RECEIVE_LOG_TIMEOUT = 60  # Log when Colab is quiet for a long time
+KEEP_ALIVE_ACTIVITY_GRACE = 900  # Allow quiet kernels to go idle after 15 minutes
+FAILURE_RECYCLE_THRESHOLD = 3  # Recycle the connection after repeated background failures
 
 # ============================================================================
 # DialogHelper proxy protocol constants
@@ -134,6 +139,10 @@ class ColabKernel(BaseKernel):
         self._dialeng_port: int = dialeng_port
         # Current init step description (for status reporting to UI)
         self._init_status: str = ""
+        self._keep_alive_failures: int = 0
+        self._token_refresh_failures: int = 0
+        self._recovery_task: Optional[asyncio.Task] = None
+        self._recycle_reason: str = ""
 
     def _make_header(self, msg_type: str, msg_id: str = None) -> dict:
         """Build a Jupyter wire protocol message header with consistent session ID."""
@@ -157,6 +166,8 @@ class ColabKernel(BaseKernel):
         Retries transient errors (503 Service Unavailable) with exponential
         backoff — GPU/TPU runtimes can take time to spin up.
         """
+        if self._recovery_task and not self._recovery_task.done():
+            await self._recovery_task
         self._connection_state = "connecting"
         # Map runtime_type to Colab API variant + accelerator parameters
         _RUNTIME_MAP = {
@@ -169,10 +180,13 @@ class ColabKernel(BaseKernel):
         from dialeng.services.colab.colab_api import ColabAPIError
 
         last_error = None
+        previous_runtime = self._assignment.endpoint if self._assignment else None
         for attempt in range(max_retries):
             try:
-                # 0. Clean up any stale runtimes to avoid TooManyAssignmentsError
-                await self._cleanup_stale_runtimes()
+                logger.info(
+                    "Assigning Colab runtime (attempt %s/%s, runtime_type=%s)",
+                    attempt + 1, max_retries, self.runtime_type,
+                )
 
                 # 1. Assign runtime via REST API (two-step XSRF)
                 self._assignment = await self._api.assign_kernel(
@@ -180,6 +194,14 @@ class ColabKernel(BaseKernel):
                 )
                 proxy = self._assignment.proxy_info
                 self._token_expires_at = time.time() + proxy.token_expires_seconds
+                self._keep_alive_failures = 0
+                self._token_refresh_failures = 0
+
+                if previous_runtime and previous_runtime != self._assignment.endpoint:
+                    logger.warning(
+                        "Colab runtime replaced (previous=%s, current=%s)",
+                        previous_runtime, self._assignment.endpoint,
+                    )
 
                 # 2. Create Jupyter session on the runtime
                 self._jupyter_session = await self._api.create_jupyter_session(
@@ -200,9 +222,12 @@ class ColabKernel(BaseKernel):
                 self._token_refresh_task = asyncio.create_task(self._token_refresh_loop())
 
                 self._connection_state = "connected"
+                self._recycle_reason = ""
+                self.mark_activity("assign_and_connect")
                 logger.info(
-                    f"Connected to Colab runtime: endpoint={self._assignment.endpoint}, "
-                    f"kernel={self._jupyter_session.kernel_id}"
+                    "Connected to Colab runtime: endpoint=%s kernel=%s",
+                    self._assignment.endpoint,
+                    self._jupyter_session.kernel_id,
                 )
                 return  # Success
             except ColabAPIError as e:
@@ -222,27 +247,12 @@ class ColabKernel(BaseKernel):
                 raise
             except Exception as e:
                 self._connection_state = "disconnected"
-                logger.error(f"Failed to connect to Colab: {e}")
+                logger.exception("Failed to connect to Colab")
                 raise
 
         # Should not reach here, but just in case
         self._connection_state = "disconnected"
         raise last_error
-
-    async def _cleanup_stale_runtimes(self) -> None:
-        """Unassign all existing runtimes to avoid TooManyAssignmentsError."""
-        try:
-            assignments = await self._api.list_assignments()
-            for assignment in assignments:
-                endpoint = assignment.get("endpoint", "")
-                if endpoint:
-                    logger.info(f"Cleaning up stale Colab runtime: {endpoint}")
-                    try:
-                        await self._api.unassign_kernel(endpoint)
-                    except Exception as e:
-                        logger.warning(f"Failed to unassign stale runtime {endpoint}: {e}")
-        except Exception as e:
-            logger.warning(f"Failed to list Colab assignments for cleanup: {e}")
 
     async def _connect_websocket(self) -> None:
         """Open WebSocket connection to Colab runtime's Jupyter kernel."""
@@ -267,7 +277,11 @@ class ColabKernel(BaseKernel):
             # No heartbeat - Colab's proxy may not handle WebSocket pings.
             # Connection is kept alive via HTTP keep-alive pings instead.
         )
-        logger.info(f"WebSocket connected to Colab runtime")
+        logger.info(
+            "WebSocket connected to Colab runtime proxy (endpoint=%s, kernel=%s)",
+            self._assignment.endpoint if self._assignment else None,
+            self._jupyter_session.kernel_id if self._jupyter_session else None,
+        )
 
     async def _wait_for_kernel_ready(self, timeout: float = 30.0) -> None:
         """Send kernel_info_request and wait for reply to confirm kernel is ready.
@@ -289,9 +303,10 @@ class ColabKernel(BaseKernel):
         await self._ws.send_json(kernel_info_msg)
         logger.info("Sent kernel_info_request, waiting for kernel to be ready...")
 
-        deadline = asyncio.get_event_loop().time() + timeout
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
         while True:
-            if asyncio.get_event_loop().time() > deadline:
+            if loop.time() > deadline:
                 logger.warning("Kernel readiness check timed out")
                 break
 
@@ -333,11 +348,16 @@ class ColabKernel(BaseKernel):
         }
         await self._ws.send_json(execute_msg)
 
-        deadline = asyncio.get_event_loop().time() + timeout
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        saw_execute_reply = False
         while True:
-            remaining = deadline - asyncio.get_event_loop().time()
+            remaining = deadline - loop.time()
             if remaining <= 0:
-                logger.warning(f"Colab init timed out: {description}")
+                logger.warning(
+                    "Colab init timed out: %s (saw_execute_reply=%s)",
+                    description, saw_execute_reply,
+                )
                 break
             ws_msg = await self._ws.receive(timeout=remaining)
             if ws_msg.type == aiohttp.WSMsgType.TEXT:
@@ -357,8 +377,12 @@ class ColabKernel(BaseKernel):
                         f"{content.get('ename')}: {content.get('evalue')}"
                     )
                 elif msg_type == "execute_reply":
-                    logger.info(f"Colab init complete: {description}")
-                    break
+                    saw_execute_reply = True
+                elif msg_type == "status":
+                    execution_state = data.get("content", {}).get("execution_state")
+                    if execution_state == "idle":
+                        logger.info("Colab init complete: %s", description)
+                        break
             elif ws_msg.type in self._WS_CLOSE_TYPES:
                 logger.warning(f"WebSocket closed during init: {description}")
                 break
@@ -426,7 +450,12 @@ class ColabKernel(BaseKernel):
         onto a single WebSocket and execute_reply can arrive before
         late IOPub messages like display_data from matplotlib plots.
         """
-        if not self._ws or self._ws.closed or self._connection_state != "connected":
+        self.mark_activity("execute_streaming")
+        if self._recovery_task and not self._recovery_task.done():
+            await self._recovery_task
+        elif self._recycle_reason:
+            await self._recycle_connection(self._recycle_reason, 0)
+        if not self._ws or self._ws.closed or self._connection_state not in {"connected", "degraded"}:
             await self.assign_and_connect()
 
         # Inject dialoghelper magic variables into the remote kernel namespace.
@@ -483,7 +512,14 @@ class ColabKernel(BaseKernel):
         # when it arrives (without breaking).
         try:
             while True:
-                ws_msg = await self._ws.receive()
+                try:
+                    ws_msg = await self._ws.receive(timeout=WS_RECEIVE_LOG_TIMEOUT)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "No Colab WebSocket activity for %ss while waiting on cell %s",
+                        WS_RECEIVE_LOG_TIMEOUT, cell_id or "<unknown>",
+                    )
+                    continue
 
                 if ws_msg.type == aiohttp.WSMsgType.TEXT:
                     data = json.loads(ws_msg.data)
@@ -652,24 +688,35 @@ class ColabKernel(BaseKernel):
 
     async def shutdown_async(self):
         """Clean shutdown: cancel tasks, close WS, delete session, unassign runtime."""
-        # Cancel background tasks
-        for task in (self._keep_alive_task, self._token_refresh_task):
+        for task in (self._keep_alive_task, self._token_refresh_task, self._recovery_task):
             if task:
                 task.cancel()
+        self._recovery_task = None
+        self._recycle_reason = ""
+        await self._close_runtime_resources(cancel_background_tasks=False)
+        logger.info("Colab kernel shutdown complete")
+
+    async def _close_runtime_resources(self, *, cancel_background_tasks: bool) -> None:
+        """Release WebSocket, session, and runtime-assignment resources."""
+        current_task = asyncio.current_task()
+        keep_alive_task = self._keep_alive_task
+        token_refresh_task = self._token_refresh_task
+
+        if cancel_background_tasks:
+            for task in (keep_alive_task, token_refresh_task):
+                if task and task is not current_task:
+                    task.cancel()
         self._keep_alive_task = None
         self._token_refresh_task = None
 
-        # Close WebSocket
         if self._ws and not self._ws.closed:
             await self._ws.close()
         self._ws = None
 
-        # Close aiohttp session
         if self._ws_session and not self._ws_session.closed:
             await self._ws_session.close()
         self._ws_session = None
 
-        # Delete Jupyter session on runtime
         if self._assignment and self._jupyter_session:
             proxy = self._assignment.proxy_info
             await self._api.delete_jupyter_session(
@@ -677,7 +724,6 @@ class ColabKernel(BaseKernel):
             )
         self._jupyter_session = None
 
-        # Unassign runtime
         if self._assignment:
             try:
                 await self._api.unassign_kernel(self._assignment.endpoint)
@@ -686,17 +732,42 @@ class ColabKernel(BaseKernel):
             self._assignment = None
 
         self._connection_state = "disconnected"
-        logger.info("Colab kernel shutdown complete")
 
     async def _keep_alive_loop(self):
         """HTTP keep-alive ping every 5 minutes."""
         while True:
             await asyncio.sleep(KEEP_ALIVE_INTERVAL)
             if self._assignment:
+                if not self._should_keep_alive():
+                    logger.info(
+                        "Skipping Colab keep-alive for idle kernel (runtime=%s, clients=%s, last_activity_age=%.0fs)",
+                        self._assignment.endpoint,
+                        self.client_count,
+                        max(0.0, time.time() - self.last_activity_at) if self.last_activity_at else -1.0,
+                    )
+                    continue
                 try:
                     await self._api.keep_alive(self._assignment.endpoint)
+                    if self._keep_alive_failures:
+                        logger.info(
+                            "Colab keep-alive recovered after %s failure(s) for %s",
+                            self._keep_alive_failures, self._assignment.endpoint,
+                        )
+                    self._keep_alive_failures = 0
+                    if self._connection_state == "degraded" and self._ws and not self._ws.closed:
+                        self._connection_state = "connected"
+                    self.mark_activity("keep_alive")
                 except Exception as e:
-                    logger.warning(f"Keep-alive failed: {e}")
+                    self._keep_alive_failures += 1
+                    if self._keep_alive_failures >= 2 and self._connection_state == "connected":
+                        self._connection_state = "degraded"
+                    if self._keep_alive_failures >= FAILURE_RECYCLE_THRESHOLD:
+                        self._request_connection_recycle("keep_alive", self._keep_alive_failures)
+                        return
+                    logger.warning(
+                        "Keep-alive failed for %s (failure %s): %s",
+                        self._assignment.endpoint, self._keep_alive_failures, e,
+                    )
 
     async def _token_refresh_loop(self):
         """Refresh proxy token before it expires."""
@@ -713,14 +784,164 @@ class ColabKernel(BaseKernel):
                     )
                     self._assignment.proxy_info.token = new_proxy.token
                     self._token_expires_at = time.time() + new_proxy.token_expires_seconds
+                    if self._token_refresh_failures:
+                        logger.info(
+                            "Colab proxy token refresh recovered after %s failure(s) for %s",
+                            self._token_refresh_failures, self._assignment.endpoint,
+                        )
+                    self._token_refresh_failures = 0
+                    if self._connection_state == "degraded" and self._ws and not self._ws.closed:
+                        self._connection_state = "connected"
+                    self.mark_activity("token_refresh")
                     logger.info("Colab proxy token refreshed")
                 except Exception as e:
-                    logger.warning(f"Proxy token refresh failed: {e}")
+                    self._token_refresh_failures += 1
+                    if self._token_refresh_failures >= 2 and self._connection_state == "connected":
+                        self._connection_state = "degraded"
+                    if self._token_refresh_failures >= FAILURE_RECYCLE_THRESHOLD:
+                        self._request_connection_recycle("token_refresh", self._token_refresh_failures)
+                        return
+                    logger.warning(
+                        "Proxy token refresh failed for %s (failure %s): %s",
+                        self._assignment.endpoint, self._token_refresh_failures, e,
+                    )
+
+    def _request_connection_recycle(self, reason: str, failure_count: int) -> None:
+        """Mark the connection for a full recycle after repeated background failures."""
+        runtime_id = self._assignment.endpoint if self._assignment else None
+        self._connection_state = "degraded" if self.is_busy else "disconnected"
+        self._recycle_reason = reason
+        logger.error(
+            "Scheduling Colab connection recycle (runtime=%s, reason=%s, failures=%s, busy=%s, clients=%s)",
+            runtime_id,
+            reason,
+            failure_count,
+            self.is_busy,
+            self.client_count,
+        )
+        if self.is_busy:
+            return
+        if self._recovery_task and not self._recovery_task.done():
+            return
+        self._recovery_task = asyncio.create_task(
+            self._recycle_connection(reason, failure_count),
+            name=f"colab-recycle:{runtime_id or 'unknown'}:{reason}",
+        )
+
+    async def _recycle_connection(self, reason: str, failure_count: int) -> None:
+        """Drop the current remote session so the next execute reconnects cleanly."""
+        runtime_id = self._assignment.endpoint if self._assignment else None
+        logger.warning(
+            "Recycling Colab connection (runtime=%s, reason=%s, failures=%s)",
+            runtime_id,
+            reason,
+            failure_count,
+        )
+        try:
+            await self._close_runtime_resources(cancel_background_tasks=True)
+            self._session_id = uuid.uuid4().hex
+            self._keep_alive_failures = 0
+            self._token_refresh_failures = 0
+            self._recycle_reason = ""
+            self.mark_activity(f"recycle:{reason}")
+        finally:
+            self._recovery_task = None
+
+    def _should_keep_alive(self) -> bool:
+        """Keep remote runtimes alive only while they appear actively in use."""
+        if self.is_busy:
+            return True
+        if self.client_count > 0:
+            return True
+        if not self.last_activity_at:
+            return False
+        return (time.time() - self.last_activity_at) <= KEEP_ALIVE_ACTIVITY_GRACE
+
+    async def ensure_project_path(
+        self,
+        project_root: str,
+        *,
+        notebook_id: str = "",
+        remote_root: str = ".",
+    ) -> dict:
+        """Ensure the Colab-side project root is importable."""
+        setup_code = (
+            "import os, sys\n"
+            f"_dialeng_project_root = os.path.abspath({remote_root!r})\n"
+            "sys.path.insert(0, _dialeng_project_root) if _dialeng_project_root not in sys.path else None\n"
+        )
+        await self.run_setup_code(
+            setup_code,
+            notebook_id=notebook_id,
+            cell_id="_kernel_project_path",
+            description="ensure_project_path",
+        )
+        self.mark_activity("ensure_project_path")
+        return {
+            "status": "ok",
+            "project_root": project_root,
+            "remote_root": remote_root,
+        }
+
+    async def sync_project_files(
+        self,
+        files: list[tuple[str, str]],
+        *,
+        notebook_id: str = "",
+        remote_root: str = ".",
+    ) -> dict:
+        """Upload project files into the Colab runtime."""
+        if not files:
+            return {
+                "status": "noop",
+                "remote_root": remote_root,
+                "file_count": 0,
+                "total_bytes": 0,
+                "reason": "no files",
+            }
+
+        code_parts = [
+            "import os, base64",
+            f"_dialeng_remote_root = os.path.abspath({remote_root!r})",
+            "os.makedirs(_dialeng_remote_root, exist_ok=True)",
+        ]
+        dirs_created = set()
+        total_bytes = 0
+
+        for rel_path, content in files:
+            total_bytes += len(content.encode("utf-8"))
+            parent = str(Path(rel_path).parent)
+            if parent not in dirs_created:
+                code_parts.append(
+                    f"os.makedirs(os.path.join(_dialeng_remote_root, {parent!r}), exist_ok=True)"
+                )
+                dirs_created.add(parent)
+            b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
+            code_parts.append(
+                "open("
+                f"os.path.join(_dialeng_remote_root, {rel_path!r}), 'w'"
+                ").write(base64.b64decode("
+                f"{b64!r}).decode('utf-8'))"
+            )
+
+        await self.run_setup_code(
+            "\n".join(code_parts),
+            notebook_id=notebook_id,
+            cell_id="_kernel_project_sync",
+            description="sync_project_files",
+        )
+        self.mark_activity("sync_project_files")
+        return {
+            "status": "ok",
+            "remote_root": remote_root,
+            "file_count": len(files),
+            "total_bytes": total_bytes,
+        }
 
     @property
     def is_alive(self) -> bool:
         return (
-            self._connection_state == "connected"
+            self._connection_state in {"connected", "degraded"}
             and self._ws is not None
             and not self._ws.closed
         )

@@ -14,12 +14,17 @@ Features:
 
 from fasthtml.common import *
 from fastcore.utils import *
-import uuid, json, os, sys, io, traceback, asyncio, re, ast
+import uuid, json, os, sys, io, traceback, asyncio, re, ast, logging, time
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from contextlib import redirect_stdout, redirect_stderr
 from enum import Enum
 from pathlib import Path
+from dialeng.notebook_id import (
+    nb_id_encode_part as _shared_nb_id_encode_part,
+    nb_id_from_path as _shared_nb_id_from_path,
+    nb_id_to_relpath as _shared_nb_id_to_relpath,
+)
 
 # New streaming kernel
 from dialeng.services.kernel import KernelService
@@ -53,11 +58,14 @@ from dialeng.ui import (
     TypeSelect, CollapseBtn, get_collapse_class, get_cell_state_classes
 )
 from dialeng.ui.mime import render_mime_bundle
+from dialeng.logging_config import build_log_config
 
 # Extension system
 from dialeng.core.extensions import load_extensions
 from dialeng.core.registry import registry
 from dialeng.services.autorun_service import process_autorun
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # Constants
@@ -161,13 +169,26 @@ def _init_colab():
     # Use a thread to avoid "cannot be called from a running event loop" in uvicorn workers
     def _resolve_creds():
         return asyncio.run(resolve_oauth_credentials())
+
+    def _validate_session(auth_service):
+        return asyncio.run(auth_service.validate_session())
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
         _colab_creds = _pool.submit(_resolve_creds).result()
 
     colab_auth_service = ColabAuthService(credentials=_colab_creds)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+        validated = _pool.submit(_validate_session, colab_auth_service).result()
     colab_session_manager = ColabSessionManager(colab_auth_service)
     kernel_service.set_colab_session_manager(colab_session_manager)
     print_colab_credential_status(_colab_creds)
+    logger.info(
+        "Colab services initialized (oauth_source=%s, authenticated=%s, email=%s, validation_error=%s)",
+        _colab_creds.source,
+        validated,
+        colab_auth_service.account_email,
+        colab_auth_service.session_error,
+    )
     print(f"   Colab: enabled (authenticated={colab_auth_service.is_authenticated})")
 
 # ExecutionQueue instances per notebook (created lazily)
@@ -210,15 +231,6 @@ def _make_state_callback(nb_id: str):
         if state in (CellState.SUCCESS, CellState.ERROR):
             # Finalize cell output and send code_stream_end
             await finalize_cell_execution(nb_id, cell, state == CellState.ERROR)
-
-            # After first successful execution, broadcast kernel-connected so status bar updates
-            if state == CellState.SUCCESS and nb_id in ws_connections and ws_connections[nb_id]:
-                msg = json.dumps({"type": "kernel_connected"})
-                for send in list(ws_connections[nb_id]):
-                    try:
-                        await send(msg)
-                    except:
-                        pass
     return callback
 
 
@@ -243,6 +255,10 @@ async def finalize_cell_execution(nb_id: str, cell, has_error: bool):
     # Broadcast output + header via targeted OOB swaps (preserves Monaco editor DOM)
     await broadcast_to_notebook(nb_id, CellOutputOOB(cell))
     await broadcast_to_notebook(nb_id, CellHeaderOOB(cell, nb_id))
+
+    cell_type = str(getattr(cell, "cell_type", ""))
+    if cell_type in {"code", "shell"}:
+        await _mark_outline_dirty(nb_id, reason=f"{cell_type}_execution_complete")
 
 # ============================================================================
 # Mock LLM with Streaming
@@ -311,6 +327,15 @@ ws_connections: Dict[str, List[Any]] = {}
 # Track cancelled cell generations
 cancelled_cells: set = set()
 
+# Track non-queue kernel setup/sync work per notebook so the UI can reflect
+# attach/init/upload phases instead of inferring state from cell streaming alone.
+kernel_setup_state: Dict[str, Dict[str, Any]] = {}
+kernel_setup_tasks: Dict[str, asyncio.Task] = {}
+kernel_sync_tasks: Dict[str, asyncio.Task] = {}
+kernel_generations: Dict[str, int] = {}
+outline_revisions: Dict[str, int] = {}
+server_shutdown_started = False
+
 # DialogHelper data queues for bidirectional browser communication
 # Structure: {notebook_id: {data_id: asyncio.Queue}}
 data_queues: Dict[str, Dict[str, asyncio.Queue]] = {}
@@ -322,6 +347,350 @@ def get_data_queue(dlg_name: str, data_id: str) -> asyncio.Queue:
     if data_id not in data_queues[dlg_name]:
         data_queues[dlg_name][data_id] = asyncio.Queue()
     return data_queues[dlg_name][data_id]
+
+
+def _current_kernel_generation(nb_id: str) -> int:
+    """Return the current background-work generation for a notebook."""
+    return kernel_generations.get(nb_id, 0)
+
+
+def _kernel_runtime_context(nb_id: str) -> tuple[str, Optional[str]]:
+    """Return the kernel type and runtime id for logging."""
+    if not kernel_service.has_kernel(nb_id):
+        nb = notebooks.get(nb_id)
+        return getattr(nb, "kernel_type", "local"), None
+    kernel = kernel_service.get_kernel(nb_id)
+    status = kernel.get_status()
+    return status.kernel_type, getattr(status, "runtime_id", None)
+
+
+def _cancel_task_if_running(task_map: Dict[str, asyncio.Task], nb_id: str, label: str, reason: str) -> None:
+    """Cancel a running background task for a notebook."""
+    task = task_map.pop(nb_id, None)
+    if task and not task.done():
+        logger.info("Cancelling %s task (notebook=%s, reason=%s, task=%s)", label, nb_id, reason, task.get_name())
+        task.cancel()
+
+
+async def _invalidate_kernel_background_work(nb_id: str, reason: str) -> int:
+    """Bump notebook generation, cancel stale setup/sync tasks, and clear state."""
+    generation = _current_kernel_generation(nb_id) + 1
+    kernel_generations[nb_id] = generation
+    _cancel_task_if_running(kernel_setup_tasks, nb_id, "kernel_setup", reason)
+    _cancel_task_if_running(kernel_sync_tasks, nb_id, "kernel_sync", reason)
+    if kernel_setup_state.pop(nb_id, None) is not None:
+        logger.info("Cleared kernel setup state after invalidation (notebook=%s, reason=%s, generation=%s)", nb_id, reason, generation)
+    await broadcast_kernel_snapshot(nb_id)
+    return generation
+
+
+async def _teardown_notebook_runtime(nb_id: str, reason: str) -> None:
+    """Cancel notebook work, release kernel resources, and clear ephemeral state."""
+    generation = await _invalidate_kernel_background_work(nb_id, reason=f"teardown:{reason}")
+    if nb_id in execution_queues:
+        execution_queues[nb_id].cancel_all()
+        del execution_queues[nb_id]
+    if kernel_service.has_kernel(nb_id):
+        await kernel_service.shutdown_async(nb_id)
+    kernel_setup_tasks.pop(nb_id, None)
+    kernel_sync_tasks.pop(nb_id, None)
+    kernel_setup_state.pop(nb_id, None)
+    kernel_generations.pop(nb_id, None)
+    outline_revisions.pop(nb_id, None)
+    data_queues.pop(nb_id, None)
+    ws_connections.pop(nb_id, None)
+    logger.info(
+        "Notebook runtime torn down (notebook=%s, reason=%s, invalidated_generation=%s)",
+        nb_id,
+        reason,
+        generation,
+    )
+
+
+async def _shutdown_server_runtime(reason: str = "server_shutdown") -> None:
+    """Cancel notebook work and shutdown all kernels during server exit."""
+    global server_shutdown_started
+    if server_shutdown_started:
+        return
+    server_shutdown_started = True
+
+    logger.info("Starting Dialeng shutdown cleanup (reason=%s)", reason)
+
+    pending_tasks: list[asyncio.Task] = []
+    for task_map, label in (
+        (kernel_setup_tasks, "kernel_setup"),
+        (kernel_sync_tasks, "kernel_sync"),
+    ):
+        for nb_id, task in list(task_map.items()):
+            if task and not task.done():
+                logger.info(
+                    "Cancelling %s task during shutdown (notebook=%s, task=%s)",
+                    label,
+                    nb_id,
+                    task.get_name(),
+                )
+                task.cancel()
+                pending_tasks.append(task)
+        task_map.clear()
+
+    if pending_tasks:
+        results = await asyncio.gather(*pending_tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
+                logger.warning("Background task raised during shutdown cleanup: %s", result)
+
+    for nb_id, queue in list(execution_queues.items()):
+        try:
+            queue.cancel_all()
+        except Exception as e:
+            logger.warning("Failed to cancel execution queue during shutdown (notebook=%s): %s", nb_id, e)
+    execution_queues.clear()
+
+    try:
+        await kernel_service.shutdown_all_async()
+    finally:
+        kernel_setup_state.clear()
+        kernel_generations.clear()
+        data_queues.clear()
+        logger.info("Dialeng shutdown cleanup complete")
+
+
+def _assert_kernel_generation_current(nb_id: str, generation: int, source: str) -> None:
+    """Abort stale setup work once a newer kernel generation exists."""
+    current = _current_kernel_generation(nb_id)
+    if generation != current:
+        raise asyncio.CancelledError(
+            f"Stale kernel setup work ignored for notebook {nb_id}: source={source}, generation={generation}, current={current}"
+        )
+
+
+def _get_auth_snapshot() -> dict:
+    """Return the current Colab auth status in a JSON-safe structure."""
+    if not colab_auth_service:
+        return {
+            "enabled": False,
+            "authenticated": False,
+            "has_tokens": False,
+            "email": None,
+            "validation_error": None,
+        }
+    return colab_auth_service.get_status()
+
+
+def _get_queue_payload(nb_id: str) -> dict:
+    """Return queue status without creating a queue object unnecessarily."""
+    if nb_id in execution_queues:
+        status = execution_queues[nb_id].get_status(nb_id)
+        return {
+            "running_cell_id": status.current_cell_id,
+            "queued_cell_ids": list(status.queued_cell_ids),
+            "queued_count": status.queued_count,
+            "is_processing": status.is_processing,
+        }
+    return {
+        "running_cell_id": None,
+        "queued_cell_ids": [],
+        "queued_count": 0,
+        "is_processing": False,
+    }
+
+
+def _build_notebook_snapshot(nb_id: str) -> dict:
+    """Return notebook-level state that should stay consistent across tabs."""
+    nb = get_notebook(nb_id)
+    return {
+        "title": nb.title,
+        "dialog_mode": nb.dialog_mode,
+        "model": nb.model,
+        "safe_mode": nb.safe_mode,
+        "kernel_type": getattr(nb, "kernel_type", "local"),
+        "colab_runtime_type": getattr(nb, "colab_runtime_type", "cpu"),
+    }
+
+
+def _get_outline_revision(nb_id: str) -> int:
+    """Return the current outline revision for a notebook."""
+    return outline_revisions.get(nb_id, 0)
+
+
+def _parse_kernel_connection_state(raw_state: Optional[str]) -> tuple[str, Optional[str]]:
+    """Split a kernel connection_state into machine state + detail."""
+    if not raw_state:
+        return "disconnected", None
+    if raw_state.startswith("initializing:"):
+        return "initializing", raw_state.split(":", 1)[1].strip()
+    return raw_state, None
+
+
+def _build_kernel_snapshot(nb_id: str) -> dict:
+    """Build the backend-authoritative notebook/kernel snapshot for the UI."""
+    nb = get_notebook(nb_id)
+    queue_payload = _get_queue_payload(nb_id)
+    auth_payload = _get_auth_snapshot()
+    setup_payload = kernel_setup_state.get(nb_id, {})
+
+    kernel = kernel_service._kernels.get(nb_id)
+    kernel_status = kernel.get_status() if kernel else None
+    connection_state, connection_detail = _parse_kernel_connection_state(
+        kernel_status.connection_state if kernel_status else None
+    )
+
+    selected_kernel_type = getattr(nb, "kernel_type", "local")
+    kernel_exists = kernel is not None
+    kernel_is_alive = bool(kernel_status.is_alive) if kernel_status else False
+    kernel_is_busy = bool(kernel_status.is_busy) if kernel_status else False
+    setup_active = bool(setup_payload.get("is_active"))
+    auth_required = selected_kernel_type == "colab" and not auth_payload["authenticated"]
+    has_queue_work = bool(queue_payload["running_cell_id"] or queue_payload["queued_cell_ids"])
+
+    if auth_required:
+        display_state = "auth_required"
+    elif setup_active:
+        display_state = "restarting" if setup_payload.get("source") == "kernel_restart" else "initializing"
+    elif has_queue_work or kernel_is_busy:
+        display_state = "busy"
+    elif connection_state == "initializing":
+        display_state = "initializing"
+    elif connection_state == "connecting":
+        display_state = "connecting"
+    elif connection_state == "degraded":
+        display_state = "degraded"
+    elif kernel_exists and kernel_is_alive:
+        display_state = "connected"
+    else:
+        display_state = "disconnected"
+
+    can_run = (
+        kernel_exists
+        and not auth_required
+        and not setup_active
+        and kernel_is_alive
+        and connection_state not in {"connecting", "initializing"}
+    )
+
+    return {
+        "type": "kernel_snapshot",
+        "notebook_id": nb_id,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "notebook": _build_notebook_snapshot(nb_id),
+        "kernel": {
+            "selected_type": selected_kernel_type,
+            "exists": kernel_exists,
+            "is_alive": kernel_is_alive,
+            "is_busy": kernel_is_busy,
+            "execution_count": kernel_status.execution_count if kernel_status else 0,
+            "runtime_id": kernel_status.runtime_id if kernel_status else None,
+            "connection_state": connection_state,
+            "connection_detail": connection_detail,
+            "display_state": display_state,
+            "can_run": can_run,
+            "auth_required": auth_required,
+        },
+        "queue": queue_payload,
+        "setup": {
+            "is_active": setup_active,
+            "source": setup_payload.get("source"),
+            "phase": setup_payload.get("phase"),
+            "detail": setup_payload.get("detail"),
+        },
+        "outline": {
+            "revision": _get_outline_revision(nb_id),
+        },
+        "auth": auth_payload,
+    }
+
+
+async def send_kernel_snapshot(nb_id: str, send) -> None:
+    """Send the latest notebook/kernel snapshot to a single WebSocket client."""
+    await send(json.dumps(_build_kernel_snapshot(nb_id)))
+
+
+async def broadcast_kernel_snapshot(nb_id: str):
+    """Broadcast the latest notebook/kernel snapshot to all clients."""
+    if nb_id not in ws_connections or not ws_connections[nb_id]:
+        return
+    payload = json.dumps(_build_kernel_snapshot(nb_id))
+    alive = []
+    for send in list(ws_connections[nb_id]):
+        try:
+            await send(payload)
+            alive.append(send)
+        except Exception:
+            pass
+    ws_connections[nb_id] = alive
+
+
+async def broadcast_all_kernel_snapshots():
+    """Broadcast refreshed kernel snapshots for every notebook with clients."""
+    for nb_id in list(ws_connections.keys()):
+        await broadcast_kernel_snapshot(nb_id)
+
+
+async def _mark_outline_dirty(nb_id: str, reason: str, *, broadcast_snapshot: bool = True) -> None:
+    """Bump the outline revision when server state changes can affect it."""
+    outline_revisions[nb_id] = outline_revisions.get(nb_id, 0) + 1
+    logger.info(
+        "Outline marked dirty (notebook=%s, revision=%s, reason=%s)",
+        nb_id,
+        outline_revisions[nb_id],
+        reason,
+    )
+    if broadcast_snapshot:
+        await broadcast_kernel_snapshot(nb_id)
+
+
+async def _mark_all_outlines_dirty(reason: str) -> None:
+    """Bump outline revisions for all active notebooks, then broadcast snapshots once."""
+    notebook_ids = set(notebooks.keys()) | set(ws_connections.keys()) | set(kernel_service._kernels.keys())
+    for nb_id in notebook_ids:
+        outline_revisions[nb_id] = outline_revisions.get(nb_id, 0) + 1
+        logger.info(
+            "Outline marked dirty (notebook=%s, revision=%s, reason=%s)",
+            nb_id,
+            outline_revisions[nb_id],
+            reason,
+        )
+    if notebook_ids:
+        await broadcast_all_kernel_snapshots()
+
+
+async def _set_kernel_setup_state(
+    nb_id: str,
+    *,
+    source: str,
+    phase: str,
+    detail: str = "",
+    is_active: bool = True,
+    generation: Optional[int] = None,
+) -> None:
+    """Update tracked notebook setup state and push a fresh kernel snapshot."""
+    kernel_setup_state[nb_id] = {
+        "source": source,
+        "phase": phase,
+        "detail": detail,
+        "is_active": is_active,
+        "generation": generation if generation is not None else _current_kernel_generation(nb_id),
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    logger.info(
+        "Kernel setup state updated (notebook=%s, source=%s, phase=%s, active=%s, generation=%s, detail=%s)",
+        nb_id, source, phase, is_active, kernel_setup_state[nb_id]["generation"], detail,
+    )
+    await broadcast_kernel_snapshot(nb_id)
+
+
+async def _clear_kernel_setup_state(nb_id: str, *, expected_generation: Optional[int] = None) -> None:
+    """Clear tracked notebook setup state and broadcast the fresh snapshot."""
+    current = kernel_setup_state.get(nb_id)
+    if current and expected_generation is not None and current.get("generation") != expected_generation:
+        logger.info(
+            "Skipping kernel setup state clear for stale generation (notebook=%s, expected_generation=%s, current_generation=%s)",
+            nb_id, expected_generation, current.get("generation"),
+        )
+        return
+    if kernel_setup_state.pop(nb_id, None) is not None:
+        logger.info("Kernel setup state cleared for notebook %s", nb_id)
+        await broadcast_kernel_snapshot(nb_id)
 
 def _load_notebook(path: str) -> Notebook:
     """Load a notebook with app-level credential/model validation."""
@@ -339,7 +708,7 @@ def _load_notebook(path: str) -> Notebook:
 
 def _nb_id_encode_part(part: str) -> str:
     """Escape tildes in a single path component: ~ → ~~"""
-    return part.replace("~", "~~")
+    return _shared_nb_id_encode_part(part)
 
 def _nb_id_from_path(path: Path) -> str:
     """Derive a collision-proof, URL-safe notebook ID from a file path.
@@ -353,14 +722,7 @@ def _nb_id_from_path(path: Path) -> str:
               notebooks/my_project/analysis.ipynb → 'my_project~analysis'
               notebooks/has~tilde.ipynb → 'has~~tilde'
     """
-    try:
-        rel = path.resolve().relative_to(NOTEBOOKS_DIR.resolve())
-    except ValueError:
-        return _nb_id_encode_part(path.stem)
-    parts = list(rel.parts)
-    parts[-1] = rel.stem  # Remove .ipynb extension
-    encoded = [_nb_id_encode_part(p) for p in parts]
-    return "~".join(encoded) if len(encoded) > 1 else encoded[0]
+    return _shared_nb_id_from_path(path, NOTEBOOKS_DIR)
 
 def _nb_id_to_relpath(notebook_id: str) -> Path:
     """Reverse a notebook ID back to a relative path (without .ipynb extension).
@@ -374,12 +736,7 @@ def _nb_id_to_relpath(notebook_id: str) -> Path:
               'has~~tilde' → Path('has~tilde')
               'a~~b~c' → Path('a~b/c')
     """
-    # Replace ~~ with a placeholder, split on ~, restore placeholder to ~
-    placeholder = "\x00"
-    safe = notebook_id.replace("~~", placeholder)
-    parts = safe.split("~")
-    parts = [p.replace(placeholder, "~") for p in parts]
-    return Path(*parts) if len(parts) > 1 else Path(parts[0])
+    return _shared_nb_id_to_relpath(notebook_id)
 
 def _find_notebook_path(notebook_id: str) -> Optional[Path]:
     """Find a notebook file by ID using direct path reconstruction."""
@@ -450,16 +807,13 @@ def save_notebook(notebook_id: str):
             from dialeng.services.lib_export_service import maybe_extract
             result = maybe_extract(Path(path), root_dir=NOTEBOOKS_DIR)
             if result:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.info(f"lib export: {result['module']} ({result['cells_exported']} cells)")
-                # Re-upload to Colab if this notebook has an active Colab kernel
-                import asyncio
-                asyncio.create_task(_upload_lib_to_colab(notebook_id))
+                logger.info(
+                    "lib export completed (notebook=%s, module=%s, cells_exported=%s)",
+                    notebook_id, result['module'], result['cells_exported'],
+                )
+                _schedule_colab_lib_sync(notebook_id, reason="save")
         except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning(f"lib export failed for {notebook_id}: {e}")
+            logger.warning("lib export failed for %s: %s", notebook_id, e)
 
 def list_notebooks() -> List[str]:
     return [p.stem for p in NOTEBOOKS_DIR.glob("*.ipynb")]
@@ -761,15 +1115,54 @@ async def broadcast_all_json(data: dict):
         await broadcast_json(nb_id, data)
 
 
+def _ordered_cell_ids(nb) -> list[str]:
+    """Return the notebook's canonical cell order."""
+    return [cell.id for cell in nb.cells]
+
+
+def _cell_add_payload(nb, nb_id: str, cell_id: str) -> dict:
+    """Build a structural add payload with canonical notebook order."""
+    cell = nb.get_cell(cell_id)
+    idx = nb.get_cell_index(cell_id)
+    if cell is None or idx < 0:
+        raise ValueError(f"Cell {cell_id} not found in notebook {nb_id}")
+    cell_html = to_xml(CellView(cell, nb_id))
+    add_html = to_xml(AddButtons(idx + 1, nb_id))
+    return {
+        "type": "cell_add",
+        "cell_id": cell.id,
+        "pos": idx,
+        "html": cell_html + add_html,
+        "ordered_cell_ids": _ordered_cell_ids(nb),
+    }
+
+
+def _cell_delete_payload(nb, cell_id: str) -> dict:
+    """Build a structural delete payload with canonical notebook order."""
+    return {
+        "type": "cell_delete",
+        "cell_id": cell_id,
+        "ordered_cell_ids": _ordered_cell_ids(nb),
+    }
+
+
+def _cell_move_payload(nb, cell_id: str) -> dict:
+    """Build a structural move payload with canonical notebook order."""
+    return {
+        "type": "cell_move",
+        "cell_id": cell_id,
+        "ordered_cell_ids": _ordered_cell_ids(nb),
+    }
+
+
 async def broadcast_queue_state(nb_id: str):
     """Broadcast current queue state to all clients."""
-    queue = get_execution_queue(nb_id)
-    status = queue.get_status(nb_id)
+    status = _get_queue_payload(nb_id)
 
     msg = json.dumps({
         "type": "queue_update",
-        "running_cell_id": status.current_cell_id,
-        "queued_cell_ids": status.queued_cell_ids
+        "running_cell_id": status["running_cell_id"],
+        "queued_cell_ids": status["queued_cell_ids"]
     })
 
     if nb_id in ws_connections and ws_connections[nb_id]:
@@ -778,6 +1171,7 @@ async def broadcast_queue_state(nb_id: str):
                 await send(msg)
             except:
                 pass
+    await broadcast_kernel_snapshot(nb_id)
 
 
 async def broadcast_cell_state(nb_id: str, cell_id: str, state: CellState):
@@ -805,6 +1199,7 @@ async def broadcast_kernel_status(nb_id: str, status: str):
                 await send(msg)
             except:
                 pass
+    await broadcast_kernel_snapshot(nb_id)
 
 
 async def broadcast_cell_output(nb_id: str, cell_id: str, output):
@@ -911,6 +1306,12 @@ async def _autorun_startup():
     # Initialize Colab in the worker process (set_root_dir() only runs in the main process)
     _init_colab()
     await process_autorun(kernel_service, notebooks_dir=NOTEBOOKS_DIR)
+
+
+@app.on_event("shutdown")
+async def _app_shutdown():
+    """Release notebook kernels and background tasks on server shutdown."""
+    await _shutdown_server_runtime()
 
 # ============================================================================
 # Extension Development Endpoints
@@ -1036,7 +1437,7 @@ def get(dir: str = "", name: str = ""):
 # ============================================================================
 
 @rt("/files")
-def get(path: str = ""):
+def get(path: str = "", active_notebook_id: str = ""):
     """Get file list content for HTMX swap."""
     from dialeng.ui.file_explorer import FileListContent
     target = NOTEBOOKS_DIR / path if path else NOTEBOOKS_DIR
@@ -1044,10 +1445,10 @@ def get(path: str = ""):
     if not target.resolve().is_relative_to(NOTEBOOKS_DIR.resolve()):
         target = NOTEBOOKS_DIR
     kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
-    return FileListContent(target, NOTEBOOKS_DIR, "", kernel_notebooks=kernel_nbs)
+    return FileListContent(target, NOTEBOOKS_DIR, active_notebook_id, kernel_notebooks=kernel_nbs)
 
 @rt("/files/new-folder")
-def post(path: str = "", name: str = ""):
+def post(path: str = "", name: str = "", active_notebook_id: str = ""):
     """Create a new folder and return updated file list."""
     from dialeng.ui.file_explorer import FileListContent
     if not name or '/' in name or name.startswith('.'):
@@ -1058,10 +1459,10 @@ def post(path: str = "", name: str = ""):
     new_folder = target / name
     new_folder.mkdir(parents=True, exist_ok=True)
     kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
-    return FileListContent(target, NOTEBOOKS_DIR, "", kernel_notebooks=kernel_nbs)
+    return FileListContent(target, NOTEBOOKS_DIR, active_notebook_id, kernel_notebooks=kernel_nbs)
 
 @rt("/files/delete")
-def post(path: str = ""):
+async def post(path: str = "", active_notebook_id: str = ""):
     """Delete a notebook file and return updated file list."""
     from dialeng.ui.file_explorer import FileListContent
     if not path or '..' in path:
@@ -1073,11 +1474,12 @@ def post(path: str = ""):
         target.unlink()
         # Remove from in-memory notebooks if loaded
         nb_id = _nb_id_from_path(target)
+        await _teardown_notebook_runtime(nb_id, reason="file_delete")
         if nb_id in notebooks:
             del notebooks[nb_id]
     parent = target.parent
     kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
-    return FileListContent(parent, NOTEBOOKS_DIR, "", kernel_notebooks=kernel_nbs)
+    return FileListContent(parent, NOTEBOOKS_DIR, active_notebook_id, kernel_notebooks=kernel_nbs)
 
 # ============================================================================
 # Notebook Routes
@@ -1116,6 +1518,7 @@ async def _render_notebook_page(nb_id: str):
                         shfmt_available=SHFMT_AVAILABLE,
                         colab_enabled=colab_auth_service is not None,
                         colab_authenticated=colab_auth_service.is_authenticated if colab_auth_service else False,
+                        colab_account_email=colab_auth_service.account_email if colab_auth_service else None,
                         notebooks_dir=NOTEBOOKS_DIR,
                         kernel_alive=nb_kernel_alive,
                         kernel_notebooks=kernel_nbs,
@@ -1133,95 +1536,366 @@ def post(nb_id: str):
     return Div("✓ Saved", cls="status success")
 
 @rt("/dialeng/{nb_id}/mode")
-def post(nb_id: str, mode: str):
+async def post(nb_id: str, mode: str):
     nb = get_notebook(nb_id)
     nb.dialog_mode = mode
+    nb.modified = True
+    await broadcast_kernel_snapshot(nb_id)
     return ""
 
 @rt("/dialeng/{nb_id}/model")
-def post(nb_id: str, model: str):
+async def post(nb_id: str, model: str):
     nb = get_notebook(nb_id)
     nb.model = model
+    nb.modified = True
+    await broadcast_kernel_snapshot(nb_id)
     return ""
 
 @rt("/dialeng/{nb_id}/safe_mode")
-def post(nb_id: str, safe_mode: str = "false"):
+async def post(nb_id: str, safe_mode: str = "false"):
     """Toggle safe mode for shell commands in this notebook."""
     nb = get_notebook(nb_id)
     # Convert string to boolean (checkbox sends "true" or "false")
     nb.safe_mode = safe_mode.lower() in ("true", "on", "1", "yes")
+    nb.modified = True
+    await broadcast_kernel_snapshot(nb_id)
     return ""
 
 # ============================================================================
 # Kernel Helpers
 # ============================================================================
 
-async def _inject_lib_syspath(nb_id: str):
-    """If lib dir exists in NOTEBOOKS_DIR, add NOTEBOOKS_DIR to the kernel's sys.path."""
-    from dialeng.services.lib_export_service import get_lib_name
-    lib_name = get_lib_name(NOTEBOOKS_DIR)
-    lib_dir = NOTEBOOKS_DIR / lib_name
-    if not lib_dir.exists():
-        return
-    notebooks_path = str(NOTEBOOKS_DIR.resolve())
-    setup_code = f"import sys; sys.path.insert(0, {notebooks_path!r}) if {notebooks_path!r} not in sys.path else None"
-    cell = Cell(id="_lib_syspath_setup", cell_type=CellType.CODE, source=setup_code)
-    try:
-        async for _ in kernel_service.execute_cell(nb_id, cell):
-            pass
-        print(f"[LIB] Injected sys.path for {lib_name}/ into kernel {nb_id}", flush=True)
-    except Exception as e:
-        print(f"[LIB] Failed to inject sys.path for {nb_id}: {e}", flush=True)
-
-
-async def _upload_lib_to_colab(nb_id: str):
-    """If kernel is Colab and lib dir exists, upload module files to remote VM."""
-    from dialeng.services.lib_export_service import get_lib_name
-
-    # Check if this notebook uses a Colab kernel
+def _schedule_colab_lib_sync(nb_id: str, reason: str) -> None:
+    """Schedule a serialized Colab lib upload after exports change."""
     nb = notebooks.get(nb_id)
-    if not nb or getattr(nb, 'kernel_type', 'local') != 'colab':
+    if not nb or getattr(nb, 'kernel_type', 'local') != 'colab' or not kernel_service.has_kernel(nb_id):
+        return
+    generation = _current_kernel_generation(nb_id)
+    if kernel_setup_state.get(nb_id, {}).get("is_active"):
+        logger.info(
+            "Skipping Colab lib sync while another setup is active (notebook=%s, reason=%s, generation=%s, active_source=%s)",
+            nb_id, reason, generation, kernel_setup_state[nb_id].get("source"),
+        )
         return
 
-    if not kernel_service.has_kernel(nb_id):
+    existing = kernel_sync_tasks.get(nb_id)
+    if existing and not existing.done():
+        logger.info("Colab lib sync already pending for notebook %s (reason=%s, generation=%s)", nb_id, reason, generation)
         return
+
+    async def _run_sync():
+        current_task = asyncio.current_task()
+        try:
+            _assert_kernel_generation_current(nb_id, generation, f"colab_lib_sync:{reason}")
+            await _set_kernel_setup_state(
+                nb_id,
+                source=f"colab_lib_sync:{reason}",
+                phase="upload_lib",
+                detail="Uploading exported module files to Colab",
+                generation=generation,
+            )
+            await _sync_project_lib_to_kernel(nb_id, source="colab_lib_sync", reason=reason, generation=generation)
+        except asyncio.CancelledError:
+            logger.info("Cancelled Colab lib sync (notebook=%s, reason=%s, generation=%s)", nb_id, reason, generation)
+        except Exception:
+            logger.exception("Colab lib sync failed for notebook %s (reason=%s)", nb_id, reason)
+            await broadcast_kernel_status(nb_id, "error")
+        finally:
+            if kernel_sync_tasks.get(nb_id) is current_task:
+                kernel_sync_tasks.pop(nb_id, None)
+            await _clear_kernel_setup_state(nb_id, expected_generation=generation)
+
+    task = asyncio.create_task(_run_sync(), name=f"colab-lib-sync:{nb_id}:{reason}")
+    kernel_sync_tasks[nb_id] = task
+    logger.info("Scheduled Colab lib sync for notebook %s (reason=%s, generation=%s)", nb_id, reason, generation)
+
+
+def _collect_project_lib_files() -> tuple[str, Path, list[tuple[str, str]], int]:
+    """Collect exported project library files for kernel sync."""
+    from dialeng.services.lib_export_service import get_lib_name
 
     lib_name = get_lib_name(NOTEBOOKS_DIR)
     lib_dir = NOTEBOOKS_DIR / lib_name
     if not lib_dir.exists():
-        return
+        return lib_name, lib_dir, [], 0
 
-    # Collect all .py files in the lib directory
-    py_files = list(lib_dir.rglob("*.py"))
-    if not py_files:
-        return
-
-    # Build code that recreates the directory structure and writes files on the VM
-    import base64
-    code_parts = ["import os, base64"]
-    dirs_created = set()
-    for py_file in py_files:
-        rel_path = py_file.relative_to(NOTEBOOKS_DIR)
+    files: list[tuple[str, str]] = []
+    total_bytes = 0
+    for py_file in sorted(lib_dir.rglob("*.py")):
+        rel_path = str(py_file.relative_to(NOTEBOOKS_DIR))
         content = py_file.read_text(encoding="utf-8")
-        # Ensure parent dirs exist (deduplicate makedirs calls)
-        parent = str(rel_path.parent)
-        if parent not in dirs_created:
-            code_parts.append(f"os.makedirs({parent!r}, exist_ok=True)")
-            dirs_created.add(parent)
-        # Use base64 encoding to avoid string escaping issues
-        b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
-        code_parts.append(
-            f"open({str(rel_path)!r}, 'w').write(base64.b64decode({b64!r}).decode('utf-8'))"
+        files.append((rel_path, content))
+        total_bytes += len(content.encode("utf-8"))
+    return lib_name, lib_dir, files, total_bytes
+
+
+async def _inject_lib_syspath(nb_id: str, *, source: str, generation: int):
+    """If lib dir exists in NOTEBOOKS_DIR, add NOTEBOOKS_DIR to the kernel's sys.path."""
+    _assert_kernel_generation_current(nb_id, generation, source)
+
+    lib_name, lib_dir, _, _ = _collect_project_lib_files()
+    if not lib_dir.exists():
+        return
+
+    kernel_type, runtime_id = _kernel_runtime_context(nb_id)
+    start = time.perf_counter()
+    try:
+        result = await kernel_service.ensure_project_path(
+            nb_id,
+            str(NOTEBOOKS_DIR.resolve()),
+            remote_root=".",
+        )
+        logger.info(
+            "LIB path ready (notebook=%s, source=%s, generation=%s, kernel_type=%s, runtime_id=%s, lib=%s, project_root=%s, remote_root=%s, duration_ms=%.1f)",
+            nb_id,
+            source,
+            generation,
+            kernel_type,
+            runtime_id,
+            lib_name,
+            result.get("project_root"),
+            result.get("remote_root"),
+            (time.perf_counter() - start) * 1000,
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to prepare LIB path (notebook=%s, source=%s, generation=%s, kernel_type=%s, runtime_id=%s, lib=%s): %s",
+            nb_id, source, generation, kernel_type, runtime_id, lib_name, e,
         )
 
-    setup_code = "\n".join(code_parts)
-    cell = Cell(id="_lib_colab_upload", cell_type=CellType.CODE, source=setup_code)
+
+async def _sync_project_lib_to_kernel(nb_id: str, *, source: str, reason: str, generation: int):
+    """Sync exported project library files into the selected kernel."""
+    _assert_kernel_generation_current(nb_id, generation, source)
+
+    nb = notebooks.get(nb_id)
+    if not nb or not kernel_service.has_kernel(nb_id):
+        return
+
+    lib_name, lib_dir, files, total_bytes = _collect_project_lib_files()
+    if not lib_dir.exists() or not files:
+        logger.info(
+            "No LIB files to sync (notebook=%s, source=%s, reason=%s, generation=%s, lib=%s)",
+            nb_id, source, reason, generation, lib_name,
+        )
+        return
+
+    kernel_type, runtime_id = _kernel_runtime_context(nb_id)
+    start = time.perf_counter()
+    sample_files = ", ".join(path for path, _ in files[:5])
     try:
-        async for _ in kernel_service.execute_cell(nb_id, cell):
-            pass
-        print(f"[LIB] Uploaded {len(py_files)} module files to Colab kernel {nb_id}", flush=True)
+        result = await kernel_service.sync_project_files(nb_id, files, remote_root=".")
+        logger.info(
+            "LIB sync completed (notebook=%s, source=%s, reason=%s, generation=%s, kernel_type=%s, runtime_id=%s, lib=%s, file_count=%s, total_bytes=%s, remote_root=%s, status=%s, duration_ms=%.1f, sample_files=%s)",
+            nb_id,
+            source,
+            reason,
+            generation,
+            kernel_type,
+            runtime_id,
+            lib_name,
+            result.get("file_count", len(files)),
+            result.get("total_bytes", total_bytes),
+            result.get("remote_root", "."),
+            result.get("status", "unknown"),
+            (time.perf_counter() - start) * 1000,
+            sample_files,
+        )
     except Exception as e:
-        print(f"[LIB] Failed to upload lib files to Colab: {e}", flush=True)
+        logger.warning(
+            "LIB sync failed (notebook=%s, source=%s, reason=%s, generation=%s, kernel_type=%s, runtime_id=%s, lib=%s, file_count=%s, total_bytes=%s): %s",
+            nb_id,
+            source,
+            reason,
+            generation,
+            kernel_type,
+            runtime_id,
+            lib_name,
+            len(files),
+            total_bytes,
+            e,
+        )
+
+
+def _resolve_notebook_disk_path(nb_id: str) -> Path:
+    """Resolve a notebook path for CRAFT discovery."""
+    nb = get_notebook(nb_id)
+    nb_path = nb.path
+    if not nb_path:
+        found = _find_notebook_path(nb_id)
+        nb_path = found if found else NOTEBOOKS_DIR / f"{_nb_id_to_relpath(nb_id)}.ipynb"
+        if found:
+            nb.path = found
+    return Path(nb_path)
+
+
+def _collect_craft_cells_for_setup(nb_id: str, *, only_unexecuted: bool) -> tuple[list[tuple[str, str]], list[Path]]:
+    """Collect CRAFT code cells for notebook setup."""
+    nb_path = _resolve_notebook_disk_path(nb_id)
+    if not nb_path.exists():
+        logger.info(
+            "Skipping CRAFT discovery because notebook path does not exist (notebook=%s, path=%s)",
+            nb_id,
+            nb_path,
+        )
+        return [], []
+
+    from dialeng.services.craft_service import (
+        find_craft_files,
+        get_craft_code_cells,
+        is_craft_executed,
+    )
+
+    craft_paths = find_craft_files(nb_path, NOTEBOOKS_DIR)
+    nb_path_resolved = nb_path.resolve()
+    craft_paths = [cp for cp in craft_paths if Path(cp).resolve() != nb_path_resolved]
+    if not craft_paths:
+        logger.info(
+            "No CRAFT notebooks discovered for setup (notebook=%s, notebook_path=%s, only_unexecuted=%s)",
+            nb_id,
+            nb_path,
+            only_unexecuted,
+        )
+        return [], []
+
+    craft_cells = get_craft_code_cells(craft_paths)
+    if only_unexecuted:
+        craft_cells = [(cid, src) for cid, src in craft_cells if not is_craft_executed(nb_id, cid)]
+    logger.info(
+        "Discovered CRAFT setup inputs (notebook=%s, notebook_path=%s, craft_files=%s, craft_cells=%s, only_unexecuted=%s)",
+        nb_id,
+        nb_path,
+        len(craft_paths),
+        len(craft_cells),
+        only_unexecuted,
+    )
+    return craft_cells, craft_paths
+
+
+async def _run_notebook_kernel_setup(
+    nb_id: str,
+    *,
+    source: str,
+    craft_cells: list[tuple[str, str]],
+    craft_paths: list[Path],
+    generation: int,
+) -> None:
+    """Run serialized notebook setup against the selected kernel."""
+    from dialeng.services.craft_service import mark_craft_executed
+
+    current_task = asyncio.current_task()
+    total_start = time.perf_counter()
+    kernel_type, runtime_id = _kernel_runtime_context(nb_id)
+    logger.info(
+        "Starting notebook kernel setup (notebook=%s, source=%s, generation=%s, kernel_type=%s, runtime_id=%s, craft_cells=%s)",
+        nb_id, source, generation, kernel_type, runtime_id, len(craft_cells),
+    )
+    is_colab_kernel = getattr(get_notebook(nb_id), "kernel_type", "local") == "colab"
+    if craft_paths:
+        for craft_path in craft_paths:
+            logger.info(
+                "Notebook setup uses CRAFT file (notebook=%s, source=%s, generation=%s, kernel_type=%s, runtime_id=%s, path=%s)",
+                nb_id, source, generation, kernel_type, runtime_id, craft_path,
+            )
+
+    try:
+        _assert_kernel_generation_current(nb_id, generation, source)
+        await _set_kernel_setup_state(
+            nb_id,
+            source=source,
+            phase="inject_lib",
+            detail="Injecting project library path",
+            generation=generation,
+        )
+        await _inject_lib_syspath(nb_id, source=source, generation=generation)
+
+        _assert_kernel_generation_current(nb_id, generation, source)
+        await _set_kernel_setup_state(
+            nb_id,
+            source=source,
+            phase="upload_lib",
+            detail="Uploading exported module files to Colab" if is_colab_kernel else "Refreshing exported module files",
+            generation=generation,
+        )
+        await _sync_project_lib_to_kernel(nb_id, source=source, reason="kernel_setup", generation=generation)
+
+        total_craft = len(craft_cells)
+        for idx, (cid, src) in enumerate(craft_cells, start=1):
+            _assert_kernel_generation_current(nb_id, generation, source)
+            craft_start = time.perf_counter()
+            await _set_kernel_setup_state(
+                nb_id,
+                source=source,
+                phase="craft",
+                detail=f"Executing CRAFT cell {idx}/{total_craft}",
+                generation=generation,
+            )
+            cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
+            async for _ in kernel_service.execute_cell(nb_id, cell):
+                pass
+            mark_craft_executed(nb_id, cid)
+            logger.info(
+                "Executed CRAFT cell during setup (notebook=%s, source=%s, generation=%s, kernel_type=%s, runtime_id=%s, craft_cell=%s, index=%s/%s, duration_ms=%.1f)",
+                nb_id, source, generation, kernel_type, runtime_id, cid, idx, total_craft, (time.perf_counter() - craft_start) * 1000,
+            )
+
+        await _clear_kernel_setup_state(nb_id, expected_generation=generation)
+        logger.info(
+            "Notebook kernel setup completed (notebook=%s, source=%s, generation=%s, kernel_type=%s, runtime_id=%s, duration_ms=%.1f)",
+            nb_id, source, generation, kernel_type, runtime_id, (time.perf_counter() - total_start) * 1000,
+        )
+        await broadcast_kernel_status(nb_id, "connected")
+    except asyncio.CancelledError:
+        await _clear_kernel_setup_state(nb_id, expected_generation=generation)
+        logger.info(
+            "Notebook kernel setup cancelled (notebook=%s, source=%s, generation=%s, kernel_type=%s, runtime_id=%s)",
+            nb_id, source, generation, kernel_type, runtime_id,
+        )
+    except Exception:
+        await _clear_kernel_setup_state(nb_id, expected_generation=generation)
+        logger.exception(
+            "Notebook kernel setup failed (notebook=%s, source=%s, generation=%s, kernel_type=%s, runtime_id=%s)",
+            nb_id, source, generation, kernel_type, runtime_id,
+        )
+        await broadcast_kernel_status(nb_id, "error")
+        raise
+    finally:
+        if kernel_setup_tasks.get(nb_id) is current_task:
+            kernel_setup_tasks.pop(nb_id, None)
+
+
+def _schedule_notebook_kernel_setup(
+    nb_id: str,
+    *,
+    source: str,
+    craft_cells: list[tuple[str, str]],
+    craft_paths: list[Path],
+) -> None:
+    """Schedule notebook setup for the current kernel generation."""
+    generation = _current_kernel_generation(nb_id)
+    existing = kernel_setup_tasks.get(nb_id)
+    if existing and not existing.done():
+        logger.info(
+            "Kernel setup already pending (notebook=%s, source=%s, generation=%s, task=%s)",
+            nb_id, source, generation, existing.get_name(),
+        )
+        return
+
+    async def _runner():
+        await _run_notebook_kernel_setup(
+            nb_id,
+            source=source,
+            craft_cells=craft_cells,
+            craft_paths=craft_paths,
+            generation=generation,
+        )
+
+    task = asyncio.create_task(_runner(), name=f"kernel-setup:{nb_id}:{source}:g{generation}")
+    kernel_setup_tasks[nb_id] = task
+    logger.info(
+        "Scheduled kernel setup (notebook=%s, source=%s, generation=%s, craft_cells=%s, task=%s)",
+        nb_id, source, generation, len(craft_cells), task.get_name(),
+    )
 
 
 # ============================================================================
@@ -1241,6 +1915,8 @@ async def post(nb_id: str, kernel_type: str):
         if not colab_auth_service.is_authenticated:
             return Div("Not authenticated with Google. Click 'Connect Colab' first.", cls="status error")
 
+    logger.info("Switching kernel type (notebook=%s, kernel_type=%s)", nb_id, kernel_type)
+    await _invalidate_kernel_background_work(nb_id, reason=f"kernel_type:{kernel_type}")
     nb.kernel_type = kernel_type
     runtime_type = nb.colab_runtime_type
     await kernel_service.set_kernel_type(nb_id, kernel_type, runtime_type=runtime_type)
@@ -1258,6 +1934,9 @@ async def post(nb_id: str, kernel_type: str):
             except Exception:
                 pass
 
+    await _mark_outline_dirty(nb_id, reason="kernel_type_change", broadcast_snapshot=False)
+    await broadcast_kernel_snapshot(nb_id)
+
     return Div(f"Kernel: {reg.label}", cls="status success")
 
 @rt("/dialeng/{nb_id}/kernel/runtime")
@@ -1270,6 +1949,7 @@ async def post(nb_id: str, runtime_type: str):
         return Div("Runtime type only applies to Colab kernels", cls="status error")
 
     nb.colab_runtime_type = runtime_type
+    await _invalidate_kernel_background_work(nb_id, reason=f"runtime_type:{runtime_type}")
 
     # New kernel needs fresh CRAFT initialization
     from dialeng.services.craft_service import reset_craft_tracking
@@ -1279,7 +1959,11 @@ async def post(nb_id: str, runtime_type: str):
     if colab_session_manager:
         new_kernel = await colab_session_manager.set_runtime_type(nb_id, runtime_type)
         # Update kernel_service to point to the new kernel (old reference is stale)
-        kernel_service._kernels[nb_id] = new_kernel
+        kernel_service.set_kernel_instance(nb_id, new_kernel)
+
+    logger.info("Updated Colab runtime type (notebook=%s, runtime_type=%s)", nb_id, runtime_type)
+    await _mark_outline_dirty(nb_id, reason="kernel_runtime_change", broadcast_snapshot=False)
+    await broadcast_kernel_snapshot(nb_id)
 
     labels = {"cpu": "CPU", "gpu": "GPU (T4)", "tpu": "TPU"}
     return Div(f"Runtime: {labels.get(runtime_type, runtime_type)}", cls="status success")
@@ -1293,6 +1977,12 @@ def get(nb_id: str):
         return status.__dict__
     nb = get_notebook(nb_id)
     return {"is_alive": False, "kernel_type": nb.kernel_type}
+
+
+@rt("/dialeng/{nb_id}/kernel/snapshot")
+def get(nb_id: str):
+    """Get the backend-authoritative kernel snapshot for the notebook."""
+    return _build_kernel_snapshot(nb_id)
 
 @rt("/dialeng/{nb_id}/kernel/info")
 def get(nb_id: str):
@@ -1317,7 +2007,8 @@ def get(nb_id: str):
     from dialeng.ui.kernel_modal import KernelModal
     nb = get_notebook(nb_id)
     colab_auth = colab_auth_service.is_authenticated if colab_auth_service else False
-    return KernelModal(nb.id, nb.kernel_type, colab_auth, nb.colab_runtime_type)
+    colab_email = colab_auth_service.account_email if colab_auth_service else None
+    return KernelModal(nb.id, nb.kernel_type, colab_auth, nb.colab_runtime_type, colab_email)
 
 @rt("/dialeng/{nb_id}/kernel/craft-init")
 async def post(nb_id: str):
@@ -1326,54 +2017,24 @@ async def post(nb_id: str):
     Called by the client after the user selects a kernel, so setup
     code runs before any manual cell execution.
     """
-    nb = get_notebook(nb_id)
-    nb_path = nb.path
-    if not nb_path:
-        found = _find_notebook_path(nb_id)
-        nb_path = found if found else NOTEBOOKS_DIR / f"{nb_id}.ipynb"
-        if found:
-            nb.path = found
+    if kernel_setup_state.get(nb_id, {}).get("is_active"):
+        logger.info(
+            "Skipping duplicate kernel setup request (notebook=%s, active_source=%s)",
+            nb_id, kernel_setup_state[nb_id].get("source"),
+        )
+        return ""
 
-    # Collect CRAFT cells to execute
-    unexecuted = []
-    if nb_path and Path(nb_path).exists():
-        from dialeng.services.craft_service import find_craft_files, get_craft_code_cells, _executed_craft
-        craft_paths = find_craft_files(nb_path, NOTEBOOKS_DIR)
-        nb_path_resolved = Path(nb_path).resolve()
-        craft_paths = [cp for cp in craft_paths if Path(cp).resolve() != nb_path_resolved]
-        if craft_paths:
-            craft_cells = get_craft_code_cells(craft_paths)
-            executed = _executed_craft.get(nb_id, set())
-            unexecuted = [(cid, src) for cid, src in craft_cells if cid not in executed]
-            if unexecuted:
-                # Mark all cells as executed synchronously to prevent double execution
-                _executed_craft.setdefault(nb_id, set()).update(cid for cid, _ in unexecuted)
-                print(f"[CRAFT] Executing {len(unexecuted)} code cells for {nb_id} from {len(craft_paths)} CRAFT file(s)", flush=True)
-                for cp in craft_paths:
-                    print(f"[CRAFT]   - {cp}", flush=True)
-
-    # Run lib init and CRAFT cells in a single sequential task to avoid
-    # racing on Colab's lazy kernel connection (assign_and_connect)
-    async def _init_and_craft():
-        try:
-            await _inject_lib_syspath(nb_id)
-            await _upload_lib_to_colab(nb_id)
-            for cid, src in unexecuted:
-                try:
-                    cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
-                    async for _ in kernel_service.execute_cell(nb_id, cell):
-                        pass
-                    print(f"[CRAFT] Executed: {cid}", flush=True)
-                except Exception as e:
-                    print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
-            if unexecuted:
-                print(f"[CRAFT] All cells executed for {nb_id}", flush=True)
-            # Signal frontend that kernel setup is complete → dot turns green
-            await broadcast_kernel_status(nb_id, "connected")
-        except Exception as e:
-            print(f"[CRAFT] Init failed for {nb_id}: {e}", flush=True)
-            await broadcast_kernel_status(nb_id, "error")
-    asyncio.create_task(_init_and_craft())
+    craft_cells, craft_paths = _collect_craft_cells_for_setup(nb_id, only_unexecuted=True)
+    logger.info(
+        "Scheduling kernel setup after kernel selection (notebook=%s, craft_cells=%s)",
+        nb_id, len(craft_cells),
+    )
+    _schedule_notebook_kernel_setup(
+        nb_id,
+        source="kernel_select",
+        craft_cells=craft_cells,
+        craft_paths=craft_paths,
+    )
     return ""
 
 # ============================================================================
@@ -1385,8 +2046,7 @@ def get(request):
     """Initiate Google OAuth2 flow for Colab access."""
     if not colab_auth_service:
         return Div("Colab integration not configured", cls="status error")
-    import secrets
-    state = secrets.token_urlsafe(32)
+    state = colab_auth_service.create_auth_state()
     # Derive redirect URI from the actual request so it works on any port
     redirect_uri = f"{request.url.scheme}://{request.url.netloc}/auth/google/callback"
     auth_url = colab_auth_service.get_auth_url(state=state, redirect_uri=redirect_uri)
@@ -1403,10 +2063,15 @@ async def get(request, code: str = "", error: str = "", state: str = ""):
                        A("← Back to Dialeng", href="/"))
     if not colab_auth_service:
         return Titled("Error", Div("Colab integration not configured", cls="status error"))
+    if not colab_auth_service.validate_auth_state(state):
+        return Titled("Authentication Error",
+                       Div("Invalid or expired OAuth state. Please try signing in again.", cls="status error"),
+                       A("← Back to Dialeng", href="/"))
     try:
         # Redirect URI must match what was used in get_auth_url()
         redirect_uri = f"{request.url.scheme}://{request.url.netloc}/auth/google/callback"
         await colab_auth_service.handle_callback(code, redirect_uri=redirect_uri)
+        await _mark_all_outlines_dirty("colab_auth_success")
         # Notify the parent window and close the popup
         from starlette.responses import HTMLResponse
         return HTMLResponse("""<!DOCTYPE html><html><body>
@@ -1430,6 +2095,7 @@ async def post():
     """Disconnect from Google / clear Colab tokens."""
     if colab_auth_service:
         colab_auth_service.logout()
+    await _mark_all_outlines_dirty("colab_logout")
     return Div(
         Button("Connect Colab", cls="btn btn-sm btn-colab", id="colab-auth-btn",
                onclick="window.open('/auth/google', '_blank', 'width=500,height=700')",
@@ -1442,7 +2108,7 @@ def get():
     """Check Colab authentication status (JSON)."""
     if not colab_auth_service:
         return {"authenticated": False, "enabled": False}
-    return {"authenticated": colab_auth_service.is_authenticated, "enabled": True}
+    return colab_auth_service.get_status()
 
 @rt("/dialeng/{nb_id}/export")
 def get(nb_id: str):
@@ -1503,7 +2169,7 @@ async def get(nb_id: str):
                 variables = ns_info.get('variables', [])
                 functions = ns_info.get('functions', [])
         except Exception as e:
-            print(f"Error getting kernel namespace: {e}")
+            logger.warning("Failed to build outline namespace info (notebook=%s): %s", nb_id, e)
 
     return OutlineSidebar(nb_id, headings, variables, functions, is_open=True)
 
@@ -1577,24 +2243,32 @@ async def post(request):
             from dialeng.services.colab.colab_auth import resolve_oauth_credentials
             _creds = await resolve_oauth_credentials()
             colab_auth_service = ColabAuthService(credentials=_creds)
+            await colab_auth_service.validate_session()
             colab_session_manager = ColabSessionManager(colab_auth_service)
             kernel_service.set_colab_session_manager(colab_session_manager)
-            logger.info(f"Colab services initialized from settings (OAuth source: {_creds.source})")
+            logger.info(
+                "Colab services initialized from settings (oauth_source=%s, authenticated=%s, email=%s, validation_error=%s)",
+                _creds.source,
+                colab_auth_service.is_authenticated,
+                colab_auth_service.account_email,
+                colab_auth_service.session_error,
+            )
             colab_changed = True
         elif not DIALENG_CONFIG.colab_enabled and colab_auth_service is not None:
             if colab_session_manager:
-                colab_session_manager.shutdown_all()
+                await colab_session_manager.shutdown_all()
             colab_auth_service = None
             colab_session_manager = None
             kernel_service.set_colab_session_manager(None)
             logger.info("Colab services disabled from settings")
             colab_changed = True
 
-        # If Colab state changed, reload the page so toolbar updates
+        if colab_changed:
+            await _mark_all_outlines_dirty("colab_settings_change")
+
         if colab_changed:
             return Div(
-                "Settings saved! Reloading...",
-                Script("setTimeout(() => window.location.reload(), 500);"),
+                "Settings saved. Kernel controls refreshed.",
                 cls="settings-status success"
             )
 
@@ -1615,26 +2289,19 @@ async def post(nb_id: str, pos: int = -1, type: str = "code"):
     if pos < 0:
         pos = len(nb.cells)
     nb.cells.insert(pos, Cell(cell_type=type))
+    nb.modified = True
 
     # FOUST fix (FOUST = Flash of Unstyled Text — Monaco renders code white first,
     # then tokenizes async via web worker; destroying/recreating the editor causes a
     # visible flash before syntax highlighting reappears).
-    # Broadcast granular cell_add JSON instead of AllCellsOOB. AllCellsOOB replaced
-    # the entire #cells container, destroying every Monaco editor. cell_add inserts
-    # a single cell via insertAdjacentHTML — existing editors are untouched.
-    # Note: the initiating tab also gets the HTMX response (AllCells). The client
-    # skips cell_add if the cell already exists in DOM to avoid duplicates.
+    # Broadcast a structural cell_add payload instead of replacing #cells. The
+    # browser reconciles its DOM from the backend-authored ordered_cell_ids list,
+    # so add/move/delete all share one structural source of truth.
     new_cell = nb.cells[pos]
-    cell_html = to_xml(CellView(new_cell, nb_id))
-    add_html = to_xml(AddButtons(pos + 1, nb_id))
-    await broadcast_json(nb_id, {
-        "type": "cell_add",
-        "cell_id": new_cell.id,
-        "pos": pos,
-        "html": cell_html + add_html
-    })
+    await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
+    await _mark_outline_dirty(nb_id, reason="cell_add")
 
-    return AllCells(nb)
+    return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}")
 async def delete(nb_id: str, cid: str):
@@ -1645,6 +2312,7 @@ async def delete(nb_id: str, cid: str):
     queue.cancel_queued(nb_id, cid)
 
     nb.cells = [c for c in nb.cells if c.id != cid]
+    nb.modified = True
 
     # Broadcast queue state update
     await broadcast_queue_state(nb_id)
@@ -1652,32 +2320,71 @@ async def delete(nb_id: str, cid: str):
     # FOUST fix: broadcast granular cell_delete JSON instead of AllCellsOOB.
     # The client removes just this cell + its adjacent add-row from DOM.
     # Other cells' Monaco editors are completely untouched.
-    await broadcast_json(nb_id, {"type": "cell_delete", "cell_id": cid})
+    await broadcast_json(nb_id, _cell_delete_payload(nb, cid))
+    await _mark_outline_dirty(nb_id, reason="cell_delete")
 
-    return AllCells(nb)
+    return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/source")
-def post(nb_id: str, cid: str, source: str):
+async def post(nb_id: str, cid: str, source: str):
     nb = get_notebook(nb_id)
     for c in nb.cells:
         if c.id == cid:
-            old_source = c.source
-            c.source = source
-            # CRITICAL: Clear output when source changes to prevent stale data in context
-            # This ensures that when context is built for subsequent cells,
-            # we don't include an old assistant response that doesn't match the new source.
-            if old_source != source:
-                c.clear_outputs()
-                print(f"[SOURCE UPDATE] Cell {cid}: Source changed, cleared outputs to prevent stale context")
+            changed = c.update_source(source)
+            if not changed:
+                break
+
+            nb.modified = True
+            cell_type = str(getattr(c, "cell_type", ""))
+            logger.info(
+                "Cell source committed (notebook=%s, cell=%s, cell_type=%s, version=%s)",
+                nb_id,
+                cid,
+                cell_type,
+                c.version,
+            )
+
+            if cell_type in {"code", "shell"}:
+                await broadcast_json(nb_id, {
+                    "type": "cell_source_update",
+                    "cell_id": c.id,
+                    "source": c.source,
+                    "version": c.version,
+                })
+                await broadcast_to_notebook(nb_id, CellOutputOOB(c))
+                await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
+            else:
+                await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
+
+            if cell_type == "note":
+                await _mark_outline_dirty(nb_id, reason="note_source_commit")
             break
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/output")
-def post(nb_id: str, cid: str, output: str):
+async def post(nb_id: str, cid: str, output: str):
     nb = get_notebook(nb_id)
     for c in nb.cells:
         if c.id == cid:
-            c.output = output
+            changed = c.update_output(output)
+            if not changed:
+                break
+
+            nb.modified = True
+            cell_type = str(getattr(c, "cell_type", ""))
+            logger.info(
+                "Cell output committed (notebook=%s, cell=%s, cell_type=%s, version=%s)",
+                nb_id,
+                cid,
+                cell_type,
+                c.version,
+            )
+
+            if cell_type in {"code", "shell"}:
+                await broadcast_to_notebook(nb_id, CellOutputOOB(c))
+                await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
+            else:
+                await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
             break
     return ""
 
@@ -1687,34 +2394,42 @@ async def post(nb_id: str, cid: str, cell_type: str):
     for c in nb.cells:
         if c.id == cid:
             c.cell_type = cell_type
-            c.output = ""
-            c.execution_count = None
+            c.clear_outputs()
+            c.version += 1
+            c.last_modified = datetime.now()
+            nb.modified = True
 
             # Cell type change is the ONE case where CellViewOOB is correct:
             # the input section fundamentally changes (Monaco editor ↔ textarea),
             # so full DOM replacement is unavoidable and expected.
             await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
+            await _mark_outline_dirty(nb_id, reason="cell_type_change")
 
-            return CellView(c, nb.id)
+            return ""
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/move/{direction}")
 async def post(nb_id: str, cid: str, direction: str):
     nb = get_notebook(nb_id)
-    for i, c in enumerate(nb.cells):
-        if c.id == cid:
-            if direction == "up" and i > 0:
-                nb.cells[i], nb.cells[i-1] = nb.cells[i-1], nb.cells[i]
-            elif direction == "down" and i < len(nb.cells) - 1:
-                nb.cells[i], nb.cells[i+1] = nb.cells[i+1], nb.cells[i]
-            break
+    direction_map = {"up": -1, "down": 1}
+    move_delta = direction_map.get(direction)
+    if move_delta is None:
+        return ""
 
-    # FOUST fix: broadcast granular cell_move JSON instead of AllCellsOOB.
-    # The client uses DOM insertBefore() to swap adjacent cells. insertBefore
-    # MOVES nodes (doesn't copy), so Monaco editors survive with full state.
-    await broadcast_json(nb_id, {"type": "cell_move", "cell_id": cid, "direction": direction})
+    moved = nb.move_cell(cid, move_delta)
+    if not moved:
+        return ""
+    nb.modified = True
 
-    return AllCells(nb)
+    # Broadcast the backend-authoritative cell order so every client reorders
+    # the existing DOM nodes from the same source of truth.
+    await broadcast_json(nb_id, _cell_move_payload(nb, cid))
+    await _mark_outline_dirty(nb_id, reason="cell_move")
+
+    # Move buttons use hx_swap="none"; the browser applies the canonical order
+    # from the WebSocket message and keeping the HTTP response empty avoids
+    # unnecessary HTMX lifecycle work on the initiating tab.
+    return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/duplicate")
 async def post(nb_id: str, cid: str):
@@ -1730,15 +2445,10 @@ async def post(nb_id: str, cid: str):
                 is_exported=c.is_exported,
             )
             nb.cells.insert(i + 1, new_cell)
-            cell_html = to_xml(CellView(new_cell, nb_id))
-            add_html = to_xml(AddButtons(i + 2, nb_id))
-            await broadcast_json(nb_id, {
-                "type": "cell_add",
-                "cell_id": new_cell.id,
-                "pos": i + 1,
-                "html": cell_html + add_html
-            })
-            return AllCells(nb)
+            nb.modified = True
+            await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
+            await _mark_outline_dirty(nb_id, reason="cell_duplicate")
+            return ""
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/clear-output")
@@ -1748,8 +2458,14 @@ async def post(nb_id: str, cid: str):
     for c in nb.cells:
         if c.id == cid:
             c.clear_outputs()
-            await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
-            return CellView(c, nb.id)
+            nb.modified = True
+            cell_type = str(getattr(c, "cell_type", ""))
+            if cell_type in {"code", "shell"}:
+                await broadcast_to_notebook(nb_id, CellOutputOOB(c))
+                await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
+            else:
+                await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
+            return ""
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/merge-below")
@@ -1759,13 +2475,25 @@ async def post(nb_id: str, cid: str):
     for i, c in enumerate(nb.cells):
         if c.id == cid and i + 1 < len(nb.cells):
             below = nb.cells[i + 1]
-            c.source = c.source.rstrip('\n') + '\n' + below.source
-            c.clear_outputs()
+            c.update_source(c.source.rstrip('\n') + '\n' + below.source)
+            nb.modified = True
             # Remove the cell below
             del nb.cells[i + 1]
-            await broadcast_json(nb_id, {"type": "cell_delete", "cell_id": below.id})
-            await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
-            return CellView(c, nb.id)
+            await broadcast_json(nb_id, _cell_delete_payload(nb, below.id))
+            cell_type = str(getattr(c, "cell_type", ""))
+            if cell_type in {"code", "shell"}:
+                await broadcast_json(nb_id, {
+                    "type": "cell_source_update",
+                    "cell_id": c.id,
+                    "source": c.source,
+                    "version": c.version,
+                })
+                await broadcast_to_notebook(nb_id, CellOutputOOB(c))
+                await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
+            else:
+                await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
+            await _mark_outline_dirty(nb_id, reason="cell_merge_below")
+            return ""
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/extract-code-blocks")
@@ -1784,15 +2512,10 @@ async def post(nb_id: str, cid: str):
             for j, block in enumerate(blocks):
                 new_cell = Cell(cell_type="code", source=block.strip())
                 nb.cells.insert(i + 1 + j, new_cell)
-                cell_html = to_xml(CellView(new_cell, nb_id))
-                add_html = to_xml(AddButtons(i + 2 + j, nb_id))
-                await broadcast_json(nb_id, {
-                    "type": "cell_add",
-                    "cell_id": new_cell.id,
-                    "pos": i + 1 + j,
-                    "html": cell_html + add_html
-                })
-            return AllCells(nb)
+                nb.modified = True
+                await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
+            await _mark_outline_dirty(nb_id, reason="extract_code_blocks")
+            return ""
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/collapse")
@@ -1868,19 +2591,41 @@ async def post(nb_id: str, cid: str, source: str = None):
 
     c = target_cell
 
-    # Update source if provided (from Monaco editor via hx-vals)
-    if source is not None:
+    # Running a cell from the editor can submit fresher source than the last blur
+    # commit. Persist that source first so every tab converges on the same input,
+    # but keep the previous output visible until queue/running state is confirmed.
+    if source is not None and source != c.source:
         c.source = source
+        c.version += 1
+        c.last_modified = datetime.now()
+        nb.modified = True
+        cell_type = str(getattr(c, "cell_type", ""))
+        logger.info(
+            "Cell source committed during run (notebook=%s, cell=%s, cell_type=%s, version=%s)",
+            nb_id,
+            cid,
+            cell_type,
+            c.version,
+        )
+        if cell_type in {"code", "shell"}:
+            await broadcast_json(nb_id, {
+                "type": "cell_source_update",
+                "cell_id": c.id,
+                "source": c.source,
+                "version": c.version,
+            })
+        else:
+            await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
 
     if c.cell_type == "code":
         queue = get_execution_queue(nb_id)
 
         # Check if already queued or running - ignore duplicate requests
         if queue.is_cell_queued(nb_id, cid):
-            print(f"[CODE RUN] Cell {cid} already queued/running, ignoring duplicate", flush=True)
+            logger.info("Ignoring duplicate code run request (notebook=%s, cell=%s)", nb_id, cid)
             return ""
 
-        print(f"[CODE RUN] Queueing cell {cid} in notebook {nb_id}", flush=True)
+        logger.info("Queueing code cell (notebook=%s, cell=%s)", nb_id, cid)
 
         # Queue the cell - returns immediately, execution happens in background
         queue.queue_cell(nb_id, c)
@@ -2160,38 +2905,20 @@ async def post(nb_id: str, cid: str, source: str = None):
     is_last_cell = cell_index == len(nb.cells) - 1
 
     if is_last_cell:
-        # Add a new code cell using OOB swap
+        # Add a new code cell via the structural WebSocket path.
         new_cell = Cell(cell_type="code")
         nb.cells.append(new_cell)
-        new_cell_index = len(nb.cells) - 1
         next_cell_id = new_cell.id
 
-        # FOUST fix: broadcast granular cell_add instead of AllCellsOOB.
-        # IMPORTANT: The HTMX response below ALSO appends the new cell via
-        # hx_swap_oob="beforeend:#cells". Both the WS message and HTMX response
-        # reach the initiating tab. The client's cell_add handler has a duplicate
-        # guard (checks if cell already exists in DOM) to prevent creating two
-        # copies of the same cell — without this guard, the cell appears twice
-        # and the duplicate has no HTMX bindings or Monaco editor, making it
-        # unselectable and uneditable.
-        cell_html = to_xml(CellView(new_cell, nb_id))
-        add_html = to_xml(AddButtons(new_cell_index + 1, nb_id))
-        await broadcast_json(nb_id, {
-            "type": "cell_add",
-            "cell_id": new_cell.id,
-            "pos": new_cell_index,
-            "html": cell_html + add_html
-        })
+        # Keep structural changes single-sourced: the initiating tab and every
+        # collaborator receive the same cell_add payload and reconcile from the
+        # backend-authoritative notebook order.
+        await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
 
-        # Return: updated cell (main) + new cell with AddButtons (OOB appended to #cells)
-        # Use a wrapper div with hx-swap-oob to append the new elements
+        # Return the updated run cell plus a focus handoff. The new cell itself
+        # arrives via WebSocket structure reconciliation.
         return (
             CellView(c, nb.id),  # Main response - replaces the run cell
-            Div(
-                CellView(new_cell, nb.id),
-                AddButtons(new_cell_index + 1, nb.id),
-                hx_swap_oob="beforeend:#cells"  # Append to end of #cells
-            ),
             # Script to focus the next cell after DOM settles
             Script(f"setTimeout(() => focusNextCell('{next_cell_id}'), 50);")
         )
@@ -2209,60 +2936,32 @@ async def post(nb_id: str, cid: str, source: str = None):
 async def post(nb_id: str):
     """Restart the kernel for a specific notebook."""
     await broadcast_kernel_status(nb_id, "restarting")
+    logger.info("Kernel restart requested for notebook %s", nb_id)
+    await _invalidate_kernel_background_work(nb_id, reason="kernel_restart")
     try:
         await kernel_service.restart_async(nb_id)
     except Exception as e:
-        print(f"[KERNEL] Restart failed for {nb_id}: {e}", flush=True)
+        logger.exception("Kernel restart failed for notebook %s", nb_id)
         await broadcast_kernel_status(nb_id, "error")
         return Div(f"Kernel restart failed: {e}", cls="status error")
 
     # Clear CRAFT execution tracking so CRAFT cells re-execute on next page load
     from dialeng.services.craft_service import reset_craft_tracking
     reset_craft_tracking(nb_id)
-    print(f"[CRAFT] Reset execution tracking for {nb_id} (kernel restart)", flush=True)
+    logger.info("Reset CRAFT execution tracking after restart for notebook %s", nb_id)
 
-    # Inject _lib/ sys.path and re-run CRAFT code cells in the fresh kernel
-    nb = notebooks.get(nb_id)
-    craft_cells = []
-    if nb:
-        nb_path = nb.path
-        if not nb_path:
-            found = _find_notebook_path(nb_id)
-            nb_path = found if found else NOTEBOOKS_DIR / f"{nb_id}.ipynb"
-        if nb_path and Path(nb_path).exists():
-            from dialeng.services.craft_service import find_craft_files, get_craft_code_cells, _executed_craft
-            craft_paths = find_craft_files(nb_path, NOTEBOOKS_DIR)
-            # Exclude self if this notebook is a CRAFT file
-            nb_path_resolved = Path(nb_path).resolve()
-            craft_paths = [cp for cp in craft_paths if Path(cp).resolve() != nb_path_resolved]
-            if craft_paths:
-                craft_cells = get_craft_code_cells(craft_paths)
-                if craft_cells:
-                    # Mark synchronously to prevent race conditions
-                    _executed_craft.setdefault(nb_id, set()).update(cid for cid, _ in craft_cells)
-                    print(f"[CRAFT] Re-executing {len(craft_cells)} code cells after kernel restart", flush=True)
-
-    async def _restart_setup():
-        try:
-            # Inject lib sys.path and re-upload to Colab before running CRAFT cells
-            await _inject_lib_syspath(nb_id)
-            await _upload_lib_to_colab(nb_id)
-            for cid, src in craft_cells:
-                try:
-                    cell = Cell(id=cid, cell_type=CellType.CODE, source=src)
-                    async for _ in kernel_service.execute_cell(nb_id, cell):
-                        pass
-                    print(f"[CRAFT] Executed: {cid}", flush=True)
-                except Exception as e:
-                    print(f"[CRAFT] Error executing cell {cid}: {e}", flush=True)
-            if craft_cells:
-                print(f"[CRAFT] All cells re-executed for {nb_id}", flush=True)
-            # Signal frontend that restart setup is complete → dot turns green
-            await broadcast_kernel_status(nb_id, "connected")
-        except Exception as e:
-            print(f"[CRAFT] Restart setup failed for {nb_id}: {e}", flush=True)
-            await broadcast_kernel_status(nb_id, "error")
-    asyncio.create_task(_restart_setup())
+    craft_cells, craft_paths = _collect_craft_cells_for_setup(nb_id, only_unexecuted=False)
+    logger.info(
+        "Scheduling kernel restart setup (notebook=%s, craft_cells=%s)",
+        nb_id, len(craft_cells),
+    )
+    _schedule_notebook_kernel_setup(
+        nb_id,
+        source="kernel_restart",
+        craft_cells=craft_cells,
+        craft_paths=craft_paths,
+    )
+    await _mark_outline_dirty(nb_id, reason="kernel_restart")
 
     return Div(cls="status")
 
@@ -2278,24 +2977,30 @@ async def post(nb_id: str):
 @rt("/dialeng/{nb_id}/queue/cancel_all")
 async def post(nb_id: str):
     """Cancel running cell AND clear entire queue."""
-    print(f"[CANCEL_ALL] Received cancel_all request for notebook {nb_id}")
+    logger.info("Cancel-all requested for notebook %s", nb_id)
     queue = get_execution_queue(nb_id)
 
     # Get current queue status before cancelling
     status_before = queue.get_status(nb_id)
-    print(f"[CANCEL_ALL] Queue status before: running={status_before.current_cell_id}, queued={status_before.queued_cell_ids}")
+    logger.info(
+        "Queue status before cancel-all (notebook=%s, running=%s, queued=%s)",
+        nb_id, status_before.current_cell_id, status_before.queued_cell_ids,
+    )
 
     # First interrupt the running cell
     kernel_service.interrupt(nb_id)
-    print(f"[CANCEL_ALL] Kernel interrupt sent")
+    logger.info("Kernel interrupt sent during cancel-all for notebook %s", nb_id)
 
     # Then clear the queue
     queue.cancel_all(nb_id)
-    print(f"[CANCEL_ALL] Queue cancel_all called")
+    logger.info("Queue cleared during cancel-all for notebook %s", nb_id)
 
     # Get status after cancelling
     status_after = queue.get_status(nb_id)
-    print(f"[CANCEL_ALL] Queue status after: running={status_after.current_cell_id}, queued={status_after.queued_cell_ids}")
+    logger.info(
+        "Queue status after cancel-all (notebook=%s, running=%s, queued=%s)",
+        nb_id, status_after.current_cell_id, status_after.queued_cell_ids,
+    )
 
     # Broadcast updated queue state
     await broadcast_queue_state(nb_id)
@@ -2437,14 +3142,7 @@ async def post(dlg_name: str, content: str, placement: str = "add_after", id_: s
     # FOUST fix: broadcast granular cell_add JSON instead of AllCellsOOB.
     # This is the dialoghelper version of the add route — same pattern as /cell/add.
     try:
-        cell_html = to_xml(CellView(new_cell, dlg_name))
-        add_html = to_xml(AddButtons(insert_idx + 1, dlg_name))
-        await broadcast_json(dlg_name, {
-            "type": "cell_add",
-            "cell_id": new_cell.id,
-            "pos": insert_idx,
-            "html": cell_html + add_html
-        })
+        await broadcast_json(dlg_name, _cell_add_payload(nb, dlg_name, new_cell.id))
         print(f"[ADD_RELATIVE] Broadcast completed for {dlg_name}", flush=True)
     except Exception as e:
         print(f"[ADD_RELATIVE] Broadcast error: {e}", flush=True)
@@ -2489,7 +3187,7 @@ async def post(dlg_name: str, msid: str, log_changed: str = ""):
             })
         nb.cells.pop(idx)
         # FOUST fix: granular cell_delete instead of AllCellsOOB (dialoghelper route)
-        await broadcast_json(dlg_name, {"type": "cell_delete", "cell_id": msid})
+        await broadcast_json(dlg_name, _cell_delete_payload(nb, msid))
     return {"status": "ok", "id": msid}
 
 def _str_to_bool(val: str) -> bool:
@@ -2763,7 +3461,7 @@ async def post(dlg_name: str, ids: str = "", id_: str = "", cmd: str = "copy"):
     if cmd == "cut":
         # FOUST fix: granular cell_delete per cell instead of AllCellsOOB
         for cid in cell_ids:
-            await broadcast_json(dlg_name, {"type": "cell_delete", "cell_id": cid})
+            await broadcast_json(dlg_name, _cell_delete_payload(nb, cid))
 
     return result
 
@@ -2778,14 +3476,7 @@ async def post(dlg_name: str, id_: str = "", after: str = "True"):
         for new_id in new_ids:
             for idx, c in enumerate(nb.cells):
                 if c.id == new_id:
-                    cell_html = to_xml(CellView(c, dlg_name))
-                    add_html = to_xml(AddButtons(idx + 1, dlg_name))
-                    await broadcast_json(dlg_name, {
-                        "type": "cell_add",
-                        "cell_id": new_id,
-                        "pos": idx,
-                        "html": cell_html + add_html
-                    })
+                    await broadcast_json(dlg_name, _cell_add_payload(nb, dlg_name, new_id))
                     break
 
     return {"status": "ok", "ids": new_ids}
@@ -2924,10 +3615,7 @@ async def post(name: str):
 async def post(name: str):
     """Delete a dialog/notebook from memory and optionally disk."""
     try:
-        # Cancel any running executions
-        if name in execution_queues:
-            execution_queues[name].cancel_all()
-            del execution_queues[name]
+        await _teardown_notebook_runtime(name, reason="memory_delete")
         # Remove from in-memory registry
         if name in notebooks:
             del notebooks[name]
@@ -2995,7 +3683,12 @@ async def ws_on_connect(send, scope):
     if nb_id not in ws_connections:
         ws_connections[nb_id] = []
     ws_connections[nb_id].append(send)
-    print(f"[WS] Client connected to {nb_id}. Total: {len(ws_connections[nb_id])}", flush=True)
+    kernel_service.set_client_count(nb_id, len(ws_connections[nb_id]))
+    logger.info("WebSocket client connected (notebook=%s, connections=%s)", nb_id, len(ws_connections[nb_id]))
+    try:
+        await send_kernel_snapshot(nb_id, send)
+    except Exception:
+        logger.exception("Failed to send initial kernel snapshot on WebSocket connect (notebook=%s)", nb_id)
 
 async def ws_on_disconnect(send, scope):
     """Called when WebSocket connection is closed."""
@@ -3005,7 +3698,8 @@ async def ws_on_disconnect(send, scope):
 
     if nb_id in ws_connections and send in ws_connections[nb_id]:
         ws_connections[nb_id].remove(send)
-        print(f"[WS] Client disconnected from {nb_id}. Total: {len(ws_connections[nb_id])}", flush=True)
+        kernel_service.set_client_count(nb_id, len(ws_connections[nb_id]))
+        logger.info("WebSocket client disconnected (notebook=%s, connections=%s)", nb_id, len(ws_connections[nb_id]))
 
 @app.ws('/ws/{nb_id}', conn=ws_on_connect, disconn=ws_on_disconnect)
 async def ws(msg: str, send, nb_id: str):
@@ -3014,15 +3708,18 @@ async def ws(msg: str, send, nb_id: str):
     if msg is None or not isinstance(msg, str) or not msg:
         return
 
-    print(f"[WS] Message from {nb_id}: {msg[:50]}", flush=True)
+    logger.debug("WebSocket message received (notebook=%s, preview=%s)", nb_id, msg[:100])
 
     try:
         data = json.loads(msg)
+        if data.get("type") == "join":
+            await send_kernel_snapshot(nb_id, send)
+            return
         if data.get("type") == "cancel":
             cell_id = data.get("cell_id")
             if cell_id:
                 cancelled_cells.add(cell_id)
-                print(f"[WS] Cancelled cell {cell_id}", flush=True)
+                logger.info("WebSocket cancel received (notebook=%s, cell=%s)", nb_id, cell_id)
     except json.JSONDecodeError:
         pass
 
@@ -3060,7 +3757,14 @@ def main(root_dir: Path = None, port: int = 8000):
     print("   • Alt+↑/↓           - Move cell up/down")
     print("   • Escape            - Exit edit mode")
     print("   • Double-click      - Edit markdown/response")
-    serve(appname="dialeng.app", port=port, reload_dirs=["dialeng"])
+    print("")
+    print("   Press Ctrl+C to stop Dialeng and release attached kernels.")
+    serve(
+        appname="dialeng.app",
+        port=port,
+        reload_dirs=["dialeng"],
+        log_config=build_log_config(),
+    )
 
 
 if __name__ == "__main__":

@@ -114,6 +114,7 @@ class SubprocessKernel(BaseKernel):
         Yields:
             CellOutput objects for each chunk of output
         """
+        self.mark_activity("execute_streaming")
         if not self.is_alive:
             self._start_process()
 
@@ -208,6 +209,24 @@ class SubprocessKernel(BaseKernel):
 
         finally:
             self._is_busy = False
+
+    async def sync_project_files(
+        self,
+        files: list[tuple[str, str]],
+        *,
+        notebook_id: str = "",
+        remote_root: str = ".",
+    ) -> dict:
+        """Local kernels read project files directly from disk."""
+        total_bytes = sum(len(content.encode("utf-8")) for _, content in files)
+        self.mark_activity("sync_project_files:noop")
+        return {
+            "status": "noop",
+            "remote_root": remote_root,
+            "file_count": len(files),
+            "total_bytes": total_bytes,
+            "reason": "local kernel uses workspace files directly",
+        }
 
     def interrupt(self) -> bool:
         """

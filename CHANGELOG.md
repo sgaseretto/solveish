@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Colab Kernel Snapshot & Auth Visibility
+- Added a backend-authoritative `kernel_snapshot` payload carrying kernel liveness, queue state, notebook setup phase, Colab auth state, runtime id, and account email
+- Browser now polls `/dialeng/{nb_id}/kernel/snapshot` and also receives the same snapshot over WebSocket to recover cleanly after reconnects
+- Kernel modal now shows the signed-in Colab account email when a persisted Google session is active
+- OAuth callback now validates single-use `state` tokens before exchanging the authorization code
+
+#### Colab Resilience Tests
+- Added `tests/test_colab_resilience.py` covering per-notebook kernel serialization, Colab auth state handling, degraded Colab connection liveness, connection recycle behavior, and async kernel teardown
+- Added `tests/test_logging_config.py` covering console log filtering and Dialeng logger registration
+
+#### Backend-Authoritative Notebook Snapshots
+- Kernel snapshots now also carry notebook toolbar state (`mode`, `model`, `safe_mode`, selected kernel type/runtime) plus an outline revision counter
+- Toolbar controls now refresh from backend state instead of relying on optimistic client-side mutation
+- File explorer refresh requests now preserve the active notebook id so highlighting and current notebook kernel state stay correct while browsing folders
+- Nested and current notebook explorer items now use canonical encoded notebook ids consistently when syncing running-kernel indicators
+
 #### Solveit-style Keyboard Shortcuts
 - **Navigation**: Arrow keys / `j`/`k` to navigate cells, `Shift+Arrow` for multi-selection, `Cmd+A` select all, `Enter` to edit, `Escape` to exit
 - **Multi-selection**: Click, Shift+click (range), Cmd+click (toggle) — multi-select applies to h/p/e toggles, clipboard ops, and clear outputs
@@ -50,14 +66,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+#### Colab Connection Robustness
+- Removed the global "cleanup all runtimes before attach" behavior that could tear down unrelated Colab sessions on the same Google account
+- Colab init steps now wait for `status: idle` instead of treating `execute_reply` as completion, avoiding premature setup transitions on Colab's multiplexed WebSocket
+- Notebook setup work (`sys.path` injection, Colab module upload, CRAFT execution, restart setup) now shares the same per-notebook execution lock as regular cell execution, preventing races on the Colab kernel transport
+- Notebook setup and save-triggered sync work now carry a per-notebook generation id, so kernel switches, runtime changes, restarts, and notebook teardown cancel stale background tasks before they touch the new kernel
+- Notebook deletion/removal now tears down the attached kernel plus pending setup/sync work instead of leaving remote sessions and execution state behind
+- Quiet long-running code cells no longer get marked finished by a 30-second browser inactivity timeout; completion now comes from backend kernel state
+- WebSocket reconnect now rehydrates queue/kernel state from the backend snapshot instead of inferring readiness from queue emptiness alone
+- Stored Colab sessions are validated on startup before Dialeng treats them as authenticated, and invalid/revoked sessions are cleared instead of being reused silently
+- Keep-alive is now activity-aware, using live browser-client counts and recent kernel activity to avoid keeping long-idle Colab runtimes warm unnecessarily
+- Repeated keep-alive and proxy-token-refresh failures now trigger a Colab connection recycle so the next execute reconnects against a clean runtime/session
+- Project-path setup and exported-module sync now flow through `BaseKernel` / `KernelService` abstractions, so local and Colab kernels share one setup contract and future remote kernels can plug into the same hooks
+- Server logs for CRAFT discovery, LIB path injection, LIB sync, and per-CRAFT execution now include runtime id, generation, file counts, byte counts, sample paths, and durations
+- Final OOB rendering and notebook saves now normalize `update_display_data` and `clear_output` events, so fastprogress/tqdm progress bars keep their last visible state instead of collapsing into blank `<progress value="0">` placeholders after execution
+- Formatter-only IPython `__repr__ returned non-string` errors are now treated as benign when the cell also produced rich display output, preventing fastai/fastprogress visual cells from ending in duplicate error tracebacks while still rendering their images/widgets
+
 #### Interactive HTML Widgets Not Rendering on Re-run
 - Code cells producing HTML with `<script>` tags (e.g., YouTube embeds, custom JS visualizations) only worked on the first execution — subsequent runs showed an empty output
+
+#### Shared Notebook State Drift
+- Committed cell source/output edits now broadcast canonical backend state to every open tab instead of assuming the initiating tab's DOM is the source of truth
+- Running a code or prompt cell with fresher in-editor text now commits and broadcasts that source before execution, so other tabs no longer see only the new output while keeping stale or empty input
+- Code and shell source commits now clear outputs and execution metadata consistently in all tabs because the backend owns the committed cell version
+- Notebook toolbar settings (`mode`, `model`, `safe_mode`) now synchronize across tabs via kernel snapshots
+- Outline refresh is now driven by a backend revision bump after note edits, structural cell changes, kernel restarts, and completed code execution instead of local client guesses
+- Structural cell routes and type changes now avoid mixing local HTMX swaps with authoritative WebSocket/OOB updates, reducing another class of notebook-state divergence
+- Code run requests keep prior output visible until the backend confirms queued/running state, eliminating another source of optimistic UI drift
+- Kernel modal HTMX refresh now preserves its visible/open state instead of replacing the overlay and immediately closing it on page startup or state refresh
 - Root cause: the OOB swap that finalizes cell output uses `replaceWith()`, which does not execute `<script>` tags. On first run, async API loading (e.g., YouTube IFrame API) happened to fire after the OOB swap. On re-runs, the API was already loaded and created the widget synchronously during streaming, but the OOB swap then destroyed it
 - Fix: `processOOBSwap()` now clones `<script>` tags into fresh elements after replacing `output-*` divs, mirroring the pattern already used in `appendDisplayData()` during streaming
 
 #### Uvicorn Reload Loop on Generated Files
 - Running `!pip install` or other commands that create files in `.venv`/`.autorun_modules` triggered uvicorn's file watcher, causing infinite reload loops
 - Fix: `serve()` now uses `reload_dirs=["dialeng"]` to only watch the source code directory instead of excluding patterns from a broad watch
+
+#### Terminal Logging Visibility
+- Dialeng now installs a custom Uvicorn log config so `dialeng.*` logger output appears in the terminal alongside startup/server logs
+- Access-log noise from static assets, `/render-markdown`, `/favicon.ico`, and repeated `/kernel/snapshot` polling is filtered so Colab/kernel setup logs remain readable during interactive sessions
+- Access logs now render with a clearer `[http]` prefix while Dialeng runtime logs include the logger name
+
+#### Floating Kernel Notifications
+- Kernel/setup status messages now render as floating toast-style notifications instead of inline messages under the toolbar
+- WebSocket reconnect, Colab attach/setup phases, and HTMX responses targeting `#status` all use the same floating notification region
+- Backend snapshot setup details now surface as progressive Colab setup toasts, and the inline status area no longer pushes notebook content down while the kernel is attaching
+- The toast region now anchors to the bottom-right corner of the window instead of the top-right corner
+
+#### Server Shutdown Kernel Cleanup
+- Added an app-level shutdown hook that cancels notebook setup/sync work, cancels queued execution, and asynchronously shuts down all kernels during server exit
+- `Ctrl+C` in the terminal is now the supported clean-exit path for Dialeng, and Colab kernels should release their Jupyter sessions and runtime assignments during that shutdown instead of being left active
+- `KernelService` now has async `shutdown_all_async()` support, and Colab kernel removal also clears the `ColabSessionManager` cache so later reconnects do not reuse a stale shutdown kernel object
+
+#### Cell Structure Consistency
+- Cell move broadcasts now send the backend-authoritative notebook order instead of only an `up`/`down` direction
+- The browser now reorders existing cell DOM nodes from that canonical order, which fixes prompt cells with generated output getting stuck when moved down and fixes neighboring cells being unable to cross back above them
+- Cell move requests now return an empty HTMX response, and the browser rebuilds `#cells` from a stable snapshot of existing cell/add-row pairs, preventing duplicate add-row controls, move-induced scroll wiggles, and broken follow-up reordering after prompt-cell moves
+- Cell add/delete broadcasts now also carry `ordered_cell_ids`, and the browser reconciles add/delete/move through the same structure-sync path instead of three separate DOM heuristics
+- Keyboard add shortcuts no longer use a local HTMX `#cells` swap; they now use the same WebSocket-backed add flow as button clicks and prompt/code auto-insertions
+- Add-button, duplicate, and extract-code-block insertions now preserve the current viewport anchor instead of jumping back to the top of the notebook after the structure reconcile
+- Last-cell `Shift+Enter` now preserves the current viewport through the structural add reconcile and only then reveals the new cell with a minimal in-view adjustment, fixing the remaining jump-to-top path when creating the next code cell at the bottom
+
+#### Notebook Identity Consistency
+- Added shared `dialeng/notebook_id.py` helpers so notebook path ↔ notebook-id conversion is defined in one place instead of being reimplemented in multiple layers
+- The file explorer now uses that shared notebook-id encoding when deciding which notebook is active and which notebook has a running kernel, so nested notebooks correctly show their green running state
 
 #### Toolbar Dropdown Clipped by Overflow
 - YT capture button's dropdown panel was invisible because it rendered inside `.toolbar-right` which has `overflow-y: hidden`

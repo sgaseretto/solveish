@@ -51,6 +51,7 @@ def AllCells(nb):
 def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, available_models: list,
                  config: Optional[DialengConfig] = None, shfmt_available: bool = True,
                  colab_enabled: bool = False, colab_authenticated: bool = False,
+                 colab_account_email: Optional[str] = None,
                  notebooks_dir: Optional[Path] = None, kernel_alive: bool = False,
                  kernel_notebooks: Optional[set] = None, has_craft_code: bool = False):
     """Render the complete notebook page.
@@ -163,11 +164,24 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                     ),
                     cls="toolbar-container"
                 ),
-                Div(id="status"),
+                Div(id="status", aria_live="polite", aria_atomic="true"),
                 AllCells(nb),
                 Script(f"""
                     window.NOTEBOOK_ID = '{nb.id}';
                     window.KERNEL_ALIVE = {'true' if kernel_alive else 'false'};
+                    window.KERNEL_STATE = {{
+                        kernel: {{
+                            can_run: {'true' if kernel_alive else 'false'},
+                            is_alive: {'true' if kernel_alive else 'false'},
+                            display_state: {'"connected"' if kernel_alive else '"disconnected"'}
+                        }},
+                        queue: {{
+                            running_cell_id: null,
+                            queued_cell_ids: []
+                        }},
+                        setup: {{ is_active: false }},
+                        auth: {{ enabled: {'true' if colab_enabled else 'false'}, authenticated: {'true' if colab_authenticated else 'false'} }}
+                    }};
                     window.HAS_CRAFT_CODE = {'true' if has_craft_code else 'false'};
                 """),
                 Script(f"document.addEventListener('DOMContentLoaded', () => connectWebSocket('{nb.id}'));"),
@@ -181,7 +195,7 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
         # Delete confirmation modal (for file explorer)
         DeleteConfirmModal(),
         # Kernel selection modal (overlay style, hidden by default)
-        KernelModal(nb.id, nb.kernel_type, colab_authenticated, nb.colab_runtime_type),
+        KernelModal(nb.id, nb.kernel_type, colab_authenticated, nb.colab_runtime_type, colab_account_email),
         # Auto-show kernel modal if no kernel is attached (runs after modal is in DOM)
         Script("if(!window.KERNEL_ALIVE){var o=document.getElementById('kernel-modal-overlay');if(o)o.classList.add('visible');}") if not kernel_alive else None,
         # Settings sidebar and overlay (outside main layout - overlay style)

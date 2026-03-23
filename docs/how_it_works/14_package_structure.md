@@ -49,7 +49,11 @@ Three ways to run Dialeng:
 | `uv run python -m dialeng` | Uses `__main__.py` → imports and calls `dialeng.app.main()` |
 | `uv run python -m dialeng.app` | Direct execution via `if __name__ == "__main__": main()` |
 
-The `main()` function in `dialeng/app.py` prints startup info (credentials, config, shortcuts) then calls `serve(port=8000)`.
+The `main()` function in `dialeng/app.py` prints startup info (credentials, config, shortcuts) then calls `serve(port=8000, log_config=build_log_config())`.
+
+That custom log config keeps `dialeng.*` runtime logs visible in the terminal and filters out high-volume access-log noise like static assets and `/kernel/snapshot` polling, so kernel/setup/Colab logs remain readable during interactive use.
+
+It also prints a terminal hint telling users that `Ctrl+C` is the supported way to stop Dialeng and release attached kernels. The actual cleanup happens in the app shutdown hook, which asynchronously tears down notebook kernels before process exit.
 
 ## Configurable Paths
 
@@ -91,6 +95,7 @@ The wheel includes these packages:
 ```
 dialeng/
 ├── app.py              # Main FastHTML application + main() entry point
+├── notebook_id.py      # Shared notebook path ↔ encoded ID helpers
 ├── state.py            # Shared state module
 ├── __main__.py         # python -m support
 ├── core/               # Registry, extensions, callbacks, dispatch

@@ -1,5 +1,5 @@
 """Cell data model with streaming output support."""
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Optional, Any, List
 from datetime import datetime
@@ -42,7 +42,7 @@ class CellOutput:
     Supports streaming - cells can have multiple outputs appended
     as execution progresses.
     """
-    output_type: str  # 'stream', 'execute_result', 'error', 'display_data'
+    output_type: str  # 'stream', 'execute_result', 'error', 'display_data', 'update_display_data', 'clear_output'
     content: Any = ""
     timestamp: datetime = field(default_factory=datetime.now)
 
@@ -59,6 +59,105 @@ class CellOutput:
 
     # Display ID for update_display_data (tqdm, widgets)
     display_id: Optional[str] = None
+
+
+def is_benign_display_formatter_error(output: CellOutput) -> bool:
+    """Return True for formatter-only IPython repr failures during display.
+
+    Some libraries emit rich HTML/image output successfully but trigger a
+    secondary formatter failure when IPython also attempts a ``text/plain``
+    representation. Those tracebacks are noisy, often duplicated, and are not
+    evidence that the underlying computation failed.
+    """
+    if output.output_type != 'error' or output.ename != 'TypeError':
+        return False
+
+    evalue = output.evalue or ""
+    if "__repr__ returned non-string" not in evalue:
+        return False
+
+    tb_text = "\n".join(output.traceback or [])
+    return (
+        "IPython/core/formatters.py" in tb_text and
+        "IPython/lib/pretty.py" in tb_text
+    )
+
+
+def normalize_cell_outputs(outputs: List[CellOutput]) -> List[CellOutput]:
+    """Collapse streaming kernel events into their final notebook-visible state.
+
+    Jupyter kernels can emit transient output events such as:
+    - ``update_display_data`` to mutate an existing rich output in place
+    - ``clear_output`` to clear previously shown output before the next update
+
+    Dialeng streams those events live to the browser, but static re-renders and
+    notebook saves need the *final* visible output state rather than the raw
+    event log. This function applies those semantics and returns a normalized
+    output list suitable for OOB rendering and persistence.
+    """
+    has_rich_display = any(
+        out.output_type in {'display_data', 'update_display_data'}
+        for out in outputs
+    )
+    normalized: List[CellOutput] = []
+    display_index_by_id: dict[str, int] = {}
+    pending_clear = False
+
+    def _reset_outputs():
+        normalized.clear()
+        display_index_by_id.clear()
+
+    def _flush_pending_clear():
+        nonlocal pending_clear
+        if pending_clear:
+            _reset_outputs()
+            pending_clear = False
+
+    for out in outputs:
+        if out.output_type == 'clear_output':
+            if out.content:
+                pending_clear = True
+            else:
+                _reset_outputs()
+                pending_clear = False
+            continue
+
+        _flush_pending_clear()
+
+        if out.output_type == 'error':
+            if is_benign_display_formatter_error(out) and has_rich_display:
+                continue
+
+            if normalized and normalized[-1].output_type == 'error':
+                prev = normalized[-1]
+                if (
+                    prev.ename == out.ename and
+                    prev.evalue == out.evalue and
+                    (prev.traceback or []) == (out.traceback or [])
+                ):
+                    continue
+
+        if out.output_type == 'update_display_data':
+            merged = replace(out, output_type='display_data')
+            if out.display_id and out.display_id in display_index_by_id:
+                normalized[display_index_by_id[out.display_id]] = merged
+            else:
+                normalized.append(merged)
+                if out.display_id:
+                    display_index_by_id[out.display_id] = len(normalized) - 1
+            continue
+
+        if out.output_type == 'display_data' and out.display_id:
+            if out.display_id in display_index_by_id:
+                normalized[display_index_by_id[out.display_id]] = out
+            else:
+                normalized.append(out)
+                display_index_by_id[out.display_id] = len(normalized) - 1
+            continue
+
+        normalized.append(out)
+
+    return normalized
 
 
 @dataclass
@@ -122,7 +221,7 @@ class Cell:
         Backwards compatible with original single-output model.
         """
         parts = []
-        for out in self.outputs:
+        for out in self.normalized_outputs():
             if out.output_type == 'stream':
                 parts.append(str(out.content))
             elif out.output_type == 'execute_result':
@@ -168,9 +267,26 @@ class Cell:
             return True
         return False
 
+    def update_output(self, new_output: str) -> bool:
+        """Update cell output with change tracking.
+
+        Returns True if output changed.
+        """
+        current_output = self.output
+        if current_output != new_output:
+            self.output = new_output
+            self.version += 1
+            self.last_modified = datetime.now()
+            return True
+        return False
+
     def append_output(self, output: CellOutput):
         """Append a new output (for streaming)."""
         self.outputs.append(output)
+
+    def normalized_outputs(self) -> List[CellOutput]:
+        """Return outputs collapsed to the final notebook-visible state."""
+        return normalize_cell_outputs(self.outputs)
 
     def sync_export_directive(self):
         """Sync the #| export directive in source with the is_exported flag.
@@ -209,6 +325,7 @@ class Cell:
                     'evalue': o.evalue,
                     'traceback': o.traceback,
                     'metadata': o.metadata,
+                    'display_id': o.display_id,
                 }
                 for o in self.outputs
             ],
@@ -240,6 +357,7 @@ class Cell:
                 evalue=o.get('evalue'),
                 traceback=o.get('traceback'),
                 metadata=o.get('metadata'),
+                display_id=o.get('display_id'),
             ))
 
         # Parse last_modified if present
@@ -345,7 +463,7 @@ class Cell:
     def _format_outputs_jupyter(self) -> list:
         """Convert CellOutput list to Jupyter output format."""
         jupyter_outputs = []
-        for out in self.outputs:
+        for out in self.normalized_outputs():
             if out.output_type == 'stream':
                 text = str(out.content)
                 lines = text.split('\n')

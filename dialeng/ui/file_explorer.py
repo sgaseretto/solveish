@@ -8,6 +8,7 @@ and notebook creation. Replaces the old flat file list.
 from fasthtml.common import *
 from pathlib import Path
 from typing import List, Tuple, Optional
+from dialeng.notebook_id import nb_id_from_relpath
 from .icons import sprites as icon_sprites
 
 
@@ -53,11 +54,12 @@ def BreadcrumbNav(current_path: Path, root: Path, nb_id: str):
         rel = Path(".")
 
     segments = []
+    active_query = f"&active_notebook_id={nb_id}" if nb_id else ""
     # Root segment
     accumulated = ""
     segments.append(
         Span("Home", cls="breadcrumb-segment" + (" current" if str(rel) == "." else ""),
-             hx_get=f"/files?path=", hx_target="#file-list-content", hx_swap="innerHTML")
+             hx_get=f"/files?path={active_query}", hx_target="#file-list-content", hx_swap="innerHTML")
     )
 
     if str(rel) != ".":
@@ -69,7 +71,7 @@ def BreadcrumbNav(current_path: Path, root: Path, nb_id: str):
             segments.append(
                 Span(part,
                      cls="breadcrumb-segment" + (" current" if is_last else ""),
-                     hx_get=f"/files?path={accumulated}",
+                     hx_get=f"/files?path={accumulated}{active_query}",
                      hx_target="#file-list-content", hx_swap="innerHTML")
             )
 
@@ -84,25 +86,24 @@ def FolderItem(name: str, path: str, nb_id: str):
         path: Relative path to folder
         nb_id: Active notebook ID
     """
+    active_query = f"&active_notebook_id={nb_id}" if nb_id else ""
     return Div(
         icon_sprites('folder', sz=16),
         Span(name, cls="file-explorer-item-name"),
         cls="file-explorer-item folder",
-        hx_get=f"/files?path={path}",
+        hx_get=f"/files?path={path}{active_query}",
         hx_target="#file-list-content",
         hx_swap="innerHTML",
     )
 
 
-def FileItem(name: str, path: str, is_active: bool, nb_id: str,
-             has_kernel: bool = False):
+def FileItem(name: str, path: str, is_active: bool, has_kernel: bool = False):
     """A notebook file item in the file explorer.
 
     Args:
         name: Notebook name (without .ipynb)
         path: Relative path for navigation (relative to NOTEBOOKS_DIR)
         is_active: Whether this is the currently open notebook
-        nb_id: Active notebook ID
         has_kernel: Whether this notebook has a running kernel
     """
     icon_name = 'notebook-text' if is_active else 'notebook'
@@ -114,6 +115,7 @@ def FileItem(name: str, path: str, is_active: bool, nb_id: str,
     file_path = f"{path}/{name}" if path and path != "." else name
     # Use query param approach: /dialeng/?name=subfolder/test
     nb_name_param = f"{path}/{name}" if path and path != "." else name
+    notebook_id = nb_id_from_relpath(nb_name_param)
     return Div(
         A(
             icon_sprites(icon_name, sz=16),
@@ -127,6 +129,7 @@ def FileItem(name: str, path: str, is_active: bool, nb_id: str,
             onclick=f"showDeleteConfirm('{file_path}', '{name}')",
             title=f"Delete {name}",
         ),
+        data_notebook_id=notebook_id,
         cls=" ".join(cls_parts),
     )
 
@@ -158,6 +161,7 @@ def FileListContent(path: Path, root: Path, active_notebook_id: str,
     current_path_val = rel if rel and rel != "." else ""
     items = [
         Input(type="hidden", id="current-explorer-path", value=current_path_val),
+        Input(type="hidden", id="current-explorer-active-notebook", value=active_notebook_id),
         BreadcrumbNav(path, root, active_notebook_id),
     ]
 
@@ -169,9 +173,10 @@ def FileListContent(path: Path, root: Path, active_notebook_id: str,
     # Notebooks
     for nb_name in notebooks:
         nb_rel_path = f"{rel}/{nb_name}" if rel and rel != "." else nb_name
-        is_active = nb_rel_path == active_notebook_id or nb_name == active_notebook_id
-        items.append(FileItem(nb_name, rel, is_active, active_notebook_id,
-                              has_kernel=nb_rel_path in kernel_notebooks or nb_name in kernel_notebooks))
+        explorer_nb_id = nb_id_from_relpath(nb_rel_path)
+        is_active = explorer_nb_id == active_notebook_id
+        items.append(FileItem(nb_name, rel, is_active,
+                              has_kernel=explorer_nb_id in kernel_notebooks))
 
     if not folders and not notebooks:
         items.append(Div("Empty folder", cls="file-explorer-item",
