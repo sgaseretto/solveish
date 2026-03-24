@@ -236,11 +236,15 @@ class ClaudetteProvider(BaseLLMProvider):
                 # Execute tool calls
                 tool_results = []
                 for tc in tool_calls:
-                    yield {"type": "tool_call", "id": tc['id'], "name": tc['name'], "input": tc['input']}
+                    if hasattr(registry, "resolve_tool_display_name"):
+                        display_name = registry.resolve_tool_display_name(notebook_id, tc['name'])
+                    else:
+                        display_name = tc['name']
+                    yield {"type": "tool_call", "id": tc['id'], "name": display_name, "input": tc['input']}
 
                     result = await utils.execute_tool(tc['name'], tc['input'], kernel, notebook_id, registry)
 
-                    yield {"type": "tool_result", "id": tc['id'], "name": tc['name'], "result": result}
+                    yield {"type": "tool_result", "id": tc['id'], "name": display_name, "result": result}
 
                     tool_results.append({
                         "tool_use_id": tc['id'],

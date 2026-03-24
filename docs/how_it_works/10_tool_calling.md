@@ -8,13 +8,13 @@ and interact with your codebase directly from prompt cells.
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Prompt Cell                               │
-│  "Use &`analyze_data` to process $`df` and show me the results" │
+│ "Use &`analyze_data` to process $`df.shape` and show me the results" │
 └─────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                      Prompt Parser                               │
-│  1. Extract $`df` → query kernel for value                      │
+│  1. Extract $`df.shape` → evaluate in kernel                    │
 │  2. Extract &`analyze_data` → build tool schema                 │
 └─────────────────────────────────────────────────────────────────┘
                                 │
@@ -44,24 +44,26 @@ and interact with your codebase directly from prompt cells.
 
 ## Syntax Reference
 
-### Variable References: `$`variable``
+### Variable and Expression References: `$`...``
 
-Reference any Python variable from the kernel namespace:
+Reference any Python value that can be evaluated in the kernel namespace:
 
 ```python
 # Code cell
 data = [1, 2, 3, 4, 5]
 stats = {"mean": 3.0, "std": 1.41}
+config = {"theme": {"name": "solarized"}}
 ```
 
 ```
 # Prompt cell
 What is the mean of $`data`? The stats show $`stats`.
+How many rows are in $`len(data)`? Which theme is active in $`config['theme']['name']`?
 ```
 
-The AI sees: "What is the mean of [1, 2, 3, 4, 5]? The stats show {'mean': 3.0, 'std': 1.41}."
+The AI sees the evaluated current values, not the literal syntax markers.
 
-### Function Tools: `&`function``
+### Function Tools: `&`...``
 
 Expose Python functions as tools the AI can call:
 
@@ -87,6 +89,17 @@ Use &`calculate_stats` to analyze $`data`.
 
 The AI receives a tool definition and can call `calculate_stats` with appropriate arguments.
 
+Dialeng also supports richer tool references:
+
+```markdown
+&`obj.method`
+&`[tool_a, tool_b, obj.method]`
+```
+
+- Dotted names are introspected from the live kernel and mapped to provider-safe tool ids internally
+- List syntax expands to multiple tools in one reference while preserving order
+- Tool events shown in the UI use the original notebook-authored names, not the sanitized API ids
+
 ### Using Syntax in Note Cells
 
 Both `$`variable`` and `&`function`` syntax work in **note (markdown) cells**, not just prompt cells. This allows you to:
@@ -106,7 +119,7 @@ Both `$`variable`` and `&`function`` syntax work in **note (markdown) cells**, n
    - &`plot_histogram`: Visualize distributions
    ```
 
-When a prompt cell is executed, it scans all preceding note cells for `$`var`` and `&`func`` syntax and makes those variables/functions available.
+When a prompt cell is executed, it scans all preceding note cells for `$`...`` and `&`...`` syntax and makes those values/tools available.
 
 ## Built-in Tools
 
@@ -118,7 +131,11 @@ These tools are always available (no `&` prefix needed):
 | `rg(pattern, path, file_type)` | Search files with ripgrep | `rg("def main", ".", "py")` |
 | `create(path, content)` | Create a new file | `create("test.py", "print('hi')")` |
 | `str_replace(file, old, new)` | Replace string in file | `str_replace("app.py", "old", "new")` |
+| `strs_replace(file, olds, news)` | Replace multiple strings in file | `strs_replace("app.py", ["old1"], ["new1"])` |
 | `insert(file, line, content)` | Insert at line number | `insert("app.py", 10, "# comment")` |
+| `replace_lines(file, start, end, content)` | Replace a line range | `replace_lines("app.py", 10, 12, "x = 1")` |
+| `file_insert_line(file, line, content)` | Insert a line in a file | `file_insert_line("app.py", 10, "# note")` |
+| `file_del_lines(file, start, end)` | Delete a line range from a file | `file_del_lines("app.py", 10, 12)` |
 | `pyrun(code)` | Safe sandboxed Python execution | `pyrun("sum(range(100))")` |
 
 ### Built-in Tool Details
@@ -178,6 +195,26 @@ insert("app.py", 1, "# New header comment")
 insert("main.py", 10, "    # Debug line\n    print(x)")
 ```
 
+#### `strs_replace(file, old_strs, new_strs)`
+
+Replace multiple exact strings in order, one match per pair.
+
+```python
+strs_replace("app.py", ["debug = True", "port = 3000"], ["debug = False", "port = 8080"])
+```
+
+#### `replace_lines(file, start_line, end_line, new_content)`
+
+Replace an inclusive 1-indexed line range.
+
+```python
+replace_lines("app.py", 10, 12, "debug = False\nport = 8080")
+```
+
+#### `file_insert_line(file, line, content)` and `file_del_lines(file, start_line, end_line)`
+
+Convenience file-editing helpers matching Solveit-style naming.
+
 #### `pyrun(code, concise=True)`
 
 Safe sandboxed Python execution via [safepyrun](https://github.com/AnswerDotAI/safepyrun). Runs code with access to a curated subset of the standard library while blocking dangerous operations (filesystem writes, process spawning, system modification).
@@ -194,10 +231,20 @@ Key features:
 - **State persistence**: Variables/functions ending with `_` persist across calls (non-`_` names are discarded)
 - **Write policies**: The Dialeng instance allows writes relative to cwd via `ok_dests=['.']`
 - **Async-native**: Supports `await`, `async for`, `async with`
+- **CodeAct-style tool access**: Built-in tools enabled for the prompt, plus explicit `&` references such as `&`tool_a`` and `&`obj.method``, are available inside `pyrun` during that prompt run
 
 Limitations:
 - **`_` suffix required**: Only names ending with `_` persist across calls and are callable. `def hello(x): ...` won't be available in subsequent calls — use `def hello_(x): ...` instead.
 - **No recursive functions**: Functions defined inside `pyrun` cannot call themselves recursively, even with the `_` suffix. This is a Python `exec()` limitation, not a safepyrun design choice. Use iterative implementations instead.
+
+Inside `pyrun`, explicit notebook/dialog tools are async and should be called with `await`:
+
+```python
+await read_msgid(id="abc123")
+await obj.method(path="demo.txt")
+```
+
+Only tools exposed for the current prompt are available inside `pyrun`; other notebook functions remain unavailable.
 
 See `notebooks/safepyrun_demo.ipynb` and `docs/how_it_works/18_safepyrun_integration.md` for details.
 

@@ -13,10 +13,7 @@ from execnb.nbio import read_nb, write_nb, new_nb
 
 from .cell import Cell, CellType, CellOutput, CollapseLevel
 from .notebook import Notebook
-
-
-# Solveit separator token for prompt cells (user prompt + AI response)
-SOLVEIT_SEPARATOR = "##### Reply<!-- SOLVEIT_SEPARATOR_{id} -->"
+from .prompt_utils import join_prompt_content, split_prompt_content
 
 
 def _cell_to_jupyter(cell: Cell) -> dict:
@@ -58,15 +55,9 @@ def _cell_to_jupyter(cell: Cell) -> dict:
         }
 
     elif cell.cell_type == CellType.PROMPT:
-        # Combine user prompt + AI response with separator
-        separator = SOLVEIT_SEPARATOR.replace('{id}', cell.id)
-        source = cell.source
-        if cell.output:
-            source = f"{cell.source}\n\n{separator}\n\n{cell.output}"
-
         return {
             'cell_type': 'markdown',
-            'source': source,
+            'source': join_prompt_content(cell.source, cell.output),
             'metadata': {
                 'id': cell.id,
                 'solveit_ai': True,
@@ -126,15 +117,7 @@ def _jupyter_to_cell(jcell: dict, index: int = 0) -> Cell:
     # Parse PROMPT cells: split user prompt from AI response
     output = ""
     if cell_type == CellType.PROMPT:
-        separator_prefix = "##### Reply<!-- SOLVEIT_SEPARATOR_"
-        if separator_prefix in source:
-            parts = source.split(separator_prefix, 1)
-            source = parts[0].strip()
-            if len(parts) > 1:
-                # Find end of separator and extract response
-                sep_end = parts[1].find('-->')
-                if sep_end != -1:
-                    output = parts[1][sep_end + 3:].strip()
+        source, output = split_prompt_content(source)
 
     # Parse outputs for code cells
     outputs: List[CellOutput] = []

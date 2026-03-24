@@ -368,6 +368,10 @@ Prompt cells have two main sections:
 - Shows streaming response or rendered preview
 - Always editable (double-click to edit)
 
+Prompt sources can also contain Dialeng's notebook-aware special syntax:
+- `$`...`` for variable and expression injection
+- `&`...`` for tool exposure, including dotted names and list syntax
+
 ```python
 else:  # Prompt
     has_output = bool(cell.output and cell.output.strip())
@@ -588,7 +592,13 @@ The separator `##### 🤖Reply🤖<!-- SOLVEIT_SEPARATOR_xxx -->` divides:
 - **Before**: User's prompt
 - **After**: AI's response
 
-### Deserialization (`app.py:130-165`)
+Dialeng saves prompt cells with the `🤖Reply🤖` separator and loads them via the
+shared helpers in [prompt_utils.py](/Users/sgaseretto/computer-science/aiml/agentic_coding/vibecoding/codex_vibes/solveish/dialeng/document/prompt_utils.py).
+The loader also accepts the older `##### Reply<!-- SOLVEIT_SEPARATOR_xxx -->`
+format so notebooks saved by legacy prompt serialization paths still open with
+the correct split between prompt and assistant response.
+
+### Deserialization
 
 ```python
 @classmethod

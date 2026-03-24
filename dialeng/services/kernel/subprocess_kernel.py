@@ -338,6 +338,51 @@ class SubprocessKernel(BaseKernel):
                         'error': 'Kernel died during introspection'
                     }
 
+    async def evaluate_expression(self, expression: str, timeout: float = 5.0) -> dict:
+        """
+        Evaluate an expression in the kernel namespace and return its repr.
+
+        Args:
+            expression: Python expression to evaluate
+            timeout: Max time to wait for response
+
+        Returns:
+            Dict with 'exists', 'var_type', 'repr' on success,
+            or 'exists': False, 'error' on failure
+        """
+        if not self.is_alive:
+            self._start_process()
+
+        self.input_queue.put({
+            'type': 'evaluate_expression',
+            'expression': expression
+        })
+
+        loop = asyncio.get_event_loop()
+        start_time = asyncio.get_event_loop().time()
+
+        while True:
+            try:
+                msg = await loop.run_in_executor(
+                    None,
+                    lambda: self.output_queue.get(timeout=0.1)
+                )
+                if msg.get('type') == 'evaluate_expression_reply':
+                    return msg
+            except Empty:
+                if asyncio.get_event_loop().time() - start_time > timeout:
+                    return {
+                        'expression': expression,
+                        'exists': False,
+                        'error': 'Timeout waiting for evaluation response'
+                    }
+                if not self.is_alive:
+                    return {
+                        'expression': expression,
+                        'exists': False,
+                        'error': 'Kernel died during evaluation'
+                    }
+
     async def introspect_function(self, name: str, timeout: float = 5.0) -> dict:
         """
         Introspect a function in the kernel namespace.

@@ -1159,6 +1159,17 @@ def _cell_move_payload(nb, cell_id: str) -> dict:
     }
 
 
+def _prompt_output_payload(cell) -> dict:
+    """Build a canonical prompt output sync payload."""
+    return {
+        "type": "prompt_output_update",
+        "cell_id": cell.id,
+        "output": cell.output,
+        "version": cell.version,
+        "time_run": cell.time_run,
+    }
+
+
 async def broadcast_queue_state(nb_id: str):
     """Broadcast current queue state to all clients."""
     status = _get_queue_payload(nb_id)
@@ -2461,6 +2472,8 @@ async def post(nb_id: str, cid: str, output: str):
             if cell_type in {"code", "shell"}:
                 await broadcast_to_notebook(nb_id, CellOutputOOB(c))
                 await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
+            elif cell_type == "prompt":
+                await broadcast_json(nb_id, _prompt_output_payload(c))
             else:
                 await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
             break
@@ -2959,8 +2972,12 @@ async def post(nb_id: str, cid: str, source: str = None):
             tool_steps_md = _format_tool_steps_markdown(tool_events)
 
             # Prepend LLM steps to response if any
-            c.output = tool_steps_md + response_text if tool_steps_md else response_text
+            final_output = tool_steps_md + response_text if tool_steps_md else response_text
+            c.update_output(final_output)
             c.time_run = datetime.now().strftime("%H:%M:%S")
+            nb.modified = True
+
+            await broadcast_json(nb_id, _prompt_output_payload(c))
 
             # Send end signal to all clients
             if nb_id in ws_connections and ws_connections[nb_id]:

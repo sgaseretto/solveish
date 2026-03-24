@@ -228,27 +228,25 @@ class LLMService:
                             "value": info.get('repr', '')[:100]
                         }
 
-            # Determine if we actually need tool calling
-            needs_tool_loop = len(func_names) > 0
-
             # Get tool registry and build tool list
             registry = get_tool_registry()
-
-            # For claudette provider, include builtins; for others, only if we have func refs
-            effective_builtins = include_builtins if self._provider_name == "claudette" else (include_builtins and needs_tool_loop)
 
             tools = await registry.get_tools_for_prompt(
                 func_names,
                 kernel,
                 notebook_id,
-                include_builtins=effective_builtins
+                include_builtins=include_builtins
             )
 
             # Notify about available tools
             for tool in tools:
+                if hasattr(registry, "resolve_tool_display_name"):
+                    display_name = registry.resolve_tool_display_name(notebook_id, tool['name'])
+                else:
+                    display_name = tool['name']
                 yield {
                     "type": "tool_available",
-                    "name": tool['name'],
+                    "name": display_name,
                     "description": tool.get('description', '')[:100]
                 }
 
@@ -260,24 +258,37 @@ class LLMService:
                     yield item
                 return
 
-            # Resolve model/prompt for tool calling
-            system_prompt, api_model, config = self._resolve_model_and_prompt(mode, model)
+            pyrun_token = None
+            if hasattr(registry, "push_pyrun_context"):
+                pyrun_token = registry.push_pyrun_context(
+                    notebook_id=notebook_id,
+                    kernel=kernel,
+                    func_names=func_names,
+                    include_builtins=include_builtins,
+                )
 
-            # Delegate to provider's stream_with_tools
-            async for item in self._provider.stream_with_tools(
-                prompt=processed_prompt,
-                context_messages=context_messages,
-                system_prompt=system_prompt,
-                model=api_model,
-                use_thinking=use_thinking,
-                config=config,
-                tools=tools,
-                kernel=kernel,
-                notebook_id=notebook_id,
-                registry=registry,
-                max_steps=max_steps,
-            ):
-                yield item
+            try:
+                # Resolve model/prompt for tool calling
+                system_prompt, api_model, config = self._resolve_model_and_prompt(mode, model)
+
+                # Delegate to provider's stream_with_tools
+                async for item in self._provider.stream_with_tools(
+                    prompt=processed_prompt,
+                    context_messages=context_messages,
+                    system_prompt=system_prompt,
+                    model=api_model,
+                    use_thinking=use_thinking,
+                    config=config,
+                    tools=tools,
+                    kernel=kernel,
+                    notebook_id=notebook_id,
+                    registry=registry,
+                    max_steps=max_steps,
+                ):
+                    yield item
+            finally:
+                if pyrun_token is not None and hasattr(registry, "reset_pyrun_context"):
+                    registry.reset_pyrun_context(pyrun_token)
 
         except Exception as e:
             logger.exception(f"Tool-enabled LLM error: {e}")

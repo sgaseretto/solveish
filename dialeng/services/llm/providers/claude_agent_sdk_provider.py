@@ -67,7 +67,9 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
 
         logger.info(f"SDK-direct: Using model {model}")
 
-        full_prompt = utils.build_prompt_with_context(prompt, context_messages)
+        effective_system_prompt, prompt_payload = utils.build_sdk_query_payload(
+            prompt, context_messages, system_prompt
+        )
 
         temp_cwd = tempfile.mkdtemp(prefix=f"dialeng_sdk_{uuid.uuid4().hex[:8]}_")
         logger.info(f"SDK-direct: Created temp cwd: {temp_cwd}")
@@ -80,16 +82,23 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
                 "timestamp": datetime.now().isoformat(),
                 "model": model,
                 "temp_cwd": temp_cwd,
-                "prompt": full_prompt,
-                "system_prompt": system_prompt,
+                "prompt": prompt_payload,
+                "system_prompt": effective_system_prompt,
             })
 
-        logger.info(f"SDK-direct: ===== FULL PROMPT START =====")
-        for line in full_prompt.split('\n')[:30]:
-            logger.info(f"SDK-direct: {line}")
-        if full_prompt.count('\n') > 30:
-            logger.info(f"SDK-direct: ... ({full_prompt.count(chr(10)) - 30} more lines)")
-        logger.info(f"SDK-direct: ===== FULL PROMPT END =====")
+        if isinstance(prompt_payload, str):
+            logger.info("SDK-direct: ===== PROMPT START =====")
+            for line in prompt_payload.split('\n')[:30]:
+                logger.info(f"SDK-direct: {line}")
+            if prompt_payload.count('\n') > 30:
+                logger.info(f"SDK-direct: ... ({prompt_payload.count(chr(10)) - 30} more lines)")
+            logger.info("SDK-direct: ===== PROMPT END =====")
+        else:
+            logger.info(
+                "SDK-direct: Structured prompt with %s content block(s), %s image block(s)",
+                len(prompt_payload),
+                sum(1 for block in prompt_payload if isinstance(block, dict) and block.get("type") == "image"),
+            )
 
         # Determine thinking mode before building options
         # Streaming (include_partial_messages) is incompatible with extended thinking
@@ -105,7 +114,7 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
             setting_sources=[],
             cwd=temp_cwd,
             model=model,
-            system_prompt=system_prompt,
+            system_prompt=effective_system_prompt,
             include_partial_messages=use_streaming,
         )
 
@@ -120,8 +129,18 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
         thinking_phase_ended = False
         collected_response = []
 
+        async def prompt_stream():
+            yield {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": prompt_payload,
+                },
+            }
+
         try:
-            async for message in sdk_query(prompt=full_prompt, options=options):
+            sdk_prompt = prompt_stream() if not isinstance(prompt_payload, str) else prompt_payload
+            async for message in sdk_query(prompt=sdk_prompt, options=options):
                 if isinstance(message, ResultMessage):
                     if hasattr(message, 'usage') and message.usage:
                         self._last_result.usage = message.usage
@@ -236,6 +255,10 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
             def make_tool_handler(captured_tool_name, captured_kernel, captured_notebook_id, captured_registry, captured_events, captured_tool_schema):
                 async def tool_handler(args: dict) -> dict:
                     logger.debug(f"MCP tool called: {captured_tool_name}, args: {args}")
+                    if hasattr(captured_registry, "resolve_tool_display_name"):
+                        display_name = captured_registry.resolve_tool_display_name(captured_notebook_id, captured_tool_name)
+                    else:
+                        display_name = captured_tool_name
 
                     # Convert JSON-serialized values back to proper types
                     converted_args = {}
@@ -257,7 +280,7 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
                     tool_id = f"mcp_tool_{captured_tool_name}_{len(captured_events)}"
                     captured_events.append({
                         "type": "tool_call", "id": tool_id,
-                        "name": captured_tool_name, "input": converted_args
+                        "name": display_name, "input": converted_args
                     })
 
                     try:
@@ -268,7 +291,7 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
 
                         captured_events.append({
                             "type": "tool_result", "id": tool_id,
-                            "name": captured_tool_name, "result": result
+                            "name": display_name, "result": result
                         })
 
                         return {"content": [{"type": "text", "text": result_text}]}
@@ -276,7 +299,7 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
                         error_msg = f"Error executing {captured_tool_name}: {str(e)}"
                         captured_events.append({
                             "type": "tool_result", "id": tool_id,
-                            "name": captured_tool_name,
+                            "name": display_name,
                             "result": {"status": "error", "error": error_msg}
                         })
                         return {"content": [{"type": "text", "text": error_msg}], "is_error": True}
@@ -293,11 +316,13 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
         if sdk_tools:
             mcp_server = create_sdk_mcp_server(name="notebook_tools", version="1.0.0", tools=sdk_tools)
 
-        full_prompt = utils.build_prompt_with_context(prompt, context_messages)
+        effective_system_prompt, prompt_payload = utils.build_sdk_query_payload(
+            prompt, context_messages, system_prompt
+        )
 
         try:
             async def message_generator():
-                yield {"type": "user", "message": {"role": "user", "content": full_prompt}}
+                yield {"type": "user", "message": {"role": "user", "content": prompt_payload}}
 
             options = ClaudeAgentOptions(
                 continue_conversation=False,
@@ -305,7 +330,7 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
                 setting_sources=[],
                 cwd=temp_cwd,
                 model=model,
-                system_prompt=system_prompt,
+                system_prompt=effective_system_prompt,
                 mcp_servers={"notebook_tools": mcp_server} if mcp_server else {},
                 allowed_tools=allowed_tool_names if allowed_tool_names else [],
                 max_turns=max_steps,

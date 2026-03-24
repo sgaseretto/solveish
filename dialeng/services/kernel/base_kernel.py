@@ -96,6 +96,9 @@ class BaseKernel(ABC):
     async def introspect_variable(self, name: str, timeout: float = 5.0) -> dict:
         return {'name': name, 'exists': False, 'error': 'Not supported by this kernel'}
 
+    async def evaluate_expression(self, expression: str, timeout: float = 5.0) -> dict:
+        return {'expression': expression, 'exists': False, 'error': 'Not supported by this kernel'}
+
     async def introspect_function(self, name: str, timeout: float = 5.0) -> dict:
         return {'name': name, 'exists': False, 'error': 'Not supported by this kernel'}
 
