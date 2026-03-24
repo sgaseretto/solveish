@@ -969,6 +969,78 @@ class ColabKernel(BaseKernel):
             supports_interrupt=True,
         )
 
+    async def _run_json_probe(self, code: str, marker: str, timeout: float = 10.0) -> dict:
+        """Execute hidden code and return JSON printed with a sentinel marker."""
+        self.mark_activity("colab_probe")
+        if self._recovery_task and not self._recovery_task.done():
+            await self._recovery_task
+        elif self._recycle_reason:
+            await self._recycle_connection(self._recycle_reason, 0)
+        if not self._ws or self._ws.closed or self._connection_state not in {"connected", "degraded"}:
+            await self.assign_and_connect()
+
+        msg_id = uuid.uuid4().hex
+        execute_msg = {
+            "header": self._make_header("execute_request", msg_id),
+            "parent_header": {},
+            "metadata": {},
+            "content": {
+                "code": code,
+                "silent": True,
+                "store_history": False,
+                "user_expressions": {},
+                "allow_stdin": False,
+                "stop_on_error": False,
+            },
+            "channel": "shell",
+        }
+        await self._ws.send_json(execute_msg)
+
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        stream_buffer = ""
+        last_error = None
+
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return {
+                    "exists": False,
+                    "error": f"Timed out waiting for Colab probe response for marker {marker}",
+                }
+
+            ws_msg = await self._ws.receive(timeout=remaining)
+            if ws_msg.type == aiohttp.WSMsgType.TEXT:
+                data = json.loads(ws_msg.data)
+                if data.get("parent_header", {}).get("msg_id") != msg_id:
+                    continue
+
+                msg_type = data.get("header", {}).get("msg_type", "")
+                content = data.get("content", {})
+                if msg_type == "stream":
+                    stream_buffer += content.get("text", "")
+                elif msg_type == "error":
+                    last_error = f"{content.get('ename', 'Error')}: {content.get('evalue', '')}"
+                elif msg_type == "status" and content.get("execution_state") == "idle":
+                    break
+            elif ws_msg.type in self._WS_CLOSE_TYPES:
+                return {"exists": False, "error": f"WebSocket closed during Colab probe: {ws_msg}"}
+
+        if marker in stream_buffer:
+            payload = stream_buffer.rsplit(marker, 1)[1].strip()
+            try:
+                return json.loads(payload)
+            except json.JSONDecodeError as exc:
+                return {
+                    "exists": False,
+                    "error": f"Failed to decode Colab probe payload: {exc}",
+                    "raw": payload[:500],
+                }
+
+        if last_error:
+            return {"exists": False, "error": last_error}
+        return {"exists": False, "error": f"Colab probe marker {marker} not found"}
+
     async def get_namespace_info(self, timeout: float = 5.0) -> dict:
         """Get namespace info by executing introspection code on Colab."""
         if not self.is_alive:
@@ -998,6 +1070,172 @@ print("__NS_INFO__" + _json.dumps(_ns_info))
                 except (json.JSONDecodeError, IndexError):
                     pass
         return result
+
+    async def evaluate_expression(self, expression: str, timeout: float = 5.0) -> dict:
+        marker = "__DIALENG_EXPR__"
+        code = f"""
+import json as _json
+_expr = {expression!r}
+try:
+    _value = eval(_expr, globals(), globals())
+    _repr = repr(_value)
+    if len(_repr) > 500:
+        _repr = _repr[:497] + "..."
+    print({marker!r} + _json.dumps({{
+        "expression": _expr,
+        "name": _expr,
+        "exists": True,
+        "var_type": type(_value).__name__,
+        "repr": _repr,
+    }}))
+except Exception as _e:
+    print({marker!r} + _json.dumps({{
+        "expression": _expr,
+        "name": _expr,
+        "exists": False,
+        "error": str(_e),
+    }}))
+"""
+        return await self._run_json_probe(code, marker, timeout=timeout)
+
+    async def introspect_function(self, name: str, timeout: float = 5.0) -> dict:
+        marker = "__DIALENG_FUNC__"
+        code = f"""
+import inspect as _inspect, json as _json
+_func_name = {name!r}
+try:
+    _func = eval(_func_name, globals(), globals())
+    if callable(_func):
+        try:
+            _sig = str(_inspect.signature(_func))
+        except Exception:
+            _sig = "(...)"
+        _doc = _inspect.getdoc(_func) or ""
+        _params = {{}}
+        try:
+            _sig_obj = _inspect.signature(_func)
+            for _param_name, _param in _sig_obj.parameters.items():
+                _param_info = {{"name": _param_name}}
+                if _param.annotation != _inspect.Parameter.empty:
+                    _ann = getattr(_param.annotation, "__name__", str(_param.annotation))
+                    _param_info["type"] = _ann
+                else:
+                    _param_info["type"] = "any"
+                if _param.default != _inspect.Parameter.empty:
+                    _param_info["default"] = repr(_param.default)
+                _param_info["description"] = _param_name
+                _params[_param_name] = _param_info
+        except Exception:
+            pass
+        _return_type = None
+        try:
+            _sig_obj = _inspect.signature(_func)
+            if _sig_obj.return_annotation != _inspect.Parameter.empty:
+                _return_type = getattr(_sig_obj.return_annotation, "__name__", str(_sig_obj.return_annotation))
+        except Exception:
+            pass
+        print({marker!r} + _json.dumps({{
+            "name": _func_name,
+            "exists": True,
+            "is_callable": True,
+            "signature": _sig,
+            "docstring": _doc,
+            "parameters": _params,
+            "return_type": _return_type,
+        }}))
+    else:
+        print({marker!r} + _json.dumps({{
+            "name": _func_name,
+            "exists": True,
+            "is_callable": False,
+            "error": f"{{_func_name!r}} is not callable",
+        }}))
+except NameError:
+    print({marker!r} + _json.dumps({{
+        "name": _func_name,
+        "exists": False,
+        "error": f"Function '{{_func_name}}' not found in namespace",
+    }}))
+except Exception as _e:
+    print({marker!r} + _json.dumps({{
+        "name": _func_name,
+        "exists": False,
+        "error": str(_e),
+    }}))
+"""
+        return await self._run_json_probe(code, marker, timeout=timeout)
+
+    async def execute_tool(self, name: str, kwargs: dict, timeout: float = 60.0) -> dict:
+        marker = "__DIALENG_TOOL__"
+        kwargs_json = json.dumps(kwargs)
+        code = f"""
+import asyncio as _asyncio, base64 as _base64, inspect as _inspect, io as _io, json as _json
+_tool_name = {name!r}
+_kwargs = _json.loads({kwargs_json!r})
+
+def _format_result(_result):
+    try:
+        import matplotlib.pyplot as _plt
+        from matplotlib.figure import Figure as _Figure
+        if isinstance(_result, _Figure):
+            _buf = _io.BytesIO()
+            _result.savefig(_buf, format="png", bbox_inches="tight", dpi=100)
+            _buf.seek(0)
+            _img = _base64.b64encode(_buf.read()).decode("utf-8")
+            _buf.close()
+            _plt.close(_result)
+            return {{"type": "image", "format": "png", "content": _img}}
+    except Exception:
+        pass
+    if hasattr(_result, "_repr_png_"):
+        try:
+            _png = _result._repr_png_()
+            if _png:
+                if isinstance(_png, bytes):
+                    _png = _base64.b64encode(_png).decode("utf-8")
+                return {{"type": "image", "format": "png", "content": _png}}
+        except Exception:
+            pass
+    return {{"type": "text", "content": str(_result)}}
+
+try:
+    _func = eval(_tool_name, globals(), globals())
+    if not callable(_func):
+        print({marker!r} + _json.dumps({{
+            "name": _tool_name,
+            "status": "error",
+            "error": f"{{_tool_name!r}} is not callable",
+        }}))
+    else:
+        _result = _func(**_kwargs)
+        if _inspect.isawaitable(_result):
+            _result = await _result
+        print({marker!r} + _json.dumps({{
+            "name": _tool_name,
+            "status": "success",
+            "result": _format_result(_result),
+        }}))
+except NameError:
+    print({marker!r} + _json.dumps({{
+        "name": _tool_name,
+        "status": "error",
+        "error": f"Function '{{_tool_name}}' not found",
+    }}))
+except Exception as _e:
+    print({marker!r} + _json.dumps({{
+        "name": _tool_name,
+        "status": "error",
+        "error": str(_e),
+    }}))
+"""
+        result = await self._run_json_probe(code, marker, timeout=timeout)
+        if "status" in result:
+            return result
+        return {
+            "name": name,
+            "status": "error",
+            "error": result.get("error", "Unknown Colab tool execution error"),
+        }
 
 
 # Register as a kernel backend

@@ -368,6 +368,10 @@ Prompt cells have two main sections:
 - Shows streaming response or rendered preview
 - Always editable (double-click to edit)
 
+Prompt sources can also contain Dialeng's notebook-aware special syntax:
+- `$`...`` for variable and expression injection
+- `&`...`` for tool exposure, including dotted names and list syntax
+
 ```python
 else:  # Prompt
     has_output = bool(cell.output and cell.output.strip())

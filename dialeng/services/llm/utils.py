@@ -163,7 +163,8 @@ async def execute_tool(tool_name: str, tool_input: dict, kernel, notebook_id: st
         return await registry.execute_builtin(tool_name, tool_input)
 
     if kernel:
-        return await kernel.execute_tool(tool_name, tool_input)
+        target_name = registry.resolve_dynamic_tool_name(notebook_id, tool_name)
+        return await kernel.execute_tool(target_name, tool_input)
 
     return {
         "status": "error",

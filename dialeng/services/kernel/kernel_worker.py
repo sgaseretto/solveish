@@ -247,6 +247,11 @@ def _extract_param_description(docstring: str, param_name: str) -> str:
     return param_name
 
 
+def _resolve_user_expression(shell: CaptureShell, expression: str):
+    """Resolve a value from the user namespace via eval()."""
+    return eval(expression, shell.user_ns, shell.user_ns)
+
+
 def _format_tool_result(result) -> dict:
     """Format a tool execution result for sending back to the LLM."""
     import io
@@ -475,76 +480,102 @@ def kernel_worker_main(input_queue: Queue, output_queue: Queue):
                     'error': str(e)
                 })
 
+        elif msg['type'] == 'evaluate_expression':
+            expression = msg.get('expression', '')
+            try:
+                value = _resolve_user_expression(shell, expression)
+                value_repr = repr(value)
+                if len(value_repr) > 500:
+                    value_repr = value_repr[:497] + '...'
+                output_queue.put({
+                    'type': 'evaluate_expression_reply',
+                    'expression': expression,
+                    'name': expression,
+                    'exists': True,
+                    'var_type': type(value).__name__,
+                    'repr': value_repr
+                })
+            except Exception as e:
+                output_queue.put({
+                    'type': 'evaluate_expression_reply',
+                    'expression': expression,
+                    'name': expression,
+                    'exists': False,
+                    'error': str(e)
+                })
+
         elif msg['type'] == 'introspect_function':
             # Introspect a function in the kernel namespace
             import inspect
             func_name = msg.get('name', '')
             try:
-                if func_name in shell.user_ns:
-                    func = shell.user_ns[func_name]
-                    if callable(func):
-                        # Get signature
-                        try:
-                            sig = str(inspect.signature(func))
-                        except (ValueError, TypeError):
-                            sig = '(...)'
-
-                        # Get docstring
-                        docstring = inspect.getdoc(func) or ''
-
-                        # Get parameter info with types
-                        params = {}
-                        try:
-                            sig_obj = inspect.signature(func)
-                            for param_name, param in sig_obj.parameters.items():
-                                param_info = {'name': param_name}
-                                # Get type annotation
-                                if param.annotation != inspect.Parameter.empty:
-                                    param_info['type'] = _get_type_name(param.annotation)
-                                else:
-                                    param_info['type'] = 'any'
-                                # Get default value
-                                if param.default != inspect.Parameter.empty:
-                                    param_info['default'] = repr(param.default)
-                                # Get description from docstring (Google/numpy style)
-                                param_info['description'] = _extract_param_description(docstring, param_name)
-                                params[param_name] = param_info
-                        except (ValueError, TypeError):
-                            pass
-
-                        # Get return type
-                        return_type = None
-                        try:
-                            sig_obj = inspect.signature(func)
-                            if sig_obj.return_annotation != inspect.Parameter.empty:
-                                return_type = _get_type_name(sig_obj.return_annotation)
-                        except (ValueError, TypeError):
-                            pass
-
-                        output_queue.put({
-                            'type': 'introspect_function_reply',
-                            'name': func_name,
-                            'exists': True,
-                            'is_callable': True,
-                            'signature': sig,
-                            'docstring': docstring,
-                            'parameters': params,
-                            'return_type': return_type
-                        })
-                    else:
-                        output_queue.put({
-                            'type': 'introspect_function_reply',
-                            'name': func_name,
-                            'exists': True,
-                            'is_callable': False,
-                            'error': f"'{func_name}' is not callable"
-                        })
-                else:
+                try:
+                    func = _resolve_user_expression(shell, func_name)
+                except NameError:
                     output_queue.put({
                         'type': 'introspect_function_reply',
                         'name': func_name,
                         'exists': False,
                         'error': f"Function '{func_name}' not found in namespace"
+                    })
+                    continue
+
+                if callable(func):
+                    # Get signature
+                    try:
+                        sig = str(inspect.signature(func))
+                    except (ValueError, TypeError):
+                        sig = '(...)'
+
+                    # Get docstring
+                    docstring = inspect.getdoc(func) or ''
+
+                    # Get parameter info with types
+                    params = {}
+                    try:
+                        sig_obj = inspect.signature(func)
+                        for param_name, param in sig_obj.parameters.items():
+                            param_info = {'name': param_name}
+                            # Get type annotation
+                            if param.annotation != inspect.Parameter.empty:
+                                param_info['type'] = _get_type_name(param.annotation)
+                            else:
+                                param_info['type'] = 'any'
+                            # Get default value
+                            if param.default != inspect.Parameter.empty:
+                                param_info['default'] = repr(param.default)
+                            # Get description from docstring (Google/numpy style)
+                            param_info['description'] = _extract_param_description(docstring, param_name)
+                            params[param_name] = param_info
+                    except (ValueError, TypeError):
+                        pass
+
+                    # Get return type
+                    return_type = None
+                    try:
+                        sig_obj = inspect.signature(func)
+                        if sig_obj.return_annotation != inspect.Parameter.empty:
+                            return_type = _get_type_name(sig_obj.return_annotation)
+                    except (ValueError, TypeError):
+                        pass
+
+                    output_queue.put({
+                        'type': 'introspect_function_reply',
+                        'name': func_name,
+                        'exists': True,
+                        'is_callable': True,
+                        'signature': sig,
+                        'docstring': docstring,
+                        'parameters': params,
+                        'return_type': return_type
+                    })
+                else:
+                    output_queue.put({
+                        'type': 'introspect_function_reply',
+                        'name': func_name,
+                        'exists': True,
+                        'is_callable': False,
+                        'error': f"'{func_name}' is not callable"
                     })
             except Exception as e:
                 output_queue.put({
@@ -640,35 +671,37 @@ def kernel_worker_main(input_queue: Queue, output_queue: Queue):
             output_queue.put({'type': 'status', 'status': 'busy'})
 
             try:
-                if func_name not in shell.user_ns:
+                try:
+                    func = _resolve_user_expression(shell, func_name)
+                except NameError:
                     output_queue.put({
                         'type': 'execute_tool_reply',
                         'name': func_name,
                         'status': 'error',
                         'error': f"Function '{func_name}' not found"
                     })
+                    continue
+
+                if not callable(func):
+                    output_queue.put({
+                        'type': 'execute_tool_reply',
+                        'name': func_name,
+                        'status': 'error',
+                        'error': f"'{func_name}' is not callable"
+                    })
                 else:
-                    func = shell.user_ns[func_name]
-                    if not callable(func):
-                        output_queue.put({
-                            'type': 'execute_tool_reply',
-                            'name': func_name,
-                            'status': 'error',
-                            'error': f"'{func_name}' is not callable"
-                        })
-                    else:
-                        # Execute the function
-                        result = func(**kwargs)
+                    # Execute the function
+                    result = func(**kwargs)
 
-                        # Handle rich output types
-                        result_data = _format_tool_result(result)
+                    # Handle rich output types
+                    result_data = _format_tool_result(result)
 
-                        output_queue.put({
-                            'type': 'execute_tool_reply',
-                            'name': func_name,
-                            'status': 'success',
-                            'result': result_data
-                        })
+                    output_queue.put({
+                        'type': 'execute_tool_reply',
+                        'name': func_name,
+                        'status': 'success',
+                        'result': result_data
+                    })
 
             except Exception as e:
                 tb_lines = traceback.format_exception(type(e), e, e.__traceback__)

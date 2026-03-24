@@ -2,22 +2,66 @@
 Prompt parser for ai-jup-style syntax.
 
 This module parses special syntax in prompts and note cells:
-- $`variable` - Reference kernel variable (value substituted into prompt)
+- $`variable` / $`expression` - Reference kernel values (evaluated fresh)
 - &`function` - Expose Python function as AI-callable tool
+- &`obj.method` - Expose an object method as a tool
+- &`[tool_a, tool_b]` - Expose multiple tools with one reference
 
 Both syntaxes work in prompt cells and note (markdown) cells.
 """
+import hashlib
 import re
 from typing import List, Tuple, Optional
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Pattern for variable references: $`variable_name`
-VAR_PATTERN = re.compile(r'\$`([a-zA-Z_][a-zA-Z0-9_]*)`')
+# Pattern for variable/expression references: $`...`
+VAR_PATTERN = re.compile(r'\$`([^`]+)`')
 
-# Pattern for function/tool references: &`function_name`
-FUNC_PATTERN = re.compile(r'&`([a-zA-Z_][a-zA-Z0-9_]*)`')
+# Pattern for function/tool references: &`...`
+FUNC_PATTERN = re.compile(r'&`([^`]+)`')
+
+SIMPLE_IDENTIFIER_PATTERN = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+
+
+def _unique_preserve_order(items: List[str]) -> List[str]:
+    """Return unique strings preserving first-seen order."""
+    seen = set()
+    result = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+
+def _expand_function_reference(raw_ref: str) -> List[str]:
+    """Expand a raw &`...` reference into one or more tool targets."""
+    ref = raw_ref.strip()
+    if not ref:
+        return []
+    if ref.startswith('[') and ref.endswith(']'):
+        inner = ref[1:-1]
+        parts = [part.strip() for part in inner.split(',')]
+        return [part for part in parts if part]
+    return [ref]
+
+
+def is_simple_identifier(expr: str) -> bool:
+    """Whether an expression is a plain identifier name."""
+    return bool(SIMPLE_IDENTIFIER_PATTERN.fullmatch(expr.strip()))
+
+
+def tool_target_to_api_name(target: str) -> str:
+    """Convert a raw tool target into a provider-safe API tool name."""
+    cleaned = target.strip()
+    if SIMPLE_IDENTIFIER_PATTERN.fullmatch(cleaned):
+        return cleaned
+
+    base = re.sub(r'[^a-zA-Z0-9_]+', '-', cleaned).strip('-') or 'tool'
+    digest = hashlib.sha1(cleaned.encode('utf-8')).hexdigest()[:8]
+    return f"{base}--{digest}"
 
 
 def parse_prompt(text: str) -> Tuple[List[str], List[str]]:
@@ -28,27 +72,14 @@ def parse_prompt(text: str) -> Tuple[List[str], List[str]]:
         text: Prompt or note cell content
 
     Returns:
-        Tuple of (variable_names, function_names) - both as unique lists
+        Tuple of (expressions, function_targets) - both as unique lists
     """
-    variables = VAR_PATTERN.findall(text)
-    functions = FUNC_PATTERN.findall(text)
+    expressions = [expr.strip() for expr in VAR_PATTERN.findall(text) if expr.strip()]
+    functions: List[str] = []
+    for raw_ref in FUNC_PATTERN.findall(text):
+        functions.extend(_expand_function_reference(raw_ref))
 
-    # Return unique names preserving order
-    seen_vars = set()
-    unique_vars = []
-    for v in variables:
-        if v not in seen_vars:
-            seen_vars.add(v)
-            unique_vars.append(v)
-
-    seen_funcs = set()
-    unique_funcs = []
-    for f in functions:
-        if f not in seen_funcs:
-            seen_funcs.add(f)
-            unique_funcs.append(f)
-
-    return unique_vars, unique_funcs
+    return _unique_preserve_order(expressions), _unique_preserve_order(functions)
 
 
 def has_special_syntax(text: str) -> bool:
@@ -65,12 +96,12 @@ def has_special_syntax(text: str) -> bool:
 
 
 def has_variable_syntax(text: str) -> bool:
-    """Check if text contains $`variable` syntax."""
+    """Check if text contains $`...` syntax."""
     return bool(VAR_PATTERN.search(text))
 
 
 def has_function_syntax(text: str) -> bool:
-    """Check if text contains &`function` syntax."""
+    """Check if text contains &`...` syntax."""
     return bool(FUNC_PATTERN.search(text))
 
 
@@ -84,14 +115,14 @@ async def substitute_variables(
     Replace $`var` syntax with actual variable values from kernel.
 
     Args:
-        text: Text containing $`var` syntax
+        text: Text containing $`...` syntax
         kernel: SubprocessKernel instance
         notebook_id: Notebook identifier
         var_names: Optional pre-parsed variable names (avoids re-parsing)
 
     Returns:
         Tuple of (substituted_text, variable_info_dict)
-        variable_info_dict maps var_name -> {type, repr, exists, error?}
+        variable_info_dict maps expression -> {type, repr, exists, error?}
     """
     if var_names is None:
         var_names, _ = parse_prompt(text)
@@ -103,12 +134,15 @@ async def substitute_variables(
     result = text
 
     for var_name in var_names:
-        # Query kernel for variable value
-        info = await kernel.introspect_variable(var_name)
+        # Query kernel for variable or expression value
+        if hasattr(kernel, "evaluate_expression"):
+            info = await kernel.evaluate_expression(var_name)
+        else:
+            info = await kernel.introspect_variable(var_name)
         variable_info[var_name] = info
 
         if info.get('exists'):
-            # Substitute $`var_name` with the repr value
+            # Substitute $`expr` with the repr value
             pattern = re.compile(rf'\$`{re.escape(var_name)}`')
             var_repr = info.get('repr', '<unknown>')
             # Use a replacer function to avoid issues with $ in replacement
@@ -141,7 +175,7 @@ async def get_function_schemas(
     Returns:
         Tuple of (tool_schemas, function_info_dict)
         tool_schemas is a list of Anthropic tool definitions
-        function_info_dict maps func_name -> introspection result
+        function_info_dict maps raw tool target -> introspection result
     """
     if not func_names:
         return [], {}
@@ -229,14 +263,18 @@ def _build_tool_schema(func_name: str, func_info: dict) -> dict:
     if not docstring:
         docstring = f"Call the {func_name} function"
 
+    api_name = tool_target_to_api_name(func_name)
+
     return {
-        'name': func_name,
+        'name': api_name,
         'description': docstring,
         'input_schema': {
             'type': 'object',
             'properties': properties,
             'required': required
-        }
+        },
+        'dialeng_target_name': func_name,
+        'dialeng_display_name': func_name,
     }
 
 
@@ -252,8 +290,10 @@ def strip_special_syntax(text: str) -> str:
     Returns:
         Text with syntax markers removed (just variable/function names remain)
     """
-    # Replace $`name` with just name
-    result = VAR_PATTERN.sub(r'\1', text)
-    # Replace &`name` with just name
-    result = FUNC_PATTERN.sub(r'\1', result)
+    def _strip_tool(match):
+        expanded = _expand_function_reference(match.group(1))
+        return ', '.join(expanded) if expanded else ''
+
+    result = VAR_PATTERN.sub(lambda m: m.group(1).strip(), text)
+    result = FUNC_PATTERN.sub(_strip_tool, result)
     return result

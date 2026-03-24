@@ -18,7 +18,8 @@ from xml.sax.saxutils import escape as xml_escape
 
 logger = logging.getLogger(__name__)
 
-MAX_CONTEXT_CELLS = 25
+MAX_CONTEXT_CELLS = 100
+MAX_CONTEXT_CHARS = 24000
 MAX_TRUNC_LEN = 200  # Default truncation length for output/source
 
 # Per-notebook clipboard storage for copy/paste operations
@@ -51,6 +52,37 @@ def get_msg_idx(notebook, msgid: str) -> int:
         if c.id == msgid:
             return i
     return -1
+
+
+def _message_content_char_budget(content: Any) -> int:
+    """Estimate the character budget impact of an LLM message content payload."""
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        total = 0
+        for block in content:
+            if not isinstance(block, dict):
+                total += len(str(block))
+                continue
+            if block.get("type") == "text":
+                total += len(block.get("text", ""))
+            elif block.get("type") == "image":
+                total += 1024
+            else:
+                total += len(str(block))
+        return total
+    return len(str(content))
+
+
+def estimate_cell_context_chars(cell) -> int:
+    """Estimate how much context budget a cell consumes once converted to messages."""
+    from dialeng.core.dispatch import cell_to_llm_messages
+
+    total = 0
+    for msg in cell_to_llm_messages(cell):
+        total += _message_content_char_budget(msg.get("content", ""))
+        total += 32  # role / formatting overhead
+    return total
 
 
 def find_msgs(
@@ -570,8 +602,9 @@ def build_context_messages(notebook, current_cell_id: str) -> List[Dict]:
 
     Strategy:
     1. Use find_msgs() to get pinned cells (always included)
-    2. Use find_msgs() to get the window of recent non-pinned cells
-    3. Combine up to MAX_CONTEXT_CELLS total (pinned count towards limit)
+    2. Use find_msgs() to get recent non-pinned cells before the current prompt
+    3. Keep pinned cells regardless of budget, then fit newest non-pinned cells
+       into the remaining approximate character budget
     4. Sort all cells by original index to maintain chronological order
     5. Convert to LLM provider message format
 
@@ -609,22 +642,45 @@ def build_context_messages(notebook, current_cell_id: str) -> List[Dict]:
         pinned_only=False,
         skipped=False,
         before_idx=current_idx,
-        limit=1000  # Get all, we'll slice later
+        limit=1000  # Get all, we'll budget later
     )
     # Filter out pinned cells (already included) - keep (index, cell) tuples
     non_pinned_tuples = [(idx, cell) for idx, cell in non_pinned_results if idx not in pinned_indices]
     logger.info(f"build_context_messages: Found {len(non_pinned_tuples)} non-pinned cells")
 
-    # 3. Calculate window size (pinned cells count towards the 25 limit)
-    remaining_slots = MAX_CONTEXT_CELLS - len(pinned_results)
-    window_tuples = non_pinned_tuples[-remaining_slots:] if remaining_slots > 0 else []
+    # 3. Calculate size-aware window. Pinned cells are preserved even if they
+    # consume most of the budget; recent non-pinned cells fill the remainder.
+    pinned_budget = sum(estimate_cell_context_chars(cell) for _, cell in pinned_results)
+    remaining_budget = max(0, MAX_CONTEXT_CHARS - pinned_budget)
+    window_tuples = []
+    used_budget = 0
+
+    if remaining_budget > 0:
+        for idx, cell in reversed(non_pinned_tuples):
+            cell_budget = estimate_cell_context_chars(cell)
+            if window_tuples and used_budget + cell_budget > remaining_budget:
+                continue
+            if len(window_tuples) >= MAX_CONTEXT_CELLS:
+                break
+            window_tuples.append((idx, cell))
+            used_budget += cell_budget
+            if used_budget >= remaining_budget:
+                break
+
+        window_tuples.reverse()
 
     # 4. Combine and sort by index to maintain chronological order
     # This is the key fix: cells must appear in notebook order, not pinned-first
     all_tuples = list(pinned_results) + window_tuples
     all_tuples.sort(key=lambda x: x[0])  # Sort by index
 
-    logger.info(f"build_context_messages: Total {len(all_tuples)} cells in context")
+    logger.info(
+        "build_context_messages: Total %s cells in context (pinned_budget=%s, window_budget=%s, max_chars=%s)",
+        len(all_tuples),
+        pinned_budget,
+        used_budget,
+        MAX_CONTEXT_CHARS,
+    )
 
     # 5. Convert to messages (in chronological order)
     messages = []

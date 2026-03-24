@@ -2,6 +2,12 @@
 
 This document explains how Dialeng integrates with LLMs for real AI responses in prompt cells.
 
+Prompt execution remains stateless and notebook-authored:
+- prompt cells see only the current notebook state above them
+- `$`...`` references are evaluated fresh against the current kernel on every run
+- `&`...`` tool references can come from the prompt itself or earlier note/CRAFT context
+- edited prior AI responses remain part of the authoritative notebook transcript
+
 ## Overview
 
 Dialeng supports multiple AI modes for prompt cells, with **automatic credential detection** at startup to determine which providers are available:
@@ -154,16 +160,21 @@ The model dropdown visibility is controlled by JavaScript:
 
 ## Context Building
 
-### The 25-Cell Window
+### Size-Aware Context Budget
 
-LLM context is limited to 25 cells maximum to avoid token overflow:
+LLM context is now limited by an approximate size budget instead of only a fixed
+cell count:
 
-1. **Pinned cells** are always included first (in order)
-2. **Window cells** fill the remaining slots from the most recent non-pinned cells
+1. **Pinned cells** are always included first (in order), even if they consume
+   most of the budget
+2. **Window cells** fill the remaining budget from the most recent non-pinned cells
 3. **Skipped cells** are excluded from context
+4. A generous hard cell cap remains as a safety guard, but budgeting is driven
+   primarily by estimated message size
 
 ```python
-MAX_CONTEXT_CELLS = 25
+MAX_CONTEXT_CELLS = 100
+MAX_CONTEXT_CHARS = 24000
 
 def build_context_messages(notebook, current_cell_id):
     # Get current cell index
@@ -176,9 +187,10 @@ def build_context_messages(notebook, current_cell_id):
     window = find_msgs(notebook, pinned_only=False, skipped=False, before_idx=current_idx)
     window = [c for c in window if not c.pinned]  # Exclude pinned (already counted)
 
-    # Calculate remaining slots
-    remaining = MAX_CONTEXT_CELLS - len(pinned)
-    window = window[-remaining:]  # Take most recent
+    # Fit recent cells into remaining approximate budget
+    pinned_budget = sum(estimate_cell_context_chars(c) for _, c in pinned)
+    remaining_budget = max(0, MAX_CONTEXT_CHARS - pinned_budget)
+    window = newest_cells_that_fit(window, remaining_budget)
 
     # Combine and convert
     all_cells = pinned + window
@@ -216,6 +228,20 @@ def cell_to_messages(cell):
 ### Context Freshness and Cell Editing
 
 When a cell's source is edited, the outputs are automatically cleared to prevent stale context contamination. This ensures the LLM only sees the current state of the notebook.
+
+### Prompt Special Syntax
+
+Dialeng resolves prompt special syntax during execution:
+
+- `$`identifier``: inject the current value of a variable
+- `$`expression``: evaluate a Python expression such as `$`len(items)``
+- `&`tool_name``: expose a kernel function as an AI-callable tool
+- `&`obj.method``: expose an object method as a tool
+- `&`[tool_a, tool_b]``: expose multiple tools in one reference
+
+For provider compatibility, dotted tool references are converted to provider-safe
+tool ids internally and mapped back to their notebook-authored names in the UI
+and during execution.
 
 #### The Complete Flow
 

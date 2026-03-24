@@ -9,12 +9,16 @@ sequenceDiagram
     participant User
     participant LLM as Claude (LLM)
     participant Registry as ToolRegistry
-    participant PyRun as RunPython
+    participant PyRun as DialengRunPython
+    participant Core as safepyrun core
 
     User->>LLM: Prompt (e.g., "calculate fibonacci")
     LLM->>Registry: tool_use: pyrun(code="...")
+    Note over Registry: Current prompt tools already parsed from built-ins + &`tool` refs
     Registry->>PyRun: await pyrun(code)
-    Note over PyRun: RestrictedPython compiles AST<br/>Allowlist checks each callable<br/>Captures stdout/stderr/result
+    PyRun->>Core: _run_python(...) with prompt-scoped globals + allowlist
+    Note over Core: RestrictedPython compiles AST<br/>Allowlist checks each callable<br/>Captures stdout/stderr/result
+    Core-->>PyRun: {"result": ..., "stdout": ...}
     PyRun-->>Registry: {"result": ..., "stdout": ...}
     Registry-->>LLM: Tool result
     LLM-->>User: Response with computed result
@@ -33,6 +37,7 @@ The sandbox is designed for an LLM — a well-meaning but occasionally clumsy co
 1. **Curated stdlib subset**: `re`, `json`, `math`, `pathlib`, `datetime`, `collections`, `itertools`, `functools`, read-only `httpx.get`, and many more
 2. **User-registered functions**: Via `allow()` — e.g., `allow('numpy.array', 'numpy.ndarray.sum')`
 3. **LLM self-service**: Any symbol created with a trailing `_` (like `helper_`) is automatically available in subsequent calls
+4. **Prompt-scoped Dialeng tools**: During a tool-enabled prompt run, Dialeng temporarily injects the current prompt's built-in tools plus explicit `&` references into `pyrun`
 
 ## The `_` Suffix Convention
 
@@ -86,15 +91,32 @@ await pyrun("greet('Joe')")    # → NameError
 In `dialeng/services/builtin_tools.py`:
 
 ```python
-from safepyrun import RunPython
+class DialengRunPython:
+    async def __call__(self, code: str, concise: bool = True):
+        return await _run_python(...)
 
-pyrun = RunPython(ok_dests=['.'])
-pyrun.__name__ = 'pyrun'
+pyrun = DialengRunPython(ok_dests=['.'])
 
 BUILTIN_TOOLS = [view, rg, create, str_replace, insert, pyrun]
 ```
 
-The `RunPython` instance is registered as a builtin tool via `ToolRegistry`. Since `RunPython.__call__` is async, `execute_builtin()` in `tool_registry.py` checks `asyncio.iscoroutinefunction` and awaits accordingly.
+The wrapper keeps safepyrun's persistence model, but Dialeng now layers prompt-scoped tool injection on top:
+
+```mermaid
+flowchart TD
+    A["Prompt parsed"] --> B["Built-ins enabled?"]
+    A --> C["Explicit &`tool` refs found"]
+    B --> D["ToolRegistry.push_pyrun_context(...)"]
+    C --> D
+    D --> E["DialengRunPython stores task-scoped globals + allowed names"]
+    E --> F["pyrun(code)"]
+    F --> G["Temporary tool globals merged into sandbox state"]
+    G --> H["Temporary allowlist merged into __llmtools__"]
+    H --> I["safepyrun.core._run_python(...)"]
+    I --> J["Allowlist + tool globals restored"]
+```
+
+Only the current prompt's allowed tools are injected. Notebook functions that were not exposed via `&` syntax remain unavailable inside `pyrun`.
 
 ## Write Permissions
 
@@ -166,6 +188,27 @@ Names starting with `_` are excluded from both export and the `tools` dict. Name
 
 You can `import` any module, but calling its methods requires them to be in the allowlist. For example, `json.loads()` works (registered), but `os.system()` does not.
 
+### Prompt-scoped tools inside `pyrun`
+
+When the current prompt exposes tools, `pyrun` can use them directly:
+
+```python
+# built-in tool inside pyrun
+create("notes.txt", "hello", overwrite=True)
+
+# explicit notebook tool inside pyrun
+await analyze_data(df_name="sales")
+
+# dotted tool reference inside pyrun
+await dialog.read_msg(id="abc123")
+```
+
+Rules:
+- Built-in tools are available inside `pyrun` only when built-ins are enabled for the prompt
+- Notebook/dialog tools are available inside `pyrun` only if they were explicitly exposed via `&` syntax
+- Explicit notebook/dialog tools are async inside the sandbox and should be called with `await`
+- Tool results are coerced back to Python values when possible (`42`, `{"a": 1}`, lists, etc.); richer outputs fall back to structured metadata
+
 ## Using pyrun in Notebooks
 
 ### As an LLM tool (primary use case)
@@ -176,7 +219,7 @@ In a **prompt cell**, the AI automatically has access to `pyrun`. It knows the `
 Calculate the first 20 prime numbers using pyrun
 ```
 
-The AI will call `pyrun` with appropriate code, using `_` suffixed names for any state it needs to persist.
+The AI will call `pyrun` with appropriate code, using `_` suffixed names for any state it needs to persist. When the same prompt also exposes tools, the model can choose a CodeAct-style flow and use those tools from within the same `pyrun` call instead of spending multiple tool loop turns.
 
 ### Direct use in code cells
 
@@ -195,6 +238,6 @@ Note that this `pyrun` instance shares state with the LLM's tool calls — `_` s
 
 | File | Purpose |
 |------|---------|
-| `dialeng/services/builtin_tools.py` | `RunPython` instantiation and registration |
-| `dialeng/services/tool_registry.py` | Async-aware tool execution |
+| `dialeng/services/builtin_tools.py` | Dialeng `pyrun` wrapper, task-scoped tool injection, result coercion |
+| `dialeng/services/tool_registry.py` | Prompt-scoped `pyrun` context construction and dotted tool namespaces |
 | `notebooks/safepyrun_demo.ipynb` | Interactive demo notebook |

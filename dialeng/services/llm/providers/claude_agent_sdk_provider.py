@@ -255,6 +255,10 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
             def make_tool_handler(captured_tool_name, captured_kernel, captured_notebook_id, captured_registry, captured_events, captured_tool_schema):
                 async def tool_handler(args: dict) -> dict:
                     logger.debug(f"MCP tool called: {captured_tool_name}, args: {args}")
+                    if hasattr(captured_registry, "resolve_tool_display_name"):
+                        display_name = captured_registry.resolve_tool_display_name(captured_notebook_id, captured_tool_name)
+                    else:
+                        display_name = captured_tool_name
 
                     # Convert JSON-serialized values back to proper types
                     converted_args = {}
@@ -276,7 +280,7 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
                     tool_id = f"mcp_tool_{captured_tool_name}_{len(captured_events)}"
                     captured_events.append({
                         "type": "tool_call", "id": tool_id,
-                        "name": captured_tool_name, "input": converted_args
+                        "name": display_name, "input": converted_args
                     })
 
                     try:
@@ -287,7 +291,7 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
 
                         captured_events.append({
                             "type": "tool_result", "id": tool_id,
-                            "name": captured_tool_name, "result": result
+                            "name": display_name, "result": result
                         })
 
                         return {"content": [{"type": "text", "text": result_text}]}
@@ -295,7 +299,7 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
                         error_msg = f"Error executing {captured_tool_name}: {str(e)}"
                         captured_events.append({
                             "type": "tool_result", "id": tool_id,
-                            "name": captured_tool_name,
+                            "name": display_name,
                             "result": {"status": "error", "error": error_msg}
                         })
                         return {"content": [{"type": "text", "text": error_msg}], "is_error": True}

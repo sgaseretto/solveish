@@ -114,6 +114,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `tests/test_sdk_query_payload.py` covering the SDK prompt builder for both multimodal notebook context and plain text fallback
 - Built-in LLM tools now route consistently across `claudette` and `claude-agent-sdk`; if built-ins are enabled, both providers enter the tool loop even without an explicit `&\`func\`` reference
 - Added `tests/test_llm_tool_routing.py` to verify provider-independent built-in tool routing
+- Prompt special syntax now supports `$`expression`` evaluation (not just simple variable names), so prompts can inject fresh values like `$`len(items)`` or `$`config.theme.name`` from the active kernel
+- Tool references now support Solveit-style dotted names and list syntax such as `&`obj.method`` and `&`[tool_a, tool_b]``
+- Dynamic tool names are now sanitized for provider compatibility internally and mapped back to the original notebook-authored names in the UI and execution path
+- Added `tests/test_prompt_parser_syntax.py` covering expression parsing/substitution plus dotted/list tool syntax and dynamic tool alias resolution
+- Expanded the first built-in file-editing batch with `strs_replace`, `replace_lines`, `file_insert_line`, and `file_del_lines`
+- Added `tests/test_builtin_tools.py` covering the new built-in file-editing helpers
+- Prompt context selection now uses a size-aware budget with pinned-cell preservation instead of only a fixed 25-cell window, dropping older non-pinned cells first as context grows
+- Added `tests/test_context_budgeting.py` covering recent-cell preference and pinned-cell preservation under the new context budget
+- `pyrun` now supports CodeAct-style prompt tool access: built-in tools enabled for the current prompt, plus explicit `&\`tool\`` and `&\`obj.method\`` references, are temporarily injected into the safepyrun sandbox so the model can do multi-step work inside a single `pyrun` call
+- Prompt-scoped notebook/dialog tools are exposed as async sandbox callables and must be used with `await` inside `pyrun`; tools not exposed for the current prompt remain unavailable
+- Added `tests/test_pyrun_codeact.py` covering prompt-scoped sync tools, built-in tools, simple async tool proxies, and dotted tool namespaces inside `pyrun`
 
 #### File Editor Fragment Loading
 - The standalone file-editor fragment route now returns fragment-only HTML instead of a full FastHTML document, so clicking a text file in the explorer no longer injects `<!doctype html>...` into the editor container and fall into the generic "File editor error" path

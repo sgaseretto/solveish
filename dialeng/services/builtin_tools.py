@@ -10,15 +10,25 @@ Tools:
 - rg: Search files using ripgrep
 - create: Create a new file
 - str_replace: Replace exact string in file
+- strs_replace: Replace multiple exact strings in a file
 - insert: Insert content at line number
+- replace_lines: Replace a line range in a file
+- file_insert_line: Insert one line at a given location
+- file_del_lines: Delete a line range from a file
 - pyrun: Safe sandboxed Python execution via safepyrun
 """
+import asyncio
+import ast
+import contextvars
+import json
 import os
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Any, Dict, Set
 import logging
-from safepyrun import RunPython
+from fastcore.imports import __llmtools__
+from safepyrun.core import _run_python
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +37,116 @@ MAX_FILE_SIZE = 1024 * 1024  # 1MB
 
 # Maximum lines to return
 MAX_LINES = 500
+
+
+@dataclass
+class PyRunExecutionContext:
+    """Temporary prompt-scoped tools made available inside pyrun."""
+    tool_globals: Dict[str, Any] = field(default_factory=dict)
+    allowed_names: Set[str] = field(default_factory=set)
+
+
+_pyrun_context: contextvars.ContextVar[Optional[PyRunExecutionContext]] = contextvars.ContextVar(
+    "dialeng_pyrun_context",
+    default=None,
+)
+
+
+class DialengRunPython:
+    """Safe Python tool with prompt-scoped CodeAct-style tool injection."""
+
+    def __init__(self, g: Optional[dict] = None, ok_dests: Optional[list[str]] = None):
+        self.g = g if g is not None else {}
+        self.ok_dests = ok_dests
+        self.__name__ = "pyrun"
+        self._lock = asyncio.Lock()
+
+    @property
+    def __doc__(self):
+        return (
+            "Execute restricted Python with access to Dialeng's safe sandbox. "
+            "Values or helper functions ending with `_` persist across calls. "
+            "Built-in tools enabled for the current prompt, plus any explicit &`tool` or "
+            "&`obj.method` references from the notebook context, are also available inside "
+            "this sandbox for CodeAct-style multi-step work. "
+            "Notebook or dialog tools exposed this way are async and should be called with "
+            "`await` inside pyrun, for example `await read_msgid(id='abc')` or "
+            "`await obj.method(x=1)`. Tools that were not exposed for the current prompt are "
+            "not available inside pyrun."
+        )
+
+    def push_tool_context(self, *, tool_globals: Dict[str, Any], allowed_names: Set[str]):
+        """Install prompt-scoped tools for the current async task."""
+        return _pyrun_context.set(
+            PyRunExecutionContext(
+                tool_globals=dict(tool_globals),
+                allowed_names=set(allowed_names),
+            )
+        )
+
+    def reset_tool_context(self, token) -> None:
+        """Remove a previously-installed prompt-scoped tool context."""
+        _pyrun_context.reset(token)
+
+    @staticmethod
+    def _coerce_text_result(content: str):
+        """Recover JSON/Python-literal values when possible for CodeAct flows."""
+        stripped = content.strip()
+        if not stripped:
+            return content
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                return parser(stripped)
+            except Exception:
+                continue
+        return content
+
+    @classmethod
+    def coerce_tool_result(cls, result: dict):
+        """Convert Dialeng tool execution payloads to ergonomic pyrun values."""
+        if result.get("status") == "error":
+            raise RuntimeError(result.get("error", "Tool execution failed"))
+
+        payload = result.get("result", {})
+        if not isinstance(payload, dict):
+            return payload
+
+        result_type = payload.get("type", "text")
+        content = payload.get("content")
+
+        if result_type == "text":
+            return cls._coerce_text_result(content if isinstance(content, str) else repr(content))
+
+        if result_type in {"html", "image"}:
+            return payload
+
+        return content
+
+    async def __call__(self, code: str, concise: bool = True):
+        ctx = _pyrun_context.get()
+        tool_globals = ctx.tool_globals if ctx else {}
+        allowed_names = ctx.allowed_names if ctx else set()
+
+        async with self._lock:
+            previous_values = {
+                name: self.g[name]
+                for name in tool_globals
+                if name in self.g
+            }
+            inserted_names = [name for name in tool_globals if name not in previous_values]
+            previous_allowed = set(__llmtools__)
+
+            try:
+                self.g.update(tool_globals)
+                __llmtools__.update(allowed_names)
+                return await _run_python(code, g=self.g, ok_dests=self.ok_dests, concise=concise)
+            finally:
+                __llmtools__.clear()
+                __llmtools__.update(previous_allowed)
+                for name in inserted_names:
+                    self.g.pop(name, None)
+                for name, value in previous_values.items():
+                    self.g[name] = value
 
 
 def view(
@@ -371,6 +491,109 @@ def insert(file: str, line: int, content: str) -> str:
         return f"Error modifying '{file}': {str(e)}"
 
 
+def strs_replace(file: str, old_strs: list[str], new_strs: list[str]) -> str:
+    """
+    Replace multiple exact strings in a file.
+
+    Each old/new pair is applied once in order.
+    """
+    if len(old_strs) != len(new_strs):
+        return "Error: old_strs and new_strs must have the same length"
+
+    p = Path(file).expanduser()
+    if not p.exists():
+        return f"Error: File '{file}' does not exist"
+    if not p.is_file():
+        return f"Error: '{file}' is not a file"
+
+    try:
+        content = p.read_text(encoding='utf-8')
+        replaced = 0
+        for old_str, new_str in zip(old_strs, new_strs):
+            if old_str in content:
+                content = content.replace(old_str, new_str, 1)
+                replaced += 1
+        if replaced == 0:
+            return f"Error: None of the requested strings were found in '{file}'"
+        p.write_text(content, encoding='utf-8')
+        return f"Applied {replaced} string replacement(s) in {file}"
+    except UnicodeDecodeError:
+        return f"Error: '{file}' is not a text file"
+    except PermissionError:
+        return f"Error: Permission denied modifying '{file}'"
+    except Exception as e:
+        return f"Error modifying '{file}': {str(e)}"
+
+
+def replace_lines(file: str, start_line: int, end_line: int, new_content: str) -> str:
+    """
+    Replace a 1-indexed inclusive line range in a text file.
+    """
+    p = Path(file).expanduser()
+    if not p.exists():
+        return f"Error: File '{file}' does not exist"
+    if not p.is_file():
+        return f"Error: '{file}' is not a file"
+    if start_line < 1 or end_line < start_line:
+        return "Error: Invalid line range"
+
+    try:
+        lines = p.read_text(encoding='utf-8').splitlines()
+        total_lines = len(lines)
+        if start_line > total_lines + 1:
+            return f"Error: start_line {start_line} is beyond file length ({total_lines} lines)"
+
+        replacement_lines = new_content.splitlines()
+        start_idx = start_line - 1
+        end_idx = min(end_line, total_lines)
+        lines[start_idx:end_idx] = replacement_lines
+        p.write_text('\n'.join(lines) + ('\n' if lines else ''), encoding='utf-8')
+        return f"Replaced lines {start_line}-{end_line} in {file}"
+    except UnicodeDecodeError:
+        return f"Error: '{file}' is not a text file"
+    except PermissionError:
+        return f"Error: Permission denied modifying '{file}'"
+    except Exception as e:
+        return f"Error modifying '{file}': {str(e)}"
+
+
+def file_insert_line(file: str, line: int, content: str) -> str:
+    """
+    Insert a single line before the given 1-indexed line number.
+    """
+    return insert(file, line, content)
+
+
+def file_del_lines(file: str, start_line: int, end_line: int) -> str:
+    """
+    Delete a 1-indexed inclusive line range from a text file.
+    """
+    p = Path(file).expanduser()
+    if not p.exists():
+        return f"Error: File '{file}' does not exist"
+    if not p.is_file():
+        return f"Error: '{file}' is not a file"
+    if start_line < 1 or end_line < start_line:
+        return "Error: Invalid line range"
+
+    try:
+        lines = p.read_text(encoding='utf-8').splitlines()
+        total_lines = len(lines)
+        if start_line > total_lines:
+            return f"Error: start_line {start_line} is beyond file length ({total_lines} lines)"
+        start_idx = start_line - 1
+        end_idx = min(end_line, total_lines)
+        del lines[start_idx:end_idx]
+        p.write_text('\n'.join(lines) + ('\n' if lines else ''), encoding='utf-8')
+        return f"Deleted lines {start_line}-{end_line} from {file}"
+    except UnicodeDecodeError:
+        return f"Error: '{file}' is not a text file"
+    except PermissionError:
+        return f"Error: Permission denied modifying '{file}'"
+    except Exception as e:
+        return f"Error modifying '{file}': {str(e)}"
+
+
 def _format_size(size: int) -> str:
     """Format file size in human-readable form."""
     for unit in ['B', 'KB', 'MB', 'GB']:
@@ -381,8 +604,18 @@ def _format_size(size: int) -> str:
 
 
 # Safe Python sandbox — ok_dests=['.'] allows writes relative to cwd (matches Solveit)
-pyrun = RunPython(ok_dests=['.'])
-pyrun.__name__ = 'pyrun'
+pyrun = DialengRunPython(ok_dests=['.'])
 
 # Export list of all built-in tools
-BUILTIN_TOOLS: List = [view, rg, create, str_replace, insert, pyrun]
+BUILTIN_TOOLS: List = [
+    view,
+    rg,
+    create,
+    str_replace,
+    strs_replace,
+    insert,
+    replace_lines,
+    file_insert_line,
+    file_del_lines,
+    pyrun,
+]
