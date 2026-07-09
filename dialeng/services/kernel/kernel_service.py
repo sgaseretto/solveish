@@ -271,14 +271,21 @@ class KernelService:
     async def sync_project_files(
         self,
         notebook_id: str,
-        files: list[tuple[str, str]],
+        files: list[tuple[str, str | bytes]],
         *,
         remote_root: str = ".",
     ) -> dict:
         """Sync project files into the notebook kernel using the backend contract."""
+        kernel = self.get_kernel(notebook_id)
+        if kernel.get_info().kernel_type == "colab" and getattr(kernel, "_assignment", None):
+            return await kernel.sync_project_files(
+                files,
+                notebook_id=notebook_id,
+                remote_root=remote_root,
+            )
+
         lock = self._get_execution_lock(notebook_id)
         async with lock:
-            kernel = self.get_kernel(notebook_id)
             return await kernel.sync_project_files(
                 files,
                 notebook_id=notebook_id,

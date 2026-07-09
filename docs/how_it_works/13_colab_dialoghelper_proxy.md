@@ -47,7 +47,7 @@ The solution uses **Jupyter's built-in stdin/input mechanism** to tunnel dialogh
 2. **Monkey-patch**: After install, Python code is injected that replaces dialoghelper's HTTP transport (`call_endp`/`call_endpa`) with stdin-based proxied versions
 3. **Stdin proxy**: During execution, when patched dialoghelper code calls `input()` with a magic prefix, Dialeng intercepts the Jupyter `input_request` message, makes the HTTP call locally, and sends the response back via `input_reply`
 
-This approach requires **zero changes** to the local subprocess kernel, `app.py`, `kernel_service.py`, or `base_kernel.py`. Only `colab_kernel.py` and `colab_session.py` are modified.
+This approach keeps dialoghelper transport Colab-specific while using the shared kernel setup contract in `BaseKernel` / `KernelService`. Local subprocess kernels still call Dialeng over normal localhost HTTP, while Colab kernels install dialoghelper and patch its transport during runtime initialization.
 
 ## Architecture
 
@@ -90,17 +90,17 @@ sequenceDiagram
 
     CK->>UI: status: "initializing: Setting up matplotlib"
     CK->>RT: execute_request: %matplotlib inline
-    RT-->>CK: execute_reply (30s timeout)
+    RT-->>CK: status: idle (30s timeout)
 
     CK->>UI: status: "initializing: Installing dialoghelper"
     CK->>RT: execute_request: %pip install -q dialoghelper
     RT-->>CK: stream: install output (logged)
-    RT-->>CK: execute_reply (120s timeout)
+    RT-->>CK: status: idle (120s timeout)
 
     CK->>UI: status: "initializing: Configuring dialoghelper proxy"
     CK->>RT: execute_request: [monkey-patch code]
     RT-->>CK: stream: "dialoghelper proxy: active"
-    RT-->>CK: execute_reply (30s timeout)
+    RT-->>CK: status: idle (30s timeout)
 
     CK->>UI: status: "" (init complete)
     Note over CK: connection_state = "connected"
@@ -136,13 +136,13 @@ The UI's `/dialeng/{nb_id}/kernel/status` endpoint returns this state, so users 
 
 ### The `_run_init_code()` Helper
 
-Each init step uses `_run_init_code()`, which sends a silent `execute_request` and waits for `execute_reply`, logging any stream output along the way:
+Each init step uses `_run_init_code()`, which sends a silent `execute_request` and waits for `status: idle`, logging any stream output along the way:
 
 ```python
 async def _run_init_code(self, code: str, description: str, timeout: float = 30.0) -> None:
     """Execute init code on kernel, log output, wait for completion."""
     # Sends execute_request with silent=True, store_history=False
-    # Waits for execute_reply, logging stream/error messages
+    # Waits for status: idle, logging stream/error messages
     # Times out gracefully if kernel doesn't respond
 ```
 
@@ -151,6 +151,8 @@ Key differences from `execute_streaming()`:
 - `store_history=False` — doesn't pollute the In[]/Out[] history
 - `allow_stdin=False` — init code doesn't need stdin support
 - Logs output instead of yielding `CellOutput` objects
+
+`[LIB]` file transfer is intentionally separate from this stdin proxy. Exported project modules are uploaded with the Colab runtime proxy's Jupyter Contents API, not by executing Python file-write code in the kernel. That keeps file sync available even when a user cell is occupying the execution queue.
 
 ## The Monkey-Patch
 

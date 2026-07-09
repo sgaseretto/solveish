@@ -9,6 +9,7 @@ from typing import Dict
 from .colab_auth import ColabAuthService
 from .colab_api import ColabAPIClient
 from .colab_kernel import ColabKernel
+from .colab_state import ColabSessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +21,12 @@ class ColabSessionManager:
     provides the API client (backed by the auth service) to each kernel.
     """
 
-    def __init__(self, auth_service: ColabAuthService):
+    def __init__(self, auth_service: ColabAuthService, default_accelerator: str = ""):
         self.auth = auth_service
         self._api = ColabAPIClient(auth_service)
         self._kernels: Dict[str, ColabKernel] = {}
+        self.default_accelerator = default_accelerator
+        self._session_store = ColabSessionStore()
 
     def get_kernel(self, notebook_id: str, runtime_type: str = "cpu",
                    dialeng_port: int = 8000) -> ColabKernel:
@@ -39,7 +42,10 @@ class ColabSessionManager:
         """
         if notebook_id not in self._kernels:
             self._kernels[notebook_id] = ColabKernel(
-                self._api, runtime_type=runtime_type,
+                self._api,
+                runtime_type=runtime_type,
+                default_accelerator=self.default_accelerator,
+                notebook_id=notebook_id,
                 dialeng_port=dialeng_port
             )
             logger.info(f"Created ColabKernel for notebook {notebook_id} (runtime={runtime_type})")
@@ -78,3 +84,12 @@ class ColabSessionManager:
     def has_kernel(self, notebook_id: str) -> bool:
         """Check if a Colab kernel exists for the notebook."""
         return notebook_id in self._kernels
+
+    async def prune_stale_metadata(self) -> int:
+        """Drop persisted metadata for runtimes no longer listed by Colab."""
+        assignments = await self._api.list_tunnel_assignments()
+        active_endpoints = {assignment.endpoint for assignment in assignments}
+        pruned = self._session_store.prune_stale_endpoints(active_endpoints)
+        if pruned:
+            logger.info("Pruned stale Colab session metadata entries: %s", pruned)
+        return pruned

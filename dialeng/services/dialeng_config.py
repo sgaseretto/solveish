@@ -92,7 +92,10 @@ DEFAULT_CONFIG = {
     },
     "colab": {
         "enabled": False,
-        "comment": "Google Colab integration. Enable to use Colab as a remote kernel. Authentication uses the same OAuth flow as the Colab VS Code extension — just click 'Connect Google' in the toolbar."
+        "auth_provider": "oauth_local",
+        "default_runtime": "cpu",
+        "default_accelerator": "",
+        "comment": "Google Colab integration. auth_provider options: oauth_local, oauth_remote, adc. DIALENG_COLAB_AUTH_PROVIDER overrides this value."
     }
 }
 
@@ -147,6 +150,9 @@ class DialengConfig:
 
     # Colab settings
     colab_enabled: bool = False
+    colab_auth_provider: str = "oauth_local"
+    colab_default_runtime: str = "cpu"
+    colab_default_accelerator: str = ""
 
     # Raw config for reference
     raw_config: Dict[str, Any] = field(default_factory=dict)
@@ -271,6 +277,24 @@ def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
     # Colab settings
     colab = raw.get("colab", {})
     config.colab_enabled = colab.get("enabled", False)
+    config.colab_auth_provider = os.environ.get(
+        "DIALENG_COLAB_AUTH_PROVIDER",
+        colab.get("auth_provider", "oauth_local"),
+    )
+    if config.colab_auth_provider not in {"oauth_local", "oauth_remote", "adc"}:
+        logger.warning(
+            "Invalid Colab auth provider %r; falling back to oauth_local",
+            config.colab_auth_provider,
+        )
+        config.colab_auth_provider = "oauth_local"
+    config.colab_default_runtime = colab.get("default_runtime", "cpu")
+    if config.colab_default_runtime not in {"cpu", "gpu", "tpu"}:
+        logger.warning(
+            "Invalid Colab default runtime %r; falling back to cpu",
+            config.colab_default_runtime,
+        )
+        config.colab_default_runtime = "cpu"
+    config.colab_default_accelerator = str(colab.get("default_accelerator", "") or "")
 
     return config
 

@@ -72,6 +72,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Re-upload triggered on kernel restart and on every save that produces an export
 - Uses base64 encoding for safe file transfer to remote kernel
 
+#### Colab CLI Alignment
+- Aligned Colab assignment lifecycle with Google's `google-colab-cli` semantics, including `/tun/m/assign`, `/tun/m/unassign`, `/tun/m/assignments`, XSSI response stripping, 412 too-many-runtime handling, runtime proxy parsing, and CPU/GPU/TPU variant mapping
+- Added Colab runtime Contents API helpers for upload, download, delete, and directory creation through the runtime proxy
+- Added persisted Colab session diagnostics in `~/.dialeng/colab_sessions.json`, including notebook id, endpoint, proxy URL, token expiry, kernel/session ids, runtime type, accelerator, connection state, and last activity
+- Added Colab auth provider selection via `colab.auth_provider` and `DIALENG_COLAB_AUTH_PROVIDER`, with default local OAuth plus remote copy-paste OAuth and ADC provider support
+- Added a Colab terminal helper for the future `/colab/tty` runtime-proxy WebSocket path without exposing a terminal UI yet
+- Added `tests/test_colab_cli_alignment.py` covering assignment parsing, keep-alive behavior, Contents API transfer payloads, session metadata, auth provider selection, and Colab terminal path helpers
+
 ### Fixed
 
 #### Colab Connection Robustness
@@ -84,8 +92,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - WebSocket reconnect now rehydrates queue/kernel state from the backend snapshot instead of inferring readiness from queue emptiness alone
 - Stored Colab sessions are validated on startup before Dialeng treats them as authenticated, and invalid/revoked sessions are cleared instead of being reused silently
 - Keep-alive is now activity-aware, using live browser-client counts and recent kernel activity to avoid keeping long-idle Colab runtimes warm unnecessarily
+- Colab keep-alive now matches `google-colab-cli`: it uses `X-Colab-Tunnel: Google`, a short request timeout, and treats read timeouts as successful tunnel activity while preserving real HTTP failures
 - Repeated keep-alive and proxy-token-refresh failures now trigger a Colab connection recycle so the next execute reconnects against a clean runtime/session
+- Dialeng now prunes stale persisted Colab metadata against `/tun/m/assignments` on startup and can reattach to a persisted runtime endpoint after restart before assigning a new runtime
 - Project-path setup and exported-module sync now flow through `BaseKernel` / `KernelService` abstractions, so local and Colab kernels share one setup contract and future remote kernels can plug into the same hooks
+- Colab `[LIB]` sync now uses the runtime proxy's Jupyter Contents API instead of executing Python file-write code in the kernel, so exported module uploads are not blocked behind a busy execution queue after the runtime is attached
 - Server logs for CRAFT discovery, LIB path injection, LIB sync, and per-CRAFT execution now include runtime id, generation, file counts, byte counts, sample paths, and durations
 - Final OOB rendering and notebook saves now normalize `update_display_data` and `clear_output` events, so fastprogress/tqdm progress bars keep their last visible state instead of collapsing into blank `<progress value="0">` placeholders after execution
 - Formatter-only IPython `__repr__ returned non-string` errors are now treated as benign when the cell also produced rich display output, preventing fastai/fastprogress visual cells from ending in duplicate error tracebacks while still rendering their images/widgets

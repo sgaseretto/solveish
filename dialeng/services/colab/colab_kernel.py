@@ -10,19 +10,20 @@ Connects to a Google Colab runtime via:
 Lifecycle: assign → create session → connect WS → execute → keep-alive → disconnect
 """
 import asyncio
-import base64
 import json
 import uuid
 import logging
 import time
 from typing import AsyncIterator, Optional
 from pathlib import Path
+from urllib.parse import urlencode
 
 import aiohttp
 
 from dialeng.document.cell import CellOutput
 from dialeng.services.kernel.base_kernel import BaseKernel, KernelInfo, KernelStatus
-from .colab_api import ColabAPIClient, ColabAssignment, JupyterSession
+from .colab_api import Accelerator, ColabAPIClient, ColabAssignment, JupyterSession, Variant
+from .colab_state import ColabSessionMetadata, ColabSessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,8 @@ TOKEN_REFRESH_BUFFER = 300  # Refresh proxy token 5 min before expiry
 WS_RECEIVE_LOG_TIMEOUT = 60  # Log when Colab is quiet for a long time
 KEEP_ALIVE_ACTIVITY_GRACE = 900  # Allow quiet kernels to go idle after 15 minutes
 FAILURE_RECYCLE_THRESHOLD = 3  # Recycle the connection after repeated background failures
+JUPYTER_WS_PROTOCOL_VERSION = "5.3"
+JUPYTER_WS_DEFAULT_SUBPROTOCOL = "default"
 
 # ============================================================================
 # DialogHelper proxy protocol constants
@@ -118,8 +121,10 @@ class ColabKernel(BaseKernel):
     })
 
     def __init__(self, api_client: ColabAPIClient, runtime_type: str = "cpu",
-                 dialeng_port: int = 8000):
+                 dialeng_port: int = 8000, default_accelerator: str = "",
+                 notebook_id: str = ""):
         self._api = api_client
+        self._notebook_id = notebook_id
         self._assignment: Optional[ColabAssignment] = None
         self._jupyter_session: Optional[JupyterSession] = None
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
@@ -135,6 +140,7 @@ class ColabKernel(BaseKernel):
         self._session_id: str = uuid.uuid4().hex
         # Runtime type: "cpu", "gpu", "tpu"
         self.runtime_type: str = runtime_type
+        self.default_accelerator: str = default_accelerator
         # Dialeng server port for proxying dialoghelper HTTP calls
         self._dialeng_port: int = dialeng_port
         # Current init step description (for status reporting to UI)
@@ -143,6 +149,7 @@ class ColabKernel(BaseKernel):
         self._token_refresh_failures: int = 0
         self._recovery_task: Optional[asyncio.Task] = None
         self._recycle_reason: str = ""
+        self._session_store = ColabSessionStore()
 
     def _make_header(self, msg_type: str, msg_id: str = None) -> dict:
         """Build a Jupyter wire protocol message header with consistent session ID."""
@@ -152,12 +159,115 @@ class ColabKernel(BaseKernel):
             "username": "dialeng",
             "session": self._session_id,
             "date": "",
-            "version": "5.3",
+            "version": JUPYTER_WS_PROTOCOL_VERSION,
         }
 
     @property
     def connection_state(self) -> str:
         return self._connection_state
+
+    def _runtime_assignment_params(self) -> dict[str, str]:
+        runtime_map = {
+            "cpu": {"variant": "", "accelerator": ""},
+            "gpu": {"variant": Variant.GPU.value, "accelerator": Accelerator.T4.value},
+            "tpu": {"variant": Variant.TPU.value, "accelerator": ""},
+        }
+        params = runtime_map.get(self.runtime_type, runtime_map["cpu"]).copy()
+        if self.default_accelerator:
+            params["accelerator"] = self.default_accelerator
+            if not params["variant"]:
+                params["variant"] = Variant.GPU.value
+        return params
+
+    def _persist_session_metadata(self) -> None:
+        if not self._notebook_id or not self._assignment:
+            return
+        proxy = self._assignment.proxy_info
+        metadata = ColabSessionMetadata(
+            notebook_id=self._notebook_id,
+            endpoint=self._assignment.endpoint,
+            proxy_url=proxy.url,
+            proxy_token_expires_at=self._token_expires_at,
+            runtime_type=self.runtime_type,
+            accelerator=self._assignment.accelerator,
+            kernel_id=self._jupyter_session.kernel_id if self._jupyter_session else None,
+            jupyter_session_id=self._jupyter_session.session_id if self._jupyter_session else None,
+            connection_state=self._connection_state,
+            last_activity_at=self.last_activity_at,
+            last_activity_reason=self.last_activity_reason,
+        )
+        self._session_store.upsert(metadata)
+
+    def _remove_session_metadata(self) -> None:
+        if self._notebook_id:
+            self._session_store.remove(self._notebook_id)
+
+    async def _restore_persisted_assignment(self) -> bool:
+        """Restore a Dialeng-owned runtime assignment from persisted metadata."""
+        if not self._notebook_id or self._assignment:
+            return False
+        metadata = self._session_store.get(self._notebook_id)
+        if not metadata or not metadata.endpoint:
+            return False
+        if metadata.runtime_type and metadata.runtime_type != self.runtime_type:
+            logger.info(
+                "Ignoring persisted Colab runtime with mismatched runtime type "
+                "(notebook=%s, endpoint=%s, persisted=%s, current=%s)",
+                self._notebook_id,
+                metadata.endpoint,
+                metadata.runtime_type,
+                self.runtime_type,
+            )
+            self._remove_session_metadata()
+            return False
+
+        try:
+            proxy = await self._api.refresh_proxy_token(metadata.endpoint)
+        except Exception as e:
+            logger.warning(
+                "Could not refresh persisted Colab runtime proxy token "
+                "(notebook=%s, endpoint=%s): %s",
+                self._notebook_id,
+                metadata.endpoint,
+                e,
+            )
+            self._remove_session_metadata()
+            return False
+
+        self._assignment = ColabAssignment(
+            endpoint=metadata.endpoint,
+            proxy_info=proxy,
+            accelerator=metadata.accelerator,
+            variant=Variant.TPU.value if self.runtime_type == "tpu" else (
+                Variant.GPU.value if self.runtime_type == "gpu" else ""
+            ),
+        )
+        self._token_expires_at = time.time() + proxy.token_expires_seconds
+        if metadata.kernel_id and metadata.jupyter_session_id:
+            self._jupyter_session = JupyterSession(
+                session_id=metadata.jupyter_session_id,
+                kernel_id=metadata.kernel_id,
+                name="colab",
+            )
+        self._persist_session_metadata()
+        logger.info(
+            "Restored persisted Colab runtime metadata "
+            "(notebook=%s, endpoint=%s, kernel=%s)",
+            self._notebook_id,
+            self._assignment.endpoint,
+            self._jupyter_session.kernel_id if self._jupyter_session else None,
+        )
+        return True
+
+    def mark_activity(self, reason: str = "") -> None:
+        super().mark_activity(reason)
+        if self._notebook_id and self._assignment:
+            self._session_store.update(
+                self._notebook_id,
+                last_activity_at=self.last_activity_at,
+                last_activity_reason=reason,
+                connection_state=self._connection_state,
+            )
 
     async def assign_and_connect(self, max_retries: int = 5) -> None:
         """Assign a Colab runtime, create session, and connect WebSocket.
@@ -169,33 +279,41 @@ class ColabKernel(BaseKernel):
         if self._recovery_task and not self._recovery_task.done():
             await self._recovery_task
         self._connection_state = "connecting"
-        # Map runtime_type to Colab API variant + accelerator parameters
-        _RUNTIME_MAP = {
-            "cpu":  {"variant": "", "accelerator": ""},
-            "gpu":  {"variant": "GPU", "accelerator": "T4"},
-            "tpu":  {"variant": "TPU", "accelerator": ""},
-        }
-        rt = _RUNTIME_MAP.get(self.runtime_type, _RUNTIME_MAP["cpu"])
+        rt = self._runtime_assignment_params()
 
         from dialeng.services.colab.colab_api import ColabAPIError
 
         last_error = None
+        restored_assignment = await self._restore_persisted_assignment()
+        restored_session_id = self._jupyter_session.session_id if self._jupyter_session else None
         previous_runtime = self._assignment.endpoint if self._assignment else None
         for attempt in range(max_retries):
             try:
-                logger.info(
-                    "Assigning Colab runtime (attempt %s/%s, runtime_type=%s)",
-                    attempt + 1, max_retries, self.runtime_type,
-                )
+                if not self._assignment:
+                    logger.info(
+                        "Assigning Colab runtime (attempt %s/%s, runtime_type=%s)",
+                        attempt + 1, max_retries, self.runtime_type,
+                    )
 
-                # 1. Assign runtime via REST API (two-step XSRF)
-                self._assignment = await self._api.assign_kernel(
-                    variant=rt["variant"], accelerator=rt["accelerator"]
-                )
+                    # 1. Assign runtime via REST API (two-step XSRF)
+                    self._assignment = await self._api.assign_kernel(
+                        variant=rt["variant"], accelerator=rt["accelerator"]
+                    )
+                    restored_assignment = False
+                else:
+                    logger.info(
+                        "Using existing Colab runtime assignment "
+                        "(attempt %s/%s, endpoint=%s, restored=%s)",
+                        attempt + 1,
+                        max_retries,
+                        self._assignment.endpoint,
+                        restored_assignment,
+                    )
                 proxy = self._assignment.proxy_info
                 self._token_expires_at = time.time() + proxy.token_expires_seconds
                 self._keep_alive_failures = 0
                 self._token_refresh_failures = 0
+                self._persist_session_metadata()
 
                 if previous_runtime and previous_runtime != self._assignment.endpoint:
                     logger.warning(
@@ -203,10 +321,20 @@ class ColabKernel(BaseKernel):
                         previous_runtime, self._assignment.endpoint,
                     )
 
-                # 2. Create Jupyter session on the runtime
-                self._jupyter_session = await self._api.create_jupyter_session(
-                    proxy.url, proxy.token
-                )
+                # 2. Create or reuse a Jupyter session on the runtime.
+                if not self._jupyter_session:
+                    self._jupyter_session = await self._api.create_jupyter_session(
+                        proxy.url, proxy.token
+                    )
+                    restored_session_id = None
+                    self._persist_session_metadata()
+                else:
+                    logger.info(
+                        "Reattaching to persisted Colab Jupyter session "
+                        "(session=%s, kernel=%s)",
+                        self._jupyter_session.session_id,
+                        self._jupyter_session.kernel_id,
+                    )
 
                 # 3. Open WebSocket to runtime
                 await self._connect_websocket()
@@ -224,6 +352,7 @@ class ColabKernel(BaseKernel):
                 self._connection_state = "connected"
                 self._recycle_reason = ""
                 self.mark_activity("assign_and_connect")
+                self._persist_session_metadata()
                 logger.info(
                     "Connected to Colab runtime: endpoint=%s kernel=%s",
                     self._assignment.endpoint,
@@ -246,6 +375,22 @@ class ColabKernel(BaseKernel):
                 logger.error(f"Failed to connect to Colab: {e}")
                 raise
             except Exception as e:
+                if restored_assignment and restored_session_id and attempt < max_retries - 1:
+                    logger.warning(
+                        "Failed to reattach to persisted Colab kernel; creating a new "
+                        "Jupyter session on the same runtime (endpoint=%s): %s",
+                        self._assignment.endpoint if self._assignment else None,
+                        e,
+                    )
+                    if self._ws and not self._ws.closed:
+                        await self._ws.close()
+                    self._ws = None
+                    if self._ws_session and not self._ws_session.closed:
+                        await self._ws_session.close()
+                    self._ws_session = None
+                    self._jupyter_session = None
+                    restored_session_id = None
+                    continue
                 self._connection_state = "disconnected"
                 logger.exception("Failed to connect to Colab")
                 raise
@@ -262,9 +407,13 @@ class ColabKernel(BaseKernel):
         proxy = self._assignment.proxy_info
         # Convert https:// to wss://
         ws_base = proxy.url.replace("https://", "wss://").replace("http://", "ws://").rstrip("/")
+        query = urlencode({
+            "session_id": self._session_id,
+            "colab-runtime-proxy-token": proxy.token,
+        })
         ws_url = (
             f"{ws_base}/api/kernels/{self._jupyter_session.kernel_id}"
-            f"/channels?session_id={self._session_id}"
+            f"/channels?{query}"
         )
 
         self._ws_session = aiohttp.ClientSession()
@@ -274,6 +423,7 @@ class ColabKernel(BaseKernel):
                 "X-Colab-Runtime-Proxy-Token": proxy.token,
                 "X-Colab-Client-Agent": "dialeng",
             },
+            protocols=(JUPYTER_WS_DEFAULT_SUBPROTOCOL,),
             # No heartbeat - Colab's proxy may not handle WebSocket pings.
             # Connection is kept alive via HTTP keep-alive pings instead.
         )
@@ -636,25 +786,23 @@ class ColabKernel(BaseKernel):
             self._current_msg_id = None
 
     def interrupt(self) -> bool:
-        """Send interrupt_request to Colab kernel."""
-        if not self._ws or self._connection_state != "connected":
+        """Interrupt the Colab kernel through the runtime HTTP API."""
+        if not self._assignment or not self._jupyter_session:
             return False
-
-        interrupt_msg = {
-            "header": self._make_header("interrupt_request"),
-            "parent_header": {},
-            "metadata": {},
-            "content": {},
-            "channel": "control",
-        }
         try:
             asyncio.get_running_loop()
-            asyncio.create_task(self._ws.send_json(interrupt_msg))
+            asyncio.create_task(self._interrupt_async())
         except RuntimeError:
-            # No running loop - can't send async from sync context
             logger.warning("Cannot send interrupt: no running event loop")
             return False
         return True
+
+    async def _interrupt_async(self) -> None:
+        if not self._assignment or not self._jupyter_session:
+            return
+        proxy = self._assignment.proxy_info
+        await self._api.interrupt_kernel(proxy.url, proxy.token, self._jupyter_session.kernel_id)
+        self.mark_activity("interrupt")
 
     def restart(self) -> bool:
         """Restart Colab runtime by disconnecting and reconnecting.
@@ -670,8 +818,19 @@ class ColabKernel(BaseKernel):
         return True
 
     async def _restart_async(self):
+        if self._assignment and self._jupyter_session:
+            try:
+                proxy = self._assignment.proxy_info
+                await self._api.restart_kernel(proxy.url, proxy.token, self._jupyter_session.kernel_id)
+                self._execution_count = 0
+                self.mark_activity("restart")
+                self._persist_session_metadata()
+                return
+            except Exception as e:
+                logger.warning("Colab HTTP restart failed, reconnecting runtime: %s", e)
+
         await self.shutdown_async()
-        self._session_id = uuid.uuid4().hex  # Fresh session for new connection
+        self._session_id = uuid.uuid4().hex
         await self.assign_and_connect()
         self._execution_count = 0
 
@@ -709,13 +868,12 @@ class ColabKernel(BaseKernel):
         self._keep_alive_task = None
         self._token_refresh_task = None
 
-        if self._ws and not self._ws.closed:
-            await self._ws.close()
-        self._ws = None
-
-        if self._ws_session and not self._ws_session.closed:
-            await self._ws_session.close()
-        self._ws_session = None
+        if self._assignment:
+            try:
+                await self._api.unassign_kernel(self._assignment.endpoint)
+            except Exception as e:
+                logger.warning("Failed to unassign Colab runtime externally: %s", e)
+                await self._best_effort_in_kernel_unassign()
 
         if self._assignment and self._jupyter_session:
             proxy = self._assignment.proxy_info
@@ -725,13 +883,38 @@ class ColabKernel(BaseKernel):
         self._jupyter_session = None
 
         if self._assignment:
-            try:
-                await self._api.unassign_kernel(self._assignment.endpoint)
-            except Exception as e:
-                logger.warning(f"Failed to unassign Colab runtime: {e}")
             self._assignment = None
+            self._remove_session_metadata()
+
+        if self._ws and not self._ws.closed:
+            await self._ws.close()
+        self._ws = None
+
+        if self._ws_session and not self._ws_session.closed:
+            await self._ws_session.close()
+        self._ws_session = None
 
         self._connection_state = "disconnected"
+        if self._notebook_id:
+            self._session_store.update(self._notebook_id, connection_state="disconnected")
+
+    async def _best_effort_in_kernel_unassign(self) -> None:
+        """Ask Colab from inside the runtime to release itself."""
+        if not self._ws or self._ws.closed:
+            return
+        try:
+            await self._run_init_code(
+                "try:\n"
+                "    import google.colab.runtime as _dialeng_colab_runtime\n"
+                "    _dialeng_colab_runtime.unassign()\n"
+                "except Exception as _dialeng_unassign_error:\n"
+                "    print(f'dialeng in-kernel unassign failed: {_dialeng_unassign_error}')\n",
+                "in_kernel_unassign",
+                timeout=10.0,
+            )
+            logger.info("Requested Colab in-kernel runtime unassign fallback")
+        except Exception as e:
+            logger.warning("Colab in-kernel unassign fallback failed: %s", e)
 
     async def _keep_alive_loop(self):
         """HTTP keep-alive ping every 5 minutes."""
@@ -885,12 +1068,12 @@ class ColabKernel(BaseKernel):
 
     async def sync_project_files(
         self,
-        files: list[tuple[str, str]],
+        files: list[tuple[str, str | bytes]],
         *,
         notebook_id: str = "",
         remote_root: str = ".",
     ) -> dict:
-        """Upload project files into the Colab runtime."""
+        """Upload project files into the Colab runtime via Contents API."""
         if not files:
             return {
                 "status": "noop",
@@ -898,44 +1081,44 @@ class ColabKernel(BaseKernel):
                 "file_count": 0,
                 "total_bytes": 0,
                 "reason": "no files",
+                "transfer_method": "contents_api",
             }
 
-        code_parts = [
-            "import os, base64",
-            f"_dialeng_remote_root = os.path.abspath({remote_root!r})",
-            "os.makedirs(_dialeng_remote_root, exist_ok=True)",
-        ]
-        dirs_created = set()
+        if not self._assignment or not self._jupyter_session:
+            await self.assign_and_connect()
+        if not self._assignment:
+            raise RuntimeError("Colab runtime is not assigned")
+
+        proxy = self._assignment.proxy_info
+        root = "" if remote_root in ("", ".") else remote_root.strip("/")
+        dirs_created: set[str] = set()
         total_bytes = 0
 
         for rel_path, content in files:
-            total_bytes += len(content.encode("utf-8"))
-            parent = str(Path(rel_path).parent)
-            if parent not in dirs_created:
-                code_parts.append(
-                    f"os.makedirs(os.path.join(_dialeng_remote_root, {parent!r}), exist_ok=True)"
-                )
-                dirs_created.add(parent)
-            b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
-            code_parts.append(
-                "open("
-                f"os.path.join(_dialeng_remote_root, {rel_path!r}), 'w'"
-                ").write(base64.b64decode("
-                f"{b64!r}).decode('utf-8'))"
-            )
+            rel = Path(rel_path).as_posix().lstrip("/")
+            remote_path = f"{root}/{rel}" if root else rel
+            raw_size = len(content if isinstance(content, bytes) else content.encode("utf-8"))
+            total_bytes += raw_size
 
-        await self.run_setup_code(
-            "\n".join(code_parts),
-            notebook_id=notebook_id,
-            cell_id="_kernel_project_sync",
-            description="sync_project_files",
-        )
+            parent = Path(remote_path).parent.as_posix()
+            if parent and parent != ".":
+                parts = parent.split("/")
+                prefixes = ["/".join(parts[:idx]) for idx in range(1, len(parts) + 1)]
+                for directory in prefixes:
+                    if directory not in dirs_created:
+                        await self._api.contents_mkdir(proxy.url, proxy.token, directory)
+                        dirs_created.add(directory)
+
+            await self._api.contents_upload(proxy.url, proxy.token, remote_path, content)
+
         self.mark_activity("sync_project_files")
+        self._persist_session_metadata()
         return {
             "status": "ok",
             "remote_root": remote_root,
             "file_count": len(files),
             "total_bytes": total_bytes,
+            "transfer_method": "contents_api",
         }
 
     @property
@@ -958,6 +1141,10 @@ class ColabKernel(BaseKernel):
             kernel_type="colab",
             runtime_id=self._assignment.endpoint if self._assignment else None,
             connection_state=conn_state,
+            kernel_id=self._jupyter_session.kernel_id if self._jupyter_session else None,
+            jupyter_session_id=self._jupyter_session.session_id if self._jupyter_session else None,
+            token_expires_at=self._token_expires_at or None,
+            last_activity_at=self.last_activity_at or None,
         )
 
     def get_info(self) -> KernelInfo:

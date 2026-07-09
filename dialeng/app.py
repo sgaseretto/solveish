@@ -170,23 +170,39 @@ def _init_colab():
     # Resolve and validate OAuth credentials (validates defaults, auto-extracts from VSIX if needed)
     # Use a thread to avoid "cannot be called from a running event loop" in uvicorn workers
     def _resolve_creds():
-        return asyncio.run(resolve_oauth_credentials())
+        return asyncio.run(resolve_oauth_credentials(DIALENG_CONFIG.colab_auth_provider))
 
     def _validate_session(auth_service):
         return asyncio.run(auth_service.validate_session())
 
+    def _prune_metadata(manager):
+        return asyncio.run(manager.prune_stale_metadata())
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
         _colab_creds = _pool.submit(_resolve_creds).result()
 
-    colab_auth_service = ColabAuthService(credentials=_colab_creds)
+    colab_auth_service = ColabAuthService(
+        credentials=_colab_creds,
+        auth_provider=DIALENG_CONFIG.colab_auth_provider,
+    )
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
         validated = _pool.submit(_validate_session, colab_auth_service).result()
-    colab_session_manager = ColabSessionManager(colab_auth_service)
+    colab_session_manager = ColabSessionManager(
+        colab_auth_service,
+        default_accelerator=DIALENG_CONFIG.colab_default_accelerator,
+    )
+    if validated:
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+                _pool.submit(_prune_metadata, colab_session_manager).result()
+        except Exception as e:
+            logger.warning("Failed to prune Colab session metadata during startup: %s", e)
     kernel_service.set_colab_session_manager(colab_session_manager)
     print_colab_credential_status(_colab_creds)
     logger.info(
-        "Colab services initialized (oauth_source=%s, authenticated=%s, email=%s, validation_error=%s)",
+        "Colab services initialized (oauth_source=%s, auth_provider=%s, authenticated=%s, email=%s, validation_error=%s)",
         _colab_creds.source,
+        DIALENG_CONFIG.colab_auth_provider,
         validated,
         colab_auth_service.account_email,
         colab_auth_service.session_error,
@@ -477,6 +493,7 @@ def _get_auth_snapshot() -> dict:
             "has_tokens": False,
             "email": None,
             "validation_error": None,
+            "auth_provider": getattr(DIALENG_CONFIG, "colab_auth_provider", "oauth_local"),
         }
     return colab_auth_service.get_status()
 
@@ -584,6 +601,10 @@ def _build_kernel_snapshot(nb_id: str) -> dict:
             "is_busy": kernel_is_busy,
             "execution_count": kernel_status.execution_count if kernel_status else 0,
             "runtime_id": kernel_status.runtime_id if kernel_status else None,
+            "kernel_id": kernel_status.kernel_id if kernel_status else None,
+            "jupyter_session_id": kernel_status.jupyter_session_id if kernel_status else None,
+            "token_expires_at": kernel_status.token_expires_at if kernel_status else None,
+            "last_activity_at": kernel_status.last_activity_at if kernel_status else None,
             "connection_state": connection_state,
             "connection_detail": connection_detail,
             "display_state": display_state,
@@ -782,7 +803,8 @@ def get_notebook(notebook_id: str) -> Notebook:
             notebooks[notebook_id] = nb
         else:
             nb = Notebook(id=notebook_id, title=notebook_id,
-                         dialog_mode=DEFAULT_DIALOG_MODE, model=DEFAULT_MODEL)
+                         dialog_mode=DEFAULT_DIALOG_MODE, model=DEFAULT_MODEL,
+                         colab_runtime_type=DIALENG_CONFIG.colab_default_runtime)
             nb.cells = [
                 Cell(cell_type="note", source="# Welcome to Dialeng! 🚀\n\nAn open-source notebook with **prompt cells** for AI interaction.\n\n**Keyboard Shortcuts (Jupyter-style):**\n- `Shift+Enter` - Run cell (recommended)\n- `Ctrl/Cmd+Enter` - Run cell (alternative)\n- `Ctrl/Cmd+S` - Save notebook\n- `D D` - Delete cell (press D twice)\n- `Ctrl/Cmd+Shift+C` - Add code cell\n- `Ctrl/Cmd+Shift+N` - Add note cell\n- `Ctrl/Cmd+Shift+P` - Add prompt cell\n- `Alt+↑/↓` - Move cell up/down\n- `Escape` - Exit edit mode\n- Double-click - Edit markdown/response"),
                 Cell(cell_type="code", source="# Try running some Python (Shift+Enter)\nx = [1, 2, 3, 4, 5]\nprint(f'Sum: {sum(x)}')\nprint(f'Average: {sum(x)/len(x)}')\nx", output_collapse=1),
@@ -1422,7 +1444,8 @@ def get(dir: str = "", name: str = ""):
     notebooks.pop(new_id, None)
 
     nb = Notebook(id=new_id, title=display_name,
-                  dialog_mode=DEFAULT_DIALOG_MODE, model=DEFAULT_MODEL)
+                  dialog_mode=DEFAULT_DIALOG_MODE, model=DEFAULT_MODEL,
+                  colab_runtime_type=DIALENG_CONFIG.colab_default_runtime)
 
     # Load cells from TEMPLATE.ipynb (parent-first hierarchy)
     from dialeng.services.template_service import find_templates, load_template_cells
@@ -2007,6 +2030,8 @@ async def post(nb_id: str, kernel_type: str):
     logger.info("Switching kernel type (notebook=%s, kernel_type=%s)", nb_id, kernel_type)
     await _invalidate_kernel_background_work(nb_id, reason=f"kernel_type:{kernel_type}")
     nb.kernel_type = kernel_type
+    if kernel_type == "colab" and not getattr(nb, "colab_runtime_type", ""):
+        nb.colab_runtime_type = DIALENG_CONFIG.colab_default_runtime
     runtime_type = nb.colab_runtime_type
     await kernel_service.set_kernel_type(nb_id, kernel_type, runtime_type=runtime_type)
 
@@ -2135,6 +2160,35 @@ def get(request):
     """Initiate Google OAuth2 flow for Colab access."""
     if not colab_auth_service:
         return Div("Colab integration not configured", cls="status error")
+    if colab_auth_service.auth_provider == "adc":
+        return Titled(
+            "Colab ADC Authentication",
+            Div(
+                "Colab is configured to use Application Default Credentials. Run "
+                "`gcloud auth application-default login` with Colab scopes if it is not authenticated.",
+                cls="status",
+            ),
+            A("← Back to Dialeng", href="/"),
+        )
+    if colab_auth_service.auth_provider == "oauth_remote":
+        state = colab_auth_service.create_auth_state()
+        auth_url = colab_auth_service.get_remote_auth_url(state=state)
+        return Titled(
+            "Connect Colab",
+            Div(
+                P("Open the authorization URL, approve access, then paste the code Google displays."),
+                A("Open Google authorization", href=auth_url, target="_blank", cls="btn btn-primary"),
+                Form(
+                    Input(type="hidden", name="state", value=state),
+                    Input(type="text", name="code", placeholder="Paste authorization code", cls="setting-text"),
+                    Button("Connect Colab", type="submit", cls="btn btn-primary"),
+                    method="post",
+                    action="/auth/google/remote",
+                    cls="remote-oauth-form",
+                ),
+                cls="remote-oauth-panel",
+            ),
+        )
     state = colab_auth_service.create_auth_state()
     # Derive redirect URI from the actual request so it works on any port
     redirect_uri = f"{request.url.scheme}://{request.url.netloc}/auth/google/callback"
@@ -2178,6 +2232,34 @@ window.close();
         return Titled("Authentication Error",
                        Div(f"Failed to exchange token: {e}", cls="status error"),
                        A("← Back to Dialeng", href="/"))
+
+@rt("/auth/google/remote")
+async def post(code: str = "", state: str = ""):
+    """Handle copy-paste OAuth code flow."""
+    if not colab_auth_service:
+        return Titled("Error", Div("Colab integration not configured", cls="status error"))
+    if colab_auth_service.auth_provider != "oauth_remote":
+        return Titled("Authentication Error", Div("Remote OAuth is not enabled.", cls="status error"))
+    if not colab_auth_service.validate_auth_state(state):
+        return Titled("Authentication Error",
+                       Div("Invalid or expired OAuth state. Please retry authentication.", cls="status error"))
+    if not code.strip():
+        return Titled("Authentication Error", Div("No authorization code provided.", cls="status error"))
+    try:
+        await colab_auth_service.handle_remote_code(code.strip())
+        await _mark_all_outlines_dirty("colab_remote_auth_success")
+        from starlette.responses import HTMLResponse
+        return HTMLResponse("""<!DOCTYPE html><html><body>
+<script>
+try { localStorage.setItem('colab-auth-event', Date.now().toString()); } catch(e) {}
+if (window.opener) { window.opener.postMessage('colab-authenticated', '*'); }
+</script>
+<p>Authenticated. You can close this window.</p>
+</body></html>""")
+    except Exception as e:
+        return Titled("Authentication Error",
+                       Div(f"Failed to exchange remote auth code: {e}", cls="status error"),
+                       A("← Retry", href="/auth/google"))
 
 @rt("/auth/google/logout")
 async def post():
@@ -2327,17 +2409,42 @@ async def post(request):
 
         # Lazily initialize or tear down Colab services based on new config
         colab_changed = False
+        active_auth_provider = getattr(colab_auth_service, "auth_provider", None)
+        provider_changed = (
+            DIALENG_CONFIG.colab_enabled
+            and colab_auth_service is not None
+            and active_auth_provider != DIALENG_CONFIG.colab_auth_provider
+        )
+        if provider_changed:
+            if colab_session_manager:
+                await colab_session_manager.shutdown_all()
+            colab_auth_service = None
+            colab_session_manager = None
+            kernel_service.set_colab_session_manager(None)
+
         if DIALENG_CONFIG.colab_enabled and colab_auth_service is None:
             from dialeng.services.colab import ColabAuthService, ColabSessionManager
             from dialeng.services.colab.colab_auth import resolve_oauth_credentials
-            _creds = await resolve_oauth_credentials()
-            colab_auth_service = ColabAuthService(credentials=_creds)
+            _creds = await resolve_oauth_credentials(DIALENG_CONFIG.colab_auth_provider)
+            colab_auth_service = ColabAuthService(
+                credentials=_creds,
+                auth_provider=DIALENG_CONFIG.colab_auth_provider,
+            )
             await colab_auth_service.validate_session()
-            colab_session_manager = ColabSessionManager(colab_auth_service)
+            colab_session_manager = ColabSessionManager(
+                colab_auth_service,
+                default_accelerator=DIALENG_CONFIG.colab_default_accelerator,
+            )
+            if colab_auth_service.is_authenticated:
+                try:
+                    await colab_session_manager.prune_stale_metadata()
+                except Exception as e:
+                    logger.warning("Failed to prune Colab session metadata from settings: %s", e)
             kernel_service.set_colab_session_manager(colab_session_manager)
             logger.info(
-                "Colab services initialized from settings (oauth_source=%s, authenticated=%s, email=%s, validation_error=%s)",
+                "Colab services initialized from settings (oauth_source=%s, auth_provider=%s, authenticated=%s, email=%s, validation_error=%s)",
                 _creds.source,
+                DIALENG_CONFIG.colab_auth_provider,
                 colab_auth_service.is_authenticated,
                 colab_auth_service.account_email,
                 colab_auth_service.session_error,

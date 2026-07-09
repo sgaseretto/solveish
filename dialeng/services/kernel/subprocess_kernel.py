@@ -212,13 +212,16 @@ class SubprocessKernel(BaseKernel):
 
     async def sync_project_files(
         self,
-        files: list[tuple[str, str]],
+        files: list[tuple[str, str | bytes]],
         *,
         notebook_id: str = "",
         remote_root: str = ".",
     ) -> dict:
         """Local kernels read project files directly from disk."""
-        total_bytes = sum(len(content.encode("utf-8")) for _, content in files)
+        total_bytes = sum(
+            len(content if isinstance(content, bytes) else content.encode("utf-8"))
+            for _, content in files
+        )
         self.mark_activity("sync_project_files:noop")
         return {
             "status": "noop",

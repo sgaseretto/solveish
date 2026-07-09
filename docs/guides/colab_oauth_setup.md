@@ -4,12 +4,14 @@
 
 Dialeng ships with built-in OAuth credentials from the [Colab VS Code extension](https://github.com/googlecolab/colab-vscode). In most cases, these work automatically — Dialeng validates them at startup and auto-updates them if Google rotates them.
 
-You only need your own credentials if:
+You only need your own local OAuth credentials if:
 
 - The built-in credentials have been rotated **and** auto-update from the VSIX fails
 - You see a startup warning: `Colab OAuth: credentials may be invalid`
 - You want to use your own Google Cloud project for tracking/quota
 - You are in a restricted network that blocks [Open VSX](https://open-vsx.org)
+
+Dialeng also supports `oauth_remote` for copy-paste authentication on headless servers and `adc` for Google Application Default Credentials. Those modes still need credentials with the Colab scopes listed below, but they do not require a localhost callback.
 
 ## Step-by-Step Setup
 
@@ -35,9 +37,12 @@ You only need your own credentials if:
    - **User support email**: your email
    - **Developer contact**: your email
 4. Click **Add or Remove Scopes** and add these scopes:
-   - `profile`
-   - `email`
+   - `openid`
+   - `https://www.googleapis.com/auth/userinfo.profile`
+   - `https://www.googleapis.com/auth/userinfo.email`
+   - `https://www.googleapis.com/auth/cloud-platform`
    - `https://www.googleapis.com/auth/colaboratory`
+   - `https://www.googleapis.com/auth/drive.file`
 5. Under **Test users**, add your Google account email
 6. Save and continue
 
@@ -69,6 +74,29 @@ Restart Dialeng. You should see:
 ```
 
 Then click **Connect Colab** to authenticate with your new credentials.
+
+## Auth Provider Modes
+
+Set the provider in `dialeng_config.json`:
+
+```json
+{
+  "colab": {
+    "enabled": true,
+    "auth_provider": "oauth_local",
+    "default_runtime": "cpu",
+    "default_accelerator": ""
+  }
+}
+```
+
+| Provider | When to use it | Notes |
+|----------|----------------|-------|
+| `oauth_local` | Normal local development | Opens Google OAuth in the browser and redirects to `/auth/google/callback` on the Dialeng server |
+| `oauth_remote` | SSH/headless use | `/auth/google` shows an authorization URL and a form for pasting Google's code; the exchange uses Google's remote copy-paste redirect URI |
+| `adc` | Machines already configured with Google ADC | Uses `google-auth`; run `gcloud auth application-default login --scopes=openid,https://www.googleapis.com/auth/userinfo.profile,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/colaboratory,https://www.googleapis.com/auth/drive.file` if credentials are missing or scoped too narrowly |
+
+`DIALENG_COLAB_AUTH_PROVIDER` overrides the config file, which is useful when running the same project locally and on a remote host.
 
 ## Troubleshooting
 

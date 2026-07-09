@@ -25,6 +25,7 @@ import re
 import time
 import logging
 import zipfile
+import enum
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
@@ -54,10 +55,14 @@ GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 COLAB_SCOPES = [
-    "profile",
-    "email",
-    "https://www.googleapis.com/auth/colaboratory"
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/cloud-platform",
+    "https://www.googleapis.com/auth/colaboratory",
+    "https://www.googleapis.com/auth/drive.file",
 ]
+REMOTE_REDIRECT_URI = "https://sdk.cloud.google.com/applicationdefaultauthcode.html"
 TOKEN_DIR = Path.home() / ".dialeng"
 TOKEN_FILE = TOKEN_DIR / "colab_tokens.json"
 OAUTH_CACHE_FILE = TOKEN_DIR / "colab_oauth_client.json"
@@ -66,6 +71,12 @@ OPEN_VSX_API_URL = "https://open-vsx.org/api/Google/colab"
 CREDENTIAL_VALIDATION_TIMEOUT = 5.0  # seconds
 VSIX_DOWNLOAD_TIMEOUT = 15.0  # seconds
 REFRESH_BUFFER_SECONDS = 300  # Refresh 5 minutes before expiry
+
+
+class ColabAuthProvider(str, enum.Enum):
+    OAUTH_LOCAL = "oauth_local"
+    OAUTH_REMOTE = "oauth_remote"
+    ADC = "adc"
 
 
 # ============================================================================
@@ -77,7 +88,7 @@ class OAuthClientCredentials:
     """Resolved OAuth2 client credentials with provenance."""
     client_id: str
     client_secret: str
-    source: str  # "env", "cache", "vsix", "default"
+    source: str  # "env", "cache", "vsix", "default", "adc"
     valid: bool = True
     warning: Optional[str] = None
 
@@ -201,7 +212,7 @@ def save_cached_credentials(client_id: str, client_secret: str, source: str, vsi
     OAUTH_CACHE_FILE.chmod(0o600)
 
 
-async def resolve_oauth_credentials() -> OAuthClientCredentials:
+async def resolve_oauth_credentials(provider: str = "oauth_local") -> OAuthClientCredentials:
     """Resolve and validate OAuth2 client credentials through priority cascade.
 
     Priority:
@@ -211,6 +222,10 @@ async def resolve_oauth_credentials() -> OAuthClientCredentials:
     4. VSIX extraction (download, extract, validate, cache)
     5. Fallback to defaults with warning
     """
+    if provider == ColabAuthProvider.ADC.value:
+        logger.info("Using Colab Application Default Credentials provider")
+        return OAuthClientCredentials("", "", source="adc")
+
     # 1. Environment variables — highest priority, skip validation
     env_id = os.environ.get("COLAB_CLIENT_ID")
     env_secret = os.environ.get("COLAB_CLIENT_SECRET")
@@ -320,7 +335,12 @@ class ColabAuthService:
     """
 
     def __init__(self, redirect_uri: str = "http://localhost:8000/auth/google/callback",
-                 credentials: Optional[OAuthClientCredentials] = None):
+                 credentials: Optional[OAuthClientCredentials] = None,
+                 auth_provider: str = "oauth_local"):
+        if auth_provider not in {provider.value for provider in ColabAuthProvider}:
+            logger.warning("Invalid Colab auth provider %r; falling back to oauth_local", auth_provider)
+            auth_provider = ColabAuthProvider.OAUTH_LOCAL.value
+        self.auth_provider = auth_provider
         if credentials:
             self.client_id = credentials.client_id
             self.client_secret = credentials.client_secret
@@ -333,15 +353,24 @@ class ColabAuthService:
         self._validated: bool = False
         self._session_error: Optional[str] = None
         self._pending_states: set[str] = set()
-        self._load_tokens()
+        self._adc_credentials = None
+        self._adc_access_token: Optional[str] = None
+        self._adc_expires_at: float = 0.0
+        self._adc_account_email: Optional[str] = None
+        if self.auth_provider != ColabAuthProvider.ADC.value:
+            self._load_tokens()
 
     @property
     def is_authenticated(self) -> bool:
         """Whether we have a validated session."""
+        if self.auth_provider == ColabAuthProvider.ADC.value:
+            return self._validated and self._session_error is None
         return self._tokens is not None and self._validated
 
     @property
     def account_email(self) -> Optional[str]:
+        if self.auth_provider == ColabAuthProvider.ADC.value:
+            return self._adc_account_email
         return self._tokens.account_email if self._tokens else None
 
     @property
@@ -363,7 +392,8 @@ class ColabAuthService:
         self._pending_states.discard(state)
         return True
 
-    def get_auth_url(self, state: str = "", redirect_uri: str = None) -> str:
+    def get_auth_url(self, state: str = "", redirect_uri: str = None,
+                     remote: bool = False) -> str:
         """Generate Google OAuth2 authorization URL.
 
         Args:
@@ -373,17 +403,24 @@ class ColabAuthService:
         Returns:
             Full authorization URL to redirect user to
         """
+        use_remote = remote or self.auth_provider == ColabAuthProvider.OAUTH_REMOTE.value
         params = {
             "client_id": self.client_id,
-            "redirect_uri": redirect_uri or self.redirect_uri,
+            "redirect_uri": REMOTE_REDIRECT_URI if use_remote else (redirect_uri or self.redirect_uri),
             "response_type": "code",
             "scope": " ".join(COLAB_SCOPES),
             "access_type": "offline",  # Get refresh token
             "prompt": "consent",  # Always show consent to get refresh token
         }
+        if use_remote:
+            params["token_usage"] = "remote"
         if state:
             params["state"] = state
         return f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
+
+    def get_remote_auth_url(self, state: str = "") -> str:
+        """Generate a copy-paste OAuth URL for headless/remote servers."""
+        return self.get_auth_url(state=state, remote=True)
 
     async def handle_callback(self, code: str, redirect_uri: str = None) -> ColabTokens:
         """Exchange authorization code for tokens.
@@ -429,6 +466,10 @@ class ColabAuthService:
         )
         return self._tokens
 
+    async def handle_remote_code(self, code: str) -> ColabTokens:
+        """Exchange a pasted remote OAuth authorization code for tokens."""
+        return await self.handle_callback(code, redirect_uri=REMOTE_REDIRECT_URI)
+
     async def get_access_token(self) -> str:
         """Get a valid access token, refreshing if needed.
 
@@ -438,6 +479,8 @@ class ColabAuthService:
         Raises:
             ColabNotAuthenticatedError: If not authenticated
         """
+        if self.auth_provider == ColabAuthProvider.ADC.value:
+            return await self._get_adc_access_token()
         if self._tokens is None:
             raise ColabNotAuthenticatedError("Not authenticated with Google. Click 'Connect Colab' to sign in.")
         if not self._validated:
@@ -457,6 +500,27 @@ class ColabAuthService:
         the session remains usable if tokens are present, but the validation error
         is retained for diagnostics.
         """
+        if self.auth_provider == ColabAuthProvider.ADC.value:
+            try:
+                token = await self._get_adc_access_token()
+                try:
+                    profile = await self._fetch_profile(token)
+                    self._adc_account_email = profile.get("email") or self._adc_account_email
+                except Exception as e:
+                    logger.warning("Could not refresh ADC profile: %s", e)
+                self._validated = True
+                self._session_error = None
+                logger.info(
+                    "Validated Colab ADC session%s",
+                    f" for {self.account_email}" if self.account_email else "",
+                )
+                return True
+            except Exception as e:
+                self._validated = False
+                self._session_error = f"Could not validate Colab ADC credentials: {e}"
+                logger.warning(self._session_error)
+                return False
+
         if self._tokens is None:
             self._validated = False
             self._session_error = "Not authenticated with Google."
@@ -512,18 +576,55 @@ class ColabAuthService:
             logger.warning(self._session_error)
             return self._validated
 
+    async def _fetch_profile(self, access_token: str) -> dict:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                GOOGLE_USERINFO_URL,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            response.raise_for_status()
+            return response.json()
+
     async def _refresh_profile(self) -> None:
         """Refresh the stored user profile for the active access token."""
         if not self._tokens:
             return
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                GOOGLE_USERINFO_URL,
-                headers={"Authorization": f"Bearer {self._tokens.access_token}"},
-            )
-            response.raise_for_status()
-            data = response.json()
+        data = await self._fetch_profile(self._tokens.access_token)
         self._tokens.account_email = data.get("email") or self._tokens.account_email
+
+    async def _get_adc_access_token(self) -> str:
+        """Resolve and refresh Google Application Default Credentials."""
+        try:
+            import google.auth
+            from google.auth.transport.requests import Request
+        except ImportError as exc:
+            raise ColabNotAuthenticatedError(
+                "google-auth is required for Colab ADC auth. Install Dialeng dependencies with uv."
+            ) from exc
+
+        now = time.time()
+        if self._adc_access_token and now < self._adc_expires_at - REFRESH_BUFFER_SECONDS:
+            return self._adc_access_token
+
+        if self._adc_credentials is None:
+            creds, _ = google.auth.default(scopes=list(COLAB_SCOPES))
+            if getattr(creds, "requires_scopes", False):
+                creds = creds.with_scopes(list(COLAB_SCOPES))
+            self._adc_credentials = creds
+
+        self._adc_credentials.refresh(Request())
+        token = getattr(self._adc_credentials, "token", None)
+        if not token:
+            raise ColabNotAuthenticatedError("ADC credentials did not produce an access token.")
+
+        expiry = getattr(self._adc_credentials, "expiry", None)
+        self._adc_access_token = token
+        self._adc_expires_at = expiry.timestamp() if expiry else time.time() + 3600
+        self._adc_account_email = (
+            getattr(self._adc_credentials, "service_account_email", None)
+            or self._adc_account_email
+        )
+        return token
 
     async def _refresh_token(self):
         """Refresh the access token using the refresh token."""
@@ -597,6 +698,9 @@ class ColabAuthService:
         """Clear stored tokens."""
         self._tokens = None
         self._validated = False
+        self._adc_credentials = None
+        self._adc_access_token = None
+        self._adc_expires_at = 0.0
         if clear_error:
             self._session_error = None
         if TOKEN_FILE.exists():
@@ -608,7 +712,8 @@ class ColabAuthService:
         return {
             "enabled": True,
             "authenticated": self.is_authenticated,
-            "has_tokens": self._tokens is not None,
+            "has_tokens": self._tokens is not None or self.auth_provider == ColabAuthProvider.ADC.value,
             "email": self.account_email,
             "validation_error": self._session_error,
+            "auth_provider": self.auth_provider,
         }

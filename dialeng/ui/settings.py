@@ -220,6 +220,17 @@ def SettingsSidebar(config: DialengConfig):
         ("standard", "Standard"),
     ]
 
+    colab_auth_options = [
+        ("oauth_local", "Browser OAuth (local callback)"),
+        ("oauth_remote", "Browser OAuth (copy/paste code)"),
+        ("adc", "Application Default Credentials"),
+    ]
+    colab_runtime_options = [
+        ("cpu", "CPU"),
+        ("gpu", "GPU"),
+        ("tpu", "TPU"),
+    ]
+
     return Aside(
         # Header with close button
         Div(
@@ -303,6 +314,15 @@ def SettingsSidebar(config: DialengConfig):
                     SettingToggle("Enable Colab", "colab.enabled",
                                   config.colab_enabled,
                                   help_text="Enable Google Colab as a remote kernel. Save to reload — a 'Connect Google' button will appear in the toolbar."),
+                    SettingSelect("Auth Provider", "colab.auth_provider",
+                                  colab_auth_options, config.colab_auth_provider,
+                                  "oauth_local is the default. oauth_remote works better for headless/remote servers. adc uses gcloud application-default credentials."),
+                    SettingSelect("Default Runtime", "colab.default_runtime",
+                                  colab_runtime_options, config.colab_default_runtime,
+                                  "Runtime selected by default for new Colab notebooks."),
+                    SettingText("Default Accelerator", "colab.default_accelerator",
+                                config.colab_default_accelerator,
+                                "Optional override such as T4, L4, A100, H100, V5E1, or V6E1."),
                     open=False
                 ),
 

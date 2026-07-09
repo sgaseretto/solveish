@@ -32,6 +32,10 @@ class KernelStatus:
     # Remote-specific fields
     runtime_id: Optional[str] = None
     connection_state: Optional[str] = None  # "disconnected" | "connecting" | "connected"
+    kernel_id: Optional[str] = None
+    jupyter_session_id: Optional[str] = None
+    token_expires_at: Optional[float] = None
+    last_activity_at: Optional[float] = None
 
 
 class BaseKernel(ABC):
@@ -174,13 +178,16 @@ class BaseKernel(ABC):
 
     async def sync_project_files(
         self,
-        files: list[tuple[str, str]],
+        files: list[tuple[str, str | bytes]],
         *,
         notebook_id: str = "",
         remote_root: str = ".",
     ) -> dict:
         """Sync project files into the kernel environment when needed."""
-        total_bytes = sum(len(content.encode("utf-8")) for _, content in files)
+        total_bytes = sum(
+            len(content if isinstance(content, bytes) else content.encode("utf-8"))
+            for _, content in files
+        )
         return {
             "status": "noop",
             "remote_root": remote_root,
