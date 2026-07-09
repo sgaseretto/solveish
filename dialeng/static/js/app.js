@@ -2307,6 +2307,8 @@ function refreshKernelChrome({ refreshModal = true } = {}) {
 function applyNotebookSnapshot(notebook, previousNotebook = null) {
     if (!notebook) return;
 
+    applyCellVersions(notebook.cell_versions || {});
+
     const modeSelect = document.getElementById('mode-select');
     if (modeSelect && modeSelect.value !== notebook.dialog_mode) {
         modeSelect.value = notebook.dialog_mode;
@@ -2331,6 +2333,18 @@ function applyNotebookSnapshot(notebook, previousNotebook = null) {
     if (!previousNotebook || previousNotebook.kernel_type !== notebook.kernel_type) {
         handleKernelTypeChanged(notebook.kernel_type);
     }
+}
+
+function updateCellVersion(cellId, version) {
+    if (!cellId || version === undefined || version === null) return;
+    const versionInput = document.getElementById(`version-${cellId}`);
+    if (versionInput) versionInput.value = String(version);
+}
+
+function applyCellVersions(cellVersions) {
+    Object.entries(cellVersions || {}).forEach(([cellId, version]) => {
+        updateCellVersion(cellId, version);
+    });
 }
 
 function syncCurrentExplorerKernelState(snapshot) {
@@ -2862,6 +2876,7 @@ function connectWebSocket(notebookId) {
         } else if (data.type === 'prompt_output_update') {
             console.log('[WS] prompt_output_update received for cell:', data.cell_id, 'version:', data.version);
             applyPromptOutputUpdate(data.cell_id, data.output);
+            updateCellVersion(data.cell_id, data.version);
         } else if (data.type === 'prompt_stream_start') {
             // Prompt cell LLM generation started (e.g., from _add_msg_unsafe with run_mode='run').
             // Shows "Generating..." indicator so the user knows the LLM is working.
@@ -2970,6 +2985,11 @@ function connectWebSocket(notebookId) {
             // Also update hidden textarea
             const textarea = document.getElementById(`source-${data.cell_id}`);
             if (textarea) textarea.value = data.source;
+            updateCellVersion(data.cell_id, data.version);
+        } else if (data.type === 'cell_conflict') {
+            console.warn('[WS] cell_conflict received:', data);
+            updateCellVersion(data.cell_id, data.actual_version ?? data.version);
+            showKernelStatusMessage('That cell changed in another tab. Dialeng kept the newer backend version.', 'warning', 7000);
         } else if (data.type === 'cell_class_update') {
             // Update cell wrapper CSS classes (skipped, pinned, etc) without DOM replacement
             const cellEl = document.getElementById(`cell-${data.cell_id}`);
@@ -3011,6 +3031,7 @@ function connectWebSocket(notebookId) {
             if (!reconcileCellStructure({ orderedIds: data.ordered_cell_ids || [] })) {
                 return;
             }
+            applyCellVersions(data.cell_versions || {});
 
             // Focus the neighbor cell in "command mode" (selected but not editing)
             // so the user can keep pressing DD to delete more cells.
@@ -3032,6 +3053,7 @@ function connectWebSocket(notebookId) {
             })) {
                 return;
             }
+            applyCellVersions(data.cell_versions || {});
             if (data.cell_id) {
                 setFocusedCell(data.cell_id);
             }
@@ -3047,6 +3069,7 @@ function connectWebSocket(notebookId) {
             })) {
                 return;
             }
+            applyCellVersions(data.cell_versions || {});
 
             // If Shift+Enter created this cell at the end, keep the current
             // viewport stable through the structural reconcile, then reveal the
@@ -4547,15 +4570,30 @@ async function saveOpenFile() {
     if (saveBtn) saveBtn.disabled = true;
 
     try {
+        const params = new URLSearchParams({
+            path,
+            client_id: clientId,
+            content: textarea.value,
+            expected_mtime_ns: document.getElementById('file-editor-mtime-ns')?.value || '-1',
+            expected_size: document.getElementById('file-editor-size')?.value || '-1',
+        });
         const resp = await fetch('/dialeng/file/save', {
             method: 'POST',
             headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            body: `path=${encodeURIComponent(path)}&client_id=${encodeURIComponent(clientId)}&content=${encodeURIComponent(textarea.value)}`
+            body: params.toString()
         });
         const data = await resp.json();
         showKernelStatusMessage(data.message || (data.ok ? 'File saved.' : 'Save failed.'), data.ok ? 'success' : 'error', 3000);
+        if (data.ok) {
+            const mtimeInput = document.getElementById('file-editor-mtime-ns');
+            const sizeInput = document.getElementById('file-editor-size');
+            if (mtimeInput && data.mtime_ns !== undefined) mtimeInput.value = String(data.mtime_ns);
+            if (sizeInput && data.size !== undefined) sizeInput.value = String(data.size);
+        }
         if (!data.ok && data.status === 'locked') {
             fileEditorOwnsLock = false;
+            reloadFileEditorView();
+        } else if (!data.ok && data.status === 'conflict') {
             reloadFileEditorView();
         }
     } catch (err) {

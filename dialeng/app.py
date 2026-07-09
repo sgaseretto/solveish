@@ -50,7 +50,9 @@ from dialeng.services.dialeng_config import (
 from dialeng.services.shell_service import (
     SHFMT_AVAILABLE, warn_missing_shfmt, print_shfmt_status
 )
+from dialeng.services.broadcast_service import BroadcastManager
 from dialeng.services.file_editor_service import FileEditorService
+from dialeng.services.operation_log import elapsed_ms, log_operation, new_operation_id
 
 # UI Components (extracted to ui/ package)
 from dialeng.ui import (
@@ -235,13 +237,7 @@ def _make_state_callback(nb_id: str):
     async def callback(cell, state):
         if state == CellState.RUNNING:
             # Send code_stream_start when execution begins
-            if nb_id in ws_connections and ws_connections[nb_id]:
-                msg = json.dumps({"type": "code_stream_start", "cell_id": cell.id})
-                for send in list(ws_connections[nb_id]):
-                    try:
-                        await send(msg)
-                    except:
-                        pass
+            await broadcast_json(nb_id, {"type": "code_stream_start", "cell_id": cell.id})
 
         await broadcast_cell_state(nb_id, cell.id, state)
         await broadcast_queue_state(nb_id)
@@ -262,13 +258,7 @@ async def finalize_cell_execution(nb_id: str, cell, has_error: bool):
     cell.time_run = datetime.now().strftime("%H:%M:%S")
 
     # Send code_stream_end signal
-    if nb_id in ws_connections and ws_connections[nb_id]:
-        msg = json.dumps({"type": "code_stream_end", "cell_id": cell.id, "has_error": has_error})
-        for send in list(ws_connections[nb_id]):
-            try:
-                await send(msg)
-            except:
-                pass
+    await broadcast_json(nb_id, {"type": "code_stream_end", "cell_id": cell.id, "has_error": has_error})
 
     # Broadcast output + header via targeted OOB swaps (preserves Monaco editor DOM)
     await broadcast_to_notebook(nb_id, CellOutputOOB(cell))
@@ -343,6 +333,7 @@ def set_root_dir(root: Path):
 
 # Track active WebSocket connections per notebook (list of send functions)
 ws_connections: Dict[str, List[Any]] = {}
+broadcast_manager = BroadcastManager(ws_connections)
 
 # Track cancelled cell generations
 cancelled_cells: set = set()
@@ -353,6 +344,7 @@ kernel_setup_state: Dict[str, Dict[str, Any]] = {}
 kernel_setup_tasks: Dict[str, asyncio.Task] = {}
 kernel_sync_tasks: Dict[str, asyncio.Task] = {}
 kernel_generations: Dict[str, int] = {}
+notebook_revisions: Dict[str, int] = {}
 outline_revisions: Dict[str, int] = {}
 server_shutdown_started = False
 
@@ -416,9 +408,10 @@ async def _teardown_notebook_runtime(nb_id: str, reason: str) -> None:
     kernel_sync_tasks.pop(nb_id, None)
     kernel_setup_state.pop(nb_id, None)
     kernel_generations.pop(nb_id, None)
+    notebook_revisions.pop(nb_id, None)
     outline_revisions.pop(nb_id, None)
     data_queues.pop(nb_id, None)
-    ws_connections.pop(nb_id, None)
+    broadcast_manager.drop_notebook(nb_id)
     logger.info(
         "Notebook runtime torn down (notebook=%s, reason=%s, invalidated_generation=%s)",
         nb_id,
@@ -521,12 +514,36 @@ def _build_notebook_snapshot(nb_id: str) -> dict:
     nb = get_notebook(nb_id)
     return {
         "title": nb.title,
+        "revision": _get_notebook_revision(nb_id),
+        "ordered_cell_ids": _ordered_cell_ids(nb),
+        "cell_versions": {cell.id: cell.version for cell in nb.cells},
         "dialog_mode": nb.dialog_mode,
         "model": nb.model,
         "safe_mode": nb.safe_mode,
         "kernel_type": getattr(nb, "kernel_type", "local"),
         "colab_runtime_type": getattr(nb, "colab_runtime_type", "cpu"),
     }
+
+
+def _get_notebook_revision(nb_id: str) -> int:
+    """Return the current runtime notebook revision."""
+    return notebook_revisions.get(nb_id, 0)
+
+
+def _touch_notebook_revision(nb_id: str, reason: str) -> int:
+    """Bump runtime revision for backend-authoritative notebook mutations."""
+    notebook_revisions[nb_id] = notebook_revisions.get(nb_id, 0) + 1
+    logger.info(
+        "Notebook revision advanced (notebook=%s, revision=%s, reason=%s)",
+        nb_id,
+        notebook_revisions[nb_id],
+        reason,
+    )
+    return notebook_revisions[nb_id]
+
+
+def _expected_version_conflicts(cell, expected_version: int = -1) -> bool:
+    return expected_version is not None and expected_version >= 0 and expected_version != cell.version
 
 
 def _get_outline_revision(nb_id: str) -> int:
@@ -632,22 +649,12 @@ async def send_kernel_snapshot(nb_id: str, send) -> None:
 
 async def broadcast_kernel_snapshot(nb_id: str):
     """Broadcast the latest notebook/kernel snapshot to all clients."""
-    if nb_id not in ws_connections or not ws_connections[nb_id]:
-        return
-    payload = json.dumps(_build_kernel_snapshot(nb_id))
-    alive = []
-    for send in list(ws_connections[nb_id]):
-        try:
-            await send(payload)
-            alive.append(send)
-        except Exception:
-            pass
-    ws_connections[nb_id] = alive
+    await broadcast_manager.broadcast_text(nb_id, json.dumps(_build_kernel_snapshot(nb_id)))
 
 
 async def broadcast_all_kernel_snapshots():
     """Broadcast refreshed kernel snapshots for every notebook with clients."""
-    for nb_id in list(ws_connections.keys()):
+    for nb_id in broadcast_manager.notebook_ids():
         await broadcast_kernel_snapshot(nb_id)
 
 
@@ -666,7 +673,7 @@ async def _mark_outline_dirty(nb_id: str, reason: str, *, broadcast_snapshot: bo
 
 async def _mark_all_outlines_dirty(reason: str) -> None:
     """Bump outline revisions for all active notebooks, then broadcast snapshots once."""
-    notebook_ids = set(notebooks.keys()) | set(ws_connections.keys()) | set(kernel_service._kernels.keys())
+    notebook_ids = set(notebooks.keys()) | set(broadcast_manager.notebook_ids()) | set(kernel_service._kernels.keys())
     for nb_id in notebook_ids:
         outline_revisions[nb_id] = outline_revisions.get(nb_id, 0) + 1
         logger.info(
@@ -1084,32 +1091,10 @@ async def broadcast_to_notebook(nb_id: str, component, exclude_send: Any = None)
         component: FastHTML component to send
         exclude_send: Optional send function to exclude (e.g., the sender)
     """
-    if nb_id not in ws_connections or not ws_connections[nb_id]:
-        return
-
-    connections = ws_connections[nb_id]
-
     # Convert component to HTML string using to_xml
     # FastHTML's str() on components returns the ID, not HTML
     html_str = to_xml(component)
-
-    # Track which connections are still alive
-    alive = []
-
-    for send in connections:
-        if send is exclude_send:
-            alive.append(send)  # Keep but don't send
-            continue
-        try:
-            await send(html_str)
-            alive.append(send)
-        except Exception:
-            # Connection closed/dead - silently remove it
-            # This is expected when browser tabs close or refresh
-            pass
-
-    # Replace with only alive connections
-    ws_connections[nb_id] = alive
+    await broadcast_manager.broadcast_text(nb_id, html_str, exclude_send=exclude_send)
 
 
 async def broadcast_json(nb_id: str, data: dict, exclude_send=None):
@@ -1119,26 +1104,12 @@ async def broadcast_json(nb_id: str, data: dict, exclude_send=None):
     need full HTML OOB swaps. The client-side WebSocket handler processes
     these by type.
     """
-    if nb_id not in ws_connections or not ws_connections[nb_id]:
-        return
-    msg = json.dumps(data)
-    alive = []
-    for send in ws_connections[nb_id]:
-        if send is exclude_send:
-            alive.append(send)
-            continue
-        try:
-            await send(msg)
-            alive.append(send)
-        except Exception:
-            pass
-    ws_connections[nb_id] = alive
+    await broadcast_manager.broadcast_json(nb_id, data, exclude_send=exclude_send)
 
 
 async def broadcast_all_json(data: dict):
     """Broadcast a JSON message to ALL WebSocket connections across all notebooks."""
-    for nb_id in list(ws_connections.keys()):
-        await broadcast_json(nb_id, data)
+    await broadcast_manager.broadcast_all_json(data)
 
 
 def _ordered_cell_ids(nb) -> list[str]:
@@ -1157,37 +1128,85 @@ def _cell_add_payload(nb, nb_id: str, cell_id: str) -> dict:
     return {
         "type": "cell_add",
         "cell_id": cell.id,
+        "version": cell.version,
         "pos": idx,
         "html": cell_html + add_html,
         "ordered_cell_ids": _ordered_cell_ids(nb),
+        "notebook_revision": _get_notebook_revision(nb_id),
+        "cell_versions": {c.id: c.version for c in nb.cells},
     }
 
 
-def _cell_delete_payload(nb, cell_id: str) -> dict:
+def _cell_delete_payload(nb, nb_id: str, cell_id: str) -> dict:
     """Build a structural delete payload with canonical notebook order."""
     return {
         "type": "cell_delete",
         "cell_id": cell_id,
         "ordered_cell_ids": _ordered_cell_ids(nb),
+        "notebook_revision": _get_notebook_revision(nb_id),
+        "cell_versions": {c.id: c.version for c in nb.cells},
     }
 
 
-def _cell_move_payload(nb, cell_id: str) -> dict:
+def _cell_move_payload(nb, nb_id: str, cell_id: str) -> dict:
     """Build a structural move payload with canonical notebook order."""
     return {
         "type": "cell_move",
         "cell_id": cell_id,
         "ordered_cell_ids": _ordered_cell_ids(nb),
+        "notebook_revision": _get_notebook_revision(nb_id),
+        "cell_versions": {c.id: c.version for c in nb.cells},
     }
 
 
-def _prompt_output_payload(cell) -> dict:
+def _cell_source_payload(nb_id: str, cell) -> dict:
+    """Build a source sync payload with cell and notebook revisions."""
+    return {
+        "type": "cell_source_update",
+        "cell_id": cell.id,
+        "source": cell.source,
+        "version": cell.version,
+        "notebook_revision": _get_notebook_revision(nb_id),
+    }
+
+
+async def _broadcast_cell_version_conflict(nb_id: str, cell, expected_version: int) -> None:
+    await broadcast_json(nb_id, {
+        "type": "cell_conflict",
+        "cell_id": cell.id,
+        "expected_version": expected_version,
+        "actual_version": cell.version,
+        "source": cell.source,
+        "version": cell.version,
+        "notebook_revision": _get_notebook_revision(nb_id),
+    })
+    await broadcast_json(nb_id, _cell_source_payload(nb_id, cell))
+
+
+def _commit_cell_source(nb_id: str, nb, cell, source: str, *, reason: str) -> bool:
+    changed = cell.update_source(source)
+    if changed:
+        nb.modified = True
+        _touch_notebook_revision(nb_id, reason)
+    return changed
+
+
+def _commit_cell_output(nb_id: str, nb, cell, output: str, *, reason: str) -> bool:
+    changed = cell.update_output(output)
+    if changed:
+        nb.modified = True
+        _touch_notebook_revision(nb_id, reason)
+    return changed
+
+
+def _prompt_output_payload(nb_id: str, cell) -> dict:
     """Build a canonical prompt output sync payload."""
     return {
         "type": "prompt_output_update",
         "cell_id": cell.id,
         "output": cell.output,
         "version": cell.version,
+        "notebook_revision": _get_notebook_revision(nb_id),
         "time_run": cell.time_run,
     }
 
@@ -1196,73 +1215,53 @@ async def broadcast_queue_state(nb_id: str):
     """Broadcast current queue state to all clients."""
     status = _get_queue_payload(nb_id)
 
-    msg = json.dumps({
+    await broadcast_json(nb_id, {
         "type": "queue_update",
         "running_cell_id": status["running_cell_id"],
-        "queued_cell_ids": status["queued_cell_ids"]
+        "queued_cell_ids": status["queued_cell_ids"],
     })
-
-    if nb_id in ws_connections and ws_connections[nb_id]:
-        for send in list(ws_connections[nb_id]):
-            try:
-                await send(msg)
-            except:
-                pass
     await broadcast_kernel_snapshot(nb_id)
 
 
 async def broadcast_cell_state(nb_id: str, cell_id: str, state: CellState):
     """Broadcast cell state change to all clients."""
-    msg = json.dumps({
+    await broadcast_json(nb_id, {
         "type": "cell_state_change",
         "cell_id": cell_id,
-        "state": state.value
+        "state": state.value,
     })
-
-    if nb_id in ws_connections and ws_connections[nb_id]:
-        for send in list(ws_connections[nb_id]):
-            try:
-                await send(msg)
-            except:
-                pass
 
 
 async def broadcast_kernel_status(nb_id: str, status: str):
     """Broadcast kernel status change (connected, busy, error, restarting) to all clients."""
-    msg = json.dumps({"type": f"kernel_{status}"})
-    if nb_id in ws_connections and ws_connections[nb_id]:
-        for send in list(ws_connections[nb_id]):
-            try:
-                await send(msg)
-            except:
-                pass
+    await broadcast_json(nb_id, {"type": f"kernel_{status}"})
     await broadcast_kernel_snapshot(nb_id)
 
 
 async def broadcast_cell_output(nb_id: str, cell_id: str, output):
     """Broadcast cell output chunk to all clients."""
     if output.output_type == 'stream':
-        msg = json.dumps({
+        msg_data = {
             "type": "code_stream_chunk",
             "cell_id": cell_id,
             "chunk": output.content,
             "stream": output.stream_name
-        })
+        }
     elif output.output_type == 'execute_result':
-        msg = json.dumps({
+        msg_data = {
             "type": "code_stream_chunk",
             "cell_id": cell_id,
             "chunk": output.content,
             "stream": "stdout"
-        })
+        }
     elif output.output_type == 'error':
         tb_text = '\n'.join(output.traceback or [])
-        msg = json.dumps({
+        msg_data = {
             "type": "code_stream_chunk",
             "cell_id": cell_id,
             "chunk": tb_text,
             "stream": "stderr"
-        })
+        }
     elif output.output_type == 'display_data':
         html_content = render_mime_bundle(output.content, output.metadata)
         msg_data = {
@@ -1272,30 +1271,24 @@ async def broadcast_cell_output(nb_id: str, cell_id: str, output):
         }
         if output.display_id:
             msg_data["display_id"] = output.display_id
-        msg = json.dumps(msg_data)
     elif output.output_type == 'update_display_data':
         html_content = render_mime_bundle(output.content, output.metadata)
-        msg = json.dumps({
+        msg_data = {
             "type": "code_update_display",
             "cell_id": cell_id,
             "html": html_content,
             "display_id": output.display_id
-        })
+        }
     elif output.output_type == 'clear_output':
-        msg = json.dumps({
+        msg_data = {
             "type": "code_clear_output",
             "cell_id": cell_id,
             "wait": output.content  # bool: wait for next output before clearing
-        })
+        }
     else:
         return  # Unknown type, skip
 
-    if nb_id in ws_connections and ws_connections[nb_id]:
-        for send in list(ws_connections[nb_id]):
-            try:
-                await send(msg)
-            except:
-                pass
+    await broadcast_json(nb_id, msg_data)
 
 
 # NOTE: CSS and JavaScript have been extracted to static/ directory:
@@ -1572,11 +1565,50 @@ def get(path: str = "", client_id: str = ""):
 
 
 @rt("/dialeng/file/save")
-def post(path: str = "", client_id: str = "", content: str = ""):
+def post(
+    path: str = "",
+    client_id: str = "",
+    content: str = "",
+    expected_mtime_ns: int = -1,
+    expected_size: int = -1,
+):
     """Save an open file if the current client owns its edit lease."""
-    result = file_editor_service.save_file(path, client_id, content)
+    start = time.perf_counter()
+    op_id = log_operation(
+        logger,
+        "file_save_start",
+        path=path,
+        client_id=client_id,
+        expected_mtime_ns=expected_mtime_ns,
+        expected_size=expected_size,
+        bytes=len(content.encode("utf-8", errors="replace")),
+    )
+    result = file_editor_service.save_file(
+        path,
+        client_id,
+        content,
+        expected_mtime_ns=expected_mtime_ns,
+        expected_size=expected_size,
+    )
+    log_operation(
+        logger,
+        "file_save_complete" if result.status == "editable" else "file_save_rejected",
+        op_id=op_id,
+        path=result.rel_path or path,
+        client_id=client_id,
+        status=result.status,
+        mtime_ns=result.mtime_ns,
+        size=result.size,
+        duration_ms=elapsed_ms(start),
+    )
     if result.status == "editable":
-        return {"ok": True, "message": "File saved.", "language": result.language}
+        return {
+            "ok": True,
+            "message": "File saved.",
+            "language": result.language,
+            "mtime_ns": result.mtime_ns,
+            "size": result.size,
+        }
     return {"ok": False, "message": result.reason or "File could not be saved.", "status": result.status}
 
 
@@ -1898,6 +1930,16 @@ async def _run_notebook_kernel_setup(
     current_task = asyncio.current_task()
     total_start = time.perf_counter()
     kernel_type, runtime_id = _kernel_runtime_context(nb_id)
+    op_id = log_operation(
+        logger,
+        "kernel_setup_start",
+        notebook=nb_id,
+        source=source,
+        generation=generation,
+        kernel_type=kernel_type,
+        runtime_id=runtime_id,
+        craft_cells=len(craft_cells),
+    )
     logger.info(
         "Starting notebook kernel setup (notebook=%s, source=%s, generation=%s, kernel_type=%s, runtime_id=%s, craft_cells=%s)",
         nb_id, source, generation, kernel_type, runtime_id, len(craft_cells),
@@ -1952,6 +1994,17 @@ async def _run_notebook_kernel_setup(
             )
 
         await _clear_kernel_setup_state(nb_id, expected_generation=generation)
+        log_operation(
+            logger,
+            "kernel_setup_complete",
+            op_id=op_id,
+            notebook=nb_id,
+            source=source,
+            generation=generation,
+            kernel_type=kernel_type,
+            runtime_id=runtime_id,
+            duration_ms=elapsed_ms(total_start),
+        )
         logger.info(
             "Notebook kernel setup completed (notebook=%s, source=%s, generation=%s, kernel_type=%s, runtime_id=%s, duration_ms=%.1f)",
             nb_id, source, generation, kernel_type, runtime_id, (time.perf_counter() - total_start) * 1000,
@@ -1959,12 +2012,35 @@ async def _run_notebook_kernel_setup(
         await broadcast_kernel_status(nb_id, "connected")
     except asyncio.CancelledError:
         await _clear_kernel_setup_state(nb_id, expected_generation=generation)
+        log_operation(
+            logger,
+            "kernel_setup_cancelled",
+            op_id=op_id,
+            notebook=nb_id,
+            source=source,
+            generation=generation,
+            kernel_type=kernel_type,
+            runtime_id=runtime_id,
+            duration_ms=elapsed_ms(total_start),
+        )
         logger.info(
             "Notebook kernel setup cancelled (notebook=%s, source=%s, generation=%s, kernel_type=%s, runtime_id=%s)",
             nb_id, source, generation, kernel_type, runtime_id,
         )
     except Exception:
         await _clear_kernel_setup_state(nb_id, expected_generation=generation)
+        log_operation(
+            logger,
+            "kernel_setup_failed",
+            level=logging.ERROR,
+            op_id=op_id,
+            notebook=nb_id,
+            source=source,
+            generation=generation,
+            kernel_type=kernel_type,
+            runtime_id=runtime_id,
+            duration_ms=elapsed_ms(total_start),
+        )
         logger.exception(
             "Notebook kernel setup failed (notebook=%s, source=%s, generation=%s, kernel_type=%s, runtime_id=%s)",
             nb_id, source, generation, kernel_type, runtime_id,
@@ -2040,13 +2116,7 @@ async def post(nb_id: str, kernel_type: str):
     reset_craft_tracking(nb_id)
 
     # Broadcast kernel type change to all clients
-    msg = json.dumps({"type": "kernel_type_changed", "kernel_type": kernel_type})
-    if nb_id in ws_connections and ws_connections[nb_id]:
-        for send in list(ws_connections[nb_id]):
-            try:
-                await send(msg)
-            except Exception:
-                pass
+    await broadcast_json(nb_id, {"type": "kernel_type_changed", "kernel_type": kernel_type})
 
     await _mark_outline_dirty(nb_id, reason="kernel_type_change", broadcast_snapshot=False)
     await broadcast_kernel_snapshot(nb_id)
@@ -2486,6 +2556,7 @@ async def post(nb_id: str, pos: int = -1, type: str = "code"):
         pos = len(nb.cells)
     nb.cells.insert(pos, Cell(cell_type=type))
     nb.modified = True
+    _touch_notebook_revision(nb_id, "cell_add")
 
     # FOUST fix (FOUST = Flash of Unstyled Text — Monaco renders code white first,
     # then tokenizes async via web worker; destroying/recreating the editor causes a
@@ -2516,22 +2587,48 @@ async def delete(nb_id: str, cid: str):
     # FOUST fix: broadcast granular cell_delete JSON instead of AllCellsOOB.
     # The client removes just this cell + its adjacent add-row from DOM.
     # Other cells' Monaco editors are completely untouched.
-    await broadcast_json(nb_id, _cell_delete_payload(nb, cid))
+    _touch_notebook_revision(nb_id, "cell_delete")
+    await broadcast_json(nb_id, _cell_delete_payload(nb, nb_id, cid))
     await _mark_outline_dirty(nb_id, reason="cell_delete")
 
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/source")
-async def post(nb_id: str, cid: str, source: str):
+async def post(nb_id: str, cid: str, source: str, expected_version: int = -1):
     nb = get_notebook(nb_id)
     for c in nb.cells:
         if c.id == cid:
-            changed = c.update_source(source)
+            if _expected_version_conflicts(c, expected_version):
+                log_operation(
+                    logger,
+                    "cell_source_conflict",
+                    level=logging.WARNING,
+                    notebook=nb_id,
+                    cell=cid,
+                    expected_version=expected_version,
+                    actual_version=c.version,
+                )
+                logger.warning(
+                    "Rejected stale cell source commit (notebook=%s, cell=%s, expected_version=%s, actual_version=%s)",
+                    nb_id, cid, expected_version, c.version,
+                )
+                await _broadcast_cell_version_conflict(nb_id, c, expected_version)
+                return {"status": "conflict", "version": c.version}
+
+            changed = _commit_cell_source(nb_id, nb, c, source, reason="cell_source_commit")
             if not changed:
                 break
 
-            nb.modified = True
             cell_type = str(getattr(c, "cell_type", ""))
+            log_operation(
+                logger,
+                "cell_source_commit",
+                notebook=nb_id,
+                cell=cid,
+                cell_type=cell_type,
+                version=c.version,
+                notebook_revision=_get_notebook_revision(nb_id),
+            )
             logger.info(
                 "Cell source committed (notebook=%s, cell=%s, cell_type=%s, version=%s)",
                 nb_id,
@@ -2541,12 +2638,7 @@ async def post(nb_id: str, cid: str, source: str):
             )
 
             if cell_type in {"code", "shell"}:
-                await broadcast_json(nb_id, {
-                    "type": "cell_source_update",
-                    "cell_id": c.id,
-                    "source": c.source,
-                    "version": c.version,
-                })
+                await broadcast_json(nb_id, _cell_source_payload(nb_id, c))
                 await broadcast_to_notebook(nb_id, CellOutputOOB(c))
                 await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
             else:
@@ -2558,16 +2650,41 @@ async def post(nb_id: str, cid: str, source: str):
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/output")
-async def post(nb_id: str, cid: str, output: str):
+async def post(nb_id: str, cid: str, output: str, expected_version: int = -1):
     nb = get_notebook(nb_id)
     for c in nb.cells:
         if c.id == cid:
-            changed = c.update_output(output)
+            if _expected_version_conflicts(c, expected_version):
+                log_operation(
+                    logger,
+                    "cell_output_conflict",
+                    level=logging.WARNING,
+                    notebook=nb_id,
+                    cell=cid,
+                    expected_version=expected_version,
+                    actual_version=c.version,
+                )
+                logger.warning(
+                    "Rejected stale cell output commit (notebook=%s, cell=%s, expected_version=%s, actual_version=%s)",
+                    nb_id, cid, expected_version, c.version,
+                )
+                await _broadcast_cell_version_conflict(nb_id, c, expected_version)
+                return {"status": "conflict", "version": c.version}
+
+            changed = _commit_cell_output(nb_id, nb, c, output, reason="cell_output_commit")
             if not changed:
                 break
 
-            nb.modified = True
             cell_type = str(getattr(c, "cell_type", ""))
+            log_operation(
+                logger,
+                "cell_output_commit",
+                notebook=nb_id,
+                cell=cid,
+                cell_type=cell_type,
+                version=c.version,
+                notebook_revision=_get_notebook_revision(nb_id),
+            )
             logger.info(
                 "Cell output committed (notebook=%s, cell=%s, cell_type=%s, version=%s)",
                 nb_id,
@@ -2580,7 +2697,7 @@ async def post(nb_id: str, cid: str, output: str):
                 await broadcast_to_notebook(nb_id, CellOutputOOB(c))
                 await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
             elif cell_type == "prompt":
-                await broadcast_json(nb_id, _prompt_output_payload(c))
+                await broadcast_json(nb_id, _prompt_output_payload(nb_id, c))
             else:
                 await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
             break
@@ -2596,6 +2713,7 @@ async def post(nb_id: str, cid: str, cell_type: str):
             c.version += 1
             c.last_modified = datetime.now()
             nb.modified = True
+            _touch_notebook_revision(nb_id, "cell_type_change")
 
             # Cell type change is the ONE case where CellViewOOB is correct:
             # the input section fundamentally changes (Monaco editor ↔ textarea),
@@ -2621,7 +2739,8 @@ async def post(nb_id: str, cid: str, direction: str):
 
     # Broadcast the backend-authoritative cell order so every client reorders
     # the existing DOM nodes from the same source of truth.
-    await broadcast_json(nb_id, _cell_move_payload(nb, cid))
+    _touch_notebook_revision(nb_id, "cell_move")
+    await broadcast_json(nb_id, _cell_move_payload(nb, nb_id, cid))
     await _mark_outline_dirty(nb_id, reason="cell_move")
 
     # Move buttons use hx_swap="none"; the browser applies the canonical order
@@ -2644,6 +2763,7 @@ async def post(nb_id: str, cid: str):
             )
             nb.cells.insert(i + 1, new_cell)
             nb.modified = True
+            _touch_notebook_revision(nb_id, "cell_duplicate")
             await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
             await _mark_outline_dirty(nb_id, reason="cell_duplicate")
             return ""
@@ -2657,6 +2777,7 @@ async def post(nb_id: str, cid: str):
         if c.id == cid:
             c.clear_outputs()
             nb.modified = True
+            _touch_notebook_revision(nb_id, "cell_clear_output")
             cell_type = str(getattr(c, "cell_type", ""))
             if cell_type in {"code", "shell"}:
                 await broadcast_to_notebook(nb_id, CellOutputOOB(c))
@@ -2673,19 +2794,14 @@ async def post(nb_id: str, cid: str):
     for i, c in enumerate(nb.cells):
         if c.id == cid and i + 1 < len(nb.cells):
             below = nb.cells[i + 1]
-            c.update_source(c.source.rstrip('\n') + '\n' + below.source)
-            nb.modified = True
+            _commit_cell_source(nb_id, nb, c, c.source.rstrip('\n') + '\n' + below.source, reason="cell_merge_below_source")
             # Remove the cell below
             del nb.cells[i + 1]
-            await broadcast_json(nb_id, _cell_delete_payload(nb, below.id))
+            _touch_notebook_revision(nb_id, "cell_merge_below")
+            await broadcast_json(nb_id, _cell_delete_payload(nb, nb_id, below.id))
             cell_type = str(getattr(c, "cell_type", ""))
             if cell_type in {"code", "shell"}:
-                await broadcast_json(nb_id, {
-                    "type": "cell_source_update",
-                    "cell_id": c.id,
-                    "source": c.source,
-                    "version": c.version,
-                })
+                await broadcast_json(nb_id, _cell_source_payload(nb_id, c))
                 await broadcast_to_notebook(nb_id, CellOutputOOB(c))
                 await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
             else:
@@ -2711,6 +2827,7 @@ async def post(nb_id: str, cid: str):
                 new_cell = Cell(cell_type="code", source=block.strip())
                 nb.cells.insert(i + 1 + j, new_cell)
                 nb.modified = True
+                _touch_notebook_revision(nb_id, "extract_code_blocks")
                 await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
             await _mark_outline_dirty(nb_id, reason="extract_code_blocks")
             return ""
@@ -2765,7 +2882,7 @@ async def post(nb_id: str, cid: str, section: str, level: int):
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/run")
-async def post(nb_id: str, cid: str, source: str = None):
+async def post(nb_id: str, cid: str, source: str = None, expected_version: int = -1):
     # Guard: require explicit kernel selection before any cell execution
     if not kernel_service.has_kernel(nb_id):
         from starlette.responses import Response
@@ -2788,15 +2905,39 @@ async def post(nb_id: str, cid: str, source: str = None):
         return ""
 
     c = target_cell
+    run_op_id = log_operation(
+        logger,
+        "cell_run_requested",
+        notebook=nb_id,
+        cell=cid,
+        cell_type=str(getattr(c, "cell_type", "")),
+        expected_version=expected_version,
+        version=c.version,
+    )
 
     # Running a cell from the editor can submit fresher source than the last blur
     # commit. Persist that source first so every tab converges on the same input,
     # but keep the previous output visible until queue/running state is confirmed.
     if source is not None and source != c.source:
-        c.source = source
-        c.version += 1
-        c.last_modified = datetime.now()
-        nb.modified = True
+        if _expected_version_conflicts(c, expected_version):
+            log_operation(
+                logger,
+                "cell_run_source_conflict",
+                level=logging.WARNING,
+                op_id=run_op_id,
+                notebook=nb_id,
+                cell=cid,
+                expected_version=expected_version,
+                actual_version=c.version,
+            )
+            logger.warning(
+                "Rejected stale cell source commit during run (notebook=%s, cell=%s, expected_version=%s, actual_version=%s)",
+                nb_id, cid, expected_version, c.version,
+            )
+            await _broadcast_cell_version_conflict(nb_id, c, expected_version)
+            return ""
+
+        _commit_cell_source(nb_id, nb, c, source, reason="cell_run_source_commit")
         cell_type = str(getattr(c, "cell_type", ""))
         logger.info(
             "Cell source committed during run (notebook=%s, cell=%s, cell_type=%s, version=%s)",
@@ -2806,12 +2947,7 @@ async def post(nb_id: str, cid: str, source: str = None):
             c.version,
         )
         if cell_type in {"code", "shell"}:
-            await broadcast_json(nb_id, {
-                "type": "cell_source_update",
-                "cell_id": c.id,
-                "source": c.source,
-                "version": c.version,
-            })
+            await broadcast_json(nb_id, _cell_source_payload(nb_id, c))
         else:
             await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
 
@@ -2824,6 +2960,7 @@ async def post(nb_id: str, cid: str, source: str = None):
             return ""
 
         logger.info("Queueing code cell (notebook=%s, cell=%s)", nb_id, cid)
+        log_operation(logger, "cell_run_queued", op_id=run_op_id, notebook=nb_id, cell=cid)
 
         # Queue the cell - returns immediately, execution happens in background
         queue.queue_cell(nb_id, c)
@@ -2834,6 +2971,7 @@ async def post(nb_id: str, cid: str, source: str = None):
         return ""
 
     elif c.cell_type == "prompt":
+        log_operation(logger, "prompt_run_started", op_id=run_op_id, notebook=nb_id, cell=cid)
         # Remove from cancelled set if it was there
         cancelled_cells.discard(cid)
 
@@ -2904,13 +3042,7 @@ async def post(nb_id: str, cid: str, source: str = None):
         # Notify clients that this prompt cell is now generating.
         # This is needed for cells created programmatically (e.g., via _add_msg_unsafe
         # with run_mode='run') where no UI button click triggers startStreaming().
-        if nb_id in ws_connections and ws_connections[nb_id]:
-            msg = json.dumps({"type": "prompt_stream_start", "cell_id": cid})
-            for send in list(ws_connections[nb_id]):
-                try:
-                    await send(msg)
-                except:
-                    pass
+        await broadcast_json(nb_id, {"type": "prompt_stream_start", "cell_id": cid})
 
         try:
             async for item in stream_func:
@@ -2923,13 +3055,7 @@ async def post(nb_id: str, cid: str, source: str = None):
                 if item["type"] == "error":
                     post_tool_text.append(f"\n\n**Error:** {item['content']}")
                     # Send error to WebSocket
-                    if nb_id in ws_connections and ws_connections[nb_id]:
-                        msg = json.dumps({"type": "stream_chunk", "cell_id": cid, "chunk": f"\n\n**Error:** {item['content']}"})
-                        for send in ws_connections[nb_id]:
-                            try:
-                                await send(msg)
-                            except:
-                                pass
+                    await broadcast_json(nb_id, {"type": "stream_chunk", "cell_id": cid, "chunk": f"\n\n**Error:** {item['content']}"})
                     break
 
                 # Collect response chunks with proper categorization
@@ -2999,68 +3125,54 @@ async def post(nb_id: str, cid: str, source: str = None):
                     has_active_tool_call = False
 
                 # Send streaming updates via WebSocket
-                if nb_id in ws_connections and ws_connections[nb_id]:
-                    if item["type"] == "thinking_start":
-                        msg = json.dumps({"type": "thinking_start", "cell_id": cid})
-                    elif item["type"] == "thinking_end":
-                        msg = json.dumps({"type": "thinking_end", "cell_id": cid})
-                    elif item["type"] == "thinking":
-                        msg = json.dumps({"type": "stream_chunk", "cell_id": cid, "chunk": item["content"], "thinking": True})
-                    elif item["type"] == "var_substituted":
-                        # Variable was substituted - notify client
-                        msg = json.dumps({
-                            "type": "var_substituted",
-                            "cell_id": cid,
-                            "var_name": item.get("name", ""),
-                            "var_value": item.get("value", "")
-                        })
-                    elif item["type"] == "tool_available":
-                        # Tool became available - notify client
-                        msg = json.dumps({
-                            "type": "tool_available",
-                            "cell_id": cid,
-                            "tool_name": item.get("name", ""),
-                            "tool_type": item.get("tool_type", "dynamic")
-                        })
-                    elif item["type"] == "tool_call":
-                        # AI is calling a tool - notify client
-                        msg = json.dumps({
-                            "type": "tool_call",
-                            "cell_id": cid,
-                            "tool_id": item.get("id", ""),
-                            "tool_name": item.get("name", ""),
-                            "tool_input": item.get("input", {})
-                        })
-                    elif item["type"] == "tool_result":
-                        # Tool returned a result - notify client
-                        msg = json.dumps({
-                            "type": "tool_result",
-                            "cell_id": cid,
-                            "tool_id": item.get("id", ""),
-                            "tool_name": item.get("name", ""),
-                            "result": item.get("result", {}),
-                            "status": item.get("status", "success")
-                        })
-                    else:  # chunk
-                        msg = json.dumps({"type": "stream_chunk", "cell_id": cid, "chunk": item["content"]})
-
-                    # Iterate over list (not dict.values())
-                    for send in ws_connections[nb_id]:
-                        try:
-                            await send(msg)
-                        except:
-                            pass
+                if item["type"] == "thinking_start":
+                    await broadcast_json(nb_id, {"type": "thinking_start", "cell_id": cid})
+                elif item["type"] == "thinking_end":
+                    await broadcast_json(nb_id, {"type": "thinking_end", "cell_id": cid})
+                elif item["type"] == "thinking":
+                    await broadcast_json(nb_id, {"type": "stream_chunk", "cell_id": cid, "chunk": item["content"], "thinking": True})
+                elif item["type"] == "var_substituted":
+                    # Variable was substituted - notify client
+                    await broadcast_json(nb_id, {
+                        "type": "var_substituted",
+                        "cell_id": cid,
+                        "var_name": item.get("name", ""),
+                        "var_value": item.get("value", "")
+                    })
+                elif item["type"] == "tool_available":
+                    # Tool became available - notify client
+                    await broadcast_json(nb_id, {
+                        "type": "tool_available",
+                        "cell_id": cid,
+                        "tool_name": item.get("name", ""),
+                        "tool_type": item.get("tool_type", "dynamic")
+                    })
+                elif item["type"] == "tool_call":
+                    # AI is calling a tool - notify client
+                    await broadcast_json(nb_id, {
+                        "type": "tool_call",
+                        "cell_id": cid,
+                        "tool_id": item.get("id", ""),
+                        "tool_name": item.get("name", ""),
+                        "tool_input": item.get("input", {})
+                    })
+                elif item["type"] == "tool_result":
+                    # Tool returned a result - notify client
+                    await broadcast_json(nb_id, {
+                        "type": "tool_result",
+                        "cell_id": cid,
+                        "tool_id": item.get("id", ""),
+                        "tool_name": item.get("name", ""),
+                        "result": item.get("result", {}),
+                        "status": item.get("status", "success")
+                    })
+                else:  # chunk
+                    await broadcast_json(nb_id, {"type": "stream_chunk", "cell_id": cid, "chunk": item["content"]})
         except Exception as e:
             # Catch any unexpected errors during streaming
             error_msg = f"\n\n**Error:** Streaming error: {str(e)}"
             post_tool_text.append(error_msg)
-            if nb_id in ws_connections and ws_connections[nb_id]:
-                msg = json.dumps({"type": "stream_chunk", "cell_id": cid, "chunk": error_msg})
-                for send in ws_connections[nb_id]:
-                    try:
-                        await send(msg)
-                    except:
-                        pass
+            await broadcast_json(nb_id, {"type": "stream_chunk", "cell_id": cid, "chunk": error_msg})
         finally:
             # Determine the final response text based on whether tools were used
             if had_any_tools:
@@ -3080,20 +3192,23 @@ async def post(nb_id: str, cid: str, source: str = None):
 
             # Prepend LLM steps to response if any
             final_output = tool_steps_md + response_text if tool_steps_md else response_text
-            c.update_output(final_output)
+            _commit_cell_output(nb_id, nb, c, final_output, reason="prompt_output_commit")
             c.time_run = datetime.now().strftime("%H:%M:%S")
             nb.modified = True
 
-            await broadcast_json(nb_id, _prompt_output_payload(c))
+            await broadcast_json(nb_id, _prompt_output_payload(nb_id, c))
+            log_operation(
+                logger,
+                "prompt_run_completed",
+                op_id=run_op_id,
+                notebook=nb_id,
+                cell=cid,
+                version=c.version,
+                notebook_revision=_get_notebook_revision(nb_id),
+            )
 
             # Send end signal to all clients
-            if nb_id in ws_connections and ws_connections[nb_id]:
-                msg = json.dumps({"type": "stream_end", "cell_id": cid})
-                for send in ws_connections[nb_id]:
-                    try:
-                        await send(msg)
-                    except:
-                        pass
+            await broadcast_json(nb_id, {"type": "stream_end", "cell_id": cid})
 
         # FOUST fix: use targeted updates instead of CellViewOOB for prompt completion.
         # The output was already streamed to the client via stream_chunk/stream_end,
@@ -3308,7 +3423,7 @@ async def post(dlg_name: str, content: str, placement: str = "add_after", id_: s
     (add_after/add_before/at_start/at_end).
     Boolean params use str type because HTTP form data sends 'True'/'False' strings.
     """
-    print(f"[ADD_RELATIVE] dlg_name={dlg_name}, ws_connections keys={list(ws_connections.keys())}", flush=True)
+    logger.debug("[ADD_RELATIVE] dlg_name=%s, websocket_notebooks=%s", dlg_name, broadcast_manager.notebook_ids())
     nb = get_notebook(dlg_name)
     new_cell = Cell(
         cell_type=msg_type, source=content,
@@ -3340,6 +3455,8 @@ async def post(dlg_name: str, content: str, placement: str = "add_after", id_: s
         insert_idx = ref_idx + 1 if placement == "add_after" else ref_idx
 
     nb.cells.insert(insert_idx, new_cell)
+    nb.modified = True
+    _touch_notebook_revision(dlg_name, "dialoghelper_add_relative")
 
     # FOUST fix: broadcast granular cell_add JSON instead of AllCellsOOB.
     # This is the dialoghelper version of the add route — same pattern as /cell/add.
@@ -3389,7 +3506,8 @@ async def post(dlg_name: str, msid: str, log_changed: str = ""):
             })
         nb.cells.pop(idx)
         # FOUST fix: granular cell_delete instead of AllCellsOOB (dialoghelper route)
-        await broadcast_json(dlg_name, _cell_delete_payload(nb, msid))
+        _touch_notebook_revision(dlg_name, "dialoghelper_rm_msg")
+        await broadcast_json(dlg_name, _cell_delete_payload(nb, dlg_name, msid))
     return {"status": "ok", "id": msid}
 
 def _str_to_bool(val: str) -> bool:
@@ -3412,12 +3530,12 @@ async def post(dlg_name: str, id_: str,
     Boolean params use str type because HTTP form data sends 'True'/'False' strings,
     and FastHTML can't convert 'True' to int.
     """
-    print(f"[UPDATE_MSG] dlg_name={dlg_name}, id_={id_}, pinned={pinned}", flush=True)
+    logger.debug("Dialoghelper update_msg requested (notebook=%s, cell=%s, pinned=%s)", dlg_name, id_, pinned)
     nb = get_notebook(dlg_name)
     idx = get_msg_idx(nb, id_)
     if idx >= 0:
         cell = nb.cells[idx]
-        print(f"[UPDATE_MSG] Cell {cell.id} before: pinned={cell.pinned}", flush=True)
+        logger.debug("Dialoghelper update_msg target before update (notebook=%s, cell=%s, pinned=%s)", dlg_name, cell.id, cell.pinned)
 
         # Track changes for logging
         changes = {}
@@ -3426,13 +3544,17 @@ async def post(dlg_name: str, id_: str,
         if content is not None:
             if _str_to_bool(log_changed) and cell.source != content:
                 changes["content"] = {"old": cell.source[:200], "new": content[:200]}
-            cell.source = content
+            _commit_cell_source(dlg_name, nb, cell, content, reason="dialoghelper_update_msg_source")
         if msg_type is not None:
             if _str_to_bool(log_changed) and cell.cell_type != msg_type:
                 changes["msg_type"] = {"old": cell.cell_type, "new": msg_type}
             cell.cell_type = msg_type
+            cell.version += 1
+            cell.last_modified = datetime.now()
+            nb.modified = True
+            _touch_notebook_revision(dlg_name, "dialoghelper_update_msg_type")
         if output is not None:
-            cell.output = output
+            _commit_cell_output(dlg_name, nb, cell, output, reason="dialoghelper_update_msg_output")
         if time_run is not None:
             cell.time_run = time_run
         if is_exported is not None:
@@ -3447,13 +3569,17 @@ async def post(dlg_name: str, id_: str,
             cell.heading_collapsed = _str_to_bool(heading_collapsed)
         if pinned is not None:
             cell.pinned = _str_to_bool(pinned)
-            print(f"[UPDATE_MSG] Set pinned={cell.pinned}", flush=True)
+            logger.debug("Dialoghelper update_msg set pinned (notebook=%s, cell=%s, pinned=%s)", dlg_name, cell.id, cell.pinned)
+
+        if any(v is not None for v in [time_run, is_exported, skipped, pinned, i_collapsed, o_collapsed, heading_collapsed]):
+            nb.modified = True
+            _touch_notebook_revision(dlg_name, "dialoghelper_update_msg_metadata")
 
         # Log changes if requested
         if _str_to_bool(log_changed) and changes:
             log_change(dlg_name, "update", id_, changes)
 
-        print(f"[UPDATE_MSG] Cell {cell.id} after: pinned={cell.pinned}", flush=True)
+        logger.debug("Dialoghelper update_msg target after update (notebook=%s, cell=%s, pinned=%s)", dlg_name, cell.id, cell.pinned)
         # Smart broadcast: use targeted updates to preserve Monaco editor DOM
         if msg_type is not None:
             # Type change requires full cell re-render
@@ -3461,10 +3587,12 @@ async def post(dlg_name: str, id_: str,
         else:
             # Source change → JSON update (no FOUST)
             if content is not None:
-                await broadcast_json(dlg_name, {"type": "cell_source_update", "cell_id": cell.id, "source": cell.source})
+                await broadcast_json(dlg_name, _cell_source_payload(dlg_name, cell))
             # Output change → targeted OOB
             if output is not None:
                 await broadcast_to_notebook(dlg_name, CellOutputOOB(cell))
+                if str(getattr(cell, "cell_type", "")) == "prompt":
+                    await broadcast_json(dlg_name, _prompt_output_payload(dlg_name, cell))
             # Header/state changes → targeted header OOB + class update
             if any(v is not None for v in [time_run, is_exported, skipped, pinned, i_collapsed, o_collapsed, heading_collapsed]):
                 await broadcast_to_notebook(dlg_name, CellHeaderOOB(cell, dlg_name))
@@ -3504,9 +3632,9 @@ async def post(dlg_name: str, id_: str, insert_line: int, new_str: str):
         cell = nb.cells[idx]
         lines = cell.source.split('\n')
         lines.insert(insert_line, new_str)
-        cell.source = '\n'.join(lines)
+        _commit_cell_source(dlg_name, nb, cell, '\n'.join(lines), reason="dialoghelper_msg_insert_line")
         # JSON source update — preserves Monaco editor DOM (no FOUST)
-        await broadcast_json(dlg_name, {"type": "cell_source_update", "cell_id": cell.id, "source": cell.source})
+        await broadcast_json(dlg_name, _cell_source_payload(dlg_name, cell))
     return {"status": "ok"}
 
 @rt("/msg_str_replace_")
@@ -3547,13 +3675,19 @@ async def post(dlg_name: str, id_: str, old_str: str, new_str: str,
             target = target.replace(old_str, new_str, count) if count else target.replace(old_str, new_str)
 
         parts = [p for p in [before, target, after_lines] if p]
-        cell.source = '\n'.join(parts)
+        _commit_cell_source(dlg_name, nb, cell, '\n'.join(parts), reason="dialoghelper_msg_str_replace")
     else:
         count = n_matches if n_matches else 0
-        cell.source = source.replace(old_str, new_str, count) if count else source.replace(old_str, new_str)
+        _commit_cell_source(
+            dlg_name,
+            nb,
+            cell,
+            source.replace(old_str, new_str, count) if count else source.replace(old_str, new_str),
+            reason="dialoghelper_msg_str_replace",
+        )
 
     # JSON source update — preserves Monaco editor DOM (no FOUST)
-    await broadcast_json(dlg_name, {"type": "cell_source_update", "cell_id": cell.id, "source": cell.source})
+    await broadcast_json(dlg_name, _cell_source_payload(dlg_name, cell))
     return {"status": "ok"}
 
 @rt("/msg_strs_replace_")
@@ -3565,10 +3699,12 @@ async def post(dlg_name: str, id_: str, old_strs: str, new_strs: str):
         cell = nb.cells[idx]
         old_list = json.loads(old_strs)
         new_list = json.loads(new_strs)
+        source = cell.source
         for old, new in zip(old_list, new_list):
-            cell.source = cell.source.replace(old, new, 1)
+            source = source.replace(old, new, 1)
+        _commit_cell_source(dlg_name, nb, cell, source, reason="dialoghelper_msg_strs_replace")
         # JSON source update — preserves Monaco editor DOM (no FOUST)
-        await broadcast_json(dlg_name, {"type": "cell_source_update", "cell_id": cell.id, "source": cell.source})
+        await broadcast_json(dlg_name, _cell_source_payload(dlg_name, cell))
     return {"status": "ok"}
 
 @rt("/msg_replace_lines_")
@@ -3580,9 +3716,9 @@ async def post(dlg_name: str, id_: str, start_line: int, end_line: int, new_cont
         cell = nb.cells[idx]
         lines = cell.source.split('\n')
         lines[start_line:end_line] = [new_content]
-        cell.source = '\n'.join(lines)
+        _commit_cell_source(dlg_name, nb, cell, '\n'.join(lines), reason="dialoghelper_msg_replace_lines")
         # JSON source update — preserves Monaco editor DOM (no FOUST)
-        await broadcast_json(dlg_name, {"type": "cell_source_update", "cell_id": cell.id, "source": cell.source})
+        await broadcast_json(dlg_name, _cell_source_payload(dlg_name, cell))
     return {"status": "ok"}
 
 @rt("/msg_del_lines_")
@@ -3613,9 +3749,9 @@ async def post(dlg_name: str, id_: str, start_line: int, end_line: int,
     else:
         del lines[s:e]
 
-    cell.source = '\n'.join(lines)
+    _commit_cell_source(dlg_name, nb, cell, '\n'.join(lines), reason="dialoghelper_msg_del_lines")
     # JSON source update — preserves Monaco editor DOM (no FOUST)
-    await broadcast_json(dlg_name, {"type": "cell_source_update", "cell_id": cell.id, "source": cell.source})
+    await broadcast_json(dlg_name, _cell_source_payload(dlg_name, cell))
     return {"status": "ok"}
 
 @rt("/msg_pyrun_")
@@ -3635,9 +3771,9 @@ async def post(dlg_name: str, id_: str, code: str):
     try:
         exec(code, namespace)
         if "text" in namespace and namespace["text"] != cell.source:
-            cell.source = namespace["text"]
+            _commit_cell_source(dlg_name, nb, cell, namespace["text"], reason="dialoghelper_msg_pyrun")
             # JSON source update — preserves Monaco editor DOM (no FOUST)
-            await broadcast_json(dlg_name, {"type": "cell_source_update", "cell_id": cell.id, "source": cell.source})
+            await broadcast_json(dlg_name, _cell_source_payload(dlg_name, cell))
         return {"status": "ok"}
     except Exception as e:
         return {"error": str(e)}
@@ -3661,9 +3797,10 @@ async def post(dlg_name: str, ids: str = "", id_: str = "", cmd: str = "copy"):
     result = clipboard_copy(nb, dlg_name, cell_ids, cut=(cmd == "cut"))
 
     if cmd == "cut":
+        _touch_notebook_revision(dlg_name, "dialoghelper_clipboard_cut")
         # FOUST fix: granular cell_delete per cell instead of AllCellsOOB
         for cid in cell_ids:
-            await broadcast_json(dlg_name, _cell_delete_payload(nb, cid))
+            await broadcast_json(dlg_name, _cell_delete_payload(nb, dlg_name, cid))
 
     return result
 
@@ -3674,6 +3811,7 @@ async def post(dlg_name: str, id_: str = "", after: str = "True"):
     new_ids = clipboard_paste(nb, dlg_name, ref_id=id_, after=_str_to_bool(after))
 
     if new_ids:
+        _touch_notebook_revision(dlg_name, "dialoghelper_clipboard_paste")
         # FOUST fix: granular cell_add per pasted cell instead of AllCellsOOB
         for new_id in new_ids:
             for idx, c in enumerate(nb.cells):
@@ -3697,6 +3835,8 @@ async def post(dlg_name: str, id_: str):
 
     cell = nb.cells[idx]
     cell.heading_collapsed = not cell.heading_collapsed
+    nb.modified = True
+    _touch_notebook_revision(dlg_name, "dialoghelper_toggle_header_collapse")
     # Targeted header OOB (preserves editor DOM)
     await broadcast_to_notebook(dlg_name, CellHeaderOOB(cell, dlg_name))
     return {"status": "ok", "heading_collapsed": cell.heading_collapsed}
@@ -3716,6 +3856,8 @@ async def post(nb_id: str, cell_id: str, prop: str):
     # Sync #| export directive with is_exported flag
     if prop == 'is_exported':
         cell.sync_export_directive()
+    nb.modified = True
+    _touch_notebook_revision(nb_id, f"cell_toggle_{prop}")
     # Targeted header OOB + class update (preserves editor DOM)
     await broadcast_to_notebook(nb_id, CellHeaderOOB(cell, nb_id))
     await broadcast_json(nb_id, {"type": "cell_class_update", "cell_id": cell.id, "cls": get_cell_state_classes(cell)})
@@ -3739,6 +3881,8 @@ async def post(dlg_name: str, id_: str, n: int):
             if c.bookmark == n:
                 c.bookmark = 0
         cell.bookmark = n
+    nb.modified = True
+    _touch_notebook_revision(dlg_name, "dialoghelper_bookmark")
 
     # Targeted header OOB (preserves editor DOM)
     await broadcast_to_notebook(dlg_name, CellHeaderOOB(cell, dlg_name))
@@ -3772,15 +3916,15 @@ async def post(dlg_name: str, ids: str = "", id_: str = ""):
                     new_lines.append(indent + stripped[1:])
                 else:
                     new_lines.append(l)
-            cell.source = '\n'.join(new_lines)
+            _commit_cell_source(dlg_name, nb, cell, '\n'.join(new_lines), reason="dialoghelper_toggle_comment")
         else:
             # Comment: add '# ' prefix
-            cell.source = '\n'.join(
+            _commit_cell_source(dlg_name, nb, cell, '\n'.join(
                 (l[:len(l) - len(l.lstrip())] + '# ' + l.lstrip()) if l.strip() else l
                 for l in lines
-            )
+            ), reason="dialoghelper_toggle_comment")
         # JSON source update — preserves Monaco editor DOM (no FOUST)
-        await broadcast_json(dlg_name, {"type": "cell_source_update", "cell_id": cell.id, "source": cell.source})
+        await broadcast_json(dlg_name, _cell_source_payload(dlg_name, cell))
 
     return {"status": "ok"}
 
@@ -3882,11 +4026,9 @@ async def ws_on_connect(send, scope):
     parts = path.strip('/').split('/')
     nb_id = parts[1] if len(parts) > 1 else 'default'
 
-    if nb_id not in ws_connections:
-        ws_connections[nb_id] = []
-    ws_connections[nb_id].append(send)
-    kernel_service.set_client_count(nb_id, len(ws_connections[nb_id]))
-    logger.info("WebSocket client connected (notebook=%s, connections=%s)", nb_id, len(ws_connections[nb_id]))
+    client_count = broadcast_manager.add_connection(nb_id, send)
+    kernel_service.set_client_count(nb_id, client_count)
+    logger.info("WebSocket client connected (notebook=%s, connections=%s)", nb_id, client_count)
     try:
         await send_kernel_snapshot(nb_id, send)
     except Exception:
@@ -3898,10 +4040,9 @@ async def ws_on_disconnect(send, scope):
     parts = path.strip('/').split('/')
     nb_id = parts[1] if len(parts) > 1 else 'default'
 
-    if nb_id in ws_connections and send in ws_connections[nb_id]:
-        ws_connections[nb_id].remove(send)
-        kernel_service.set_client_count(nb_id, len(ws_connections[nb_id]))
-        logger.info("WebSocket client disconnected (notebook=%s, connections=%s)", nb_id, len(ws_connections[nb_id]))
+    client_count = broadcast_manager.remove_connection(nb_id, send)
+    kernel_service.set_client_count(nb_id, client_count)
+    logger.info("WebSocket client disconnected (notebook=%s, connections=%s)", nb_id, client_count)
 
 @app.ws('/ws/{nb_id}', conn=ws_on_connect, disconn=ws_on_disconnect)
 async def ws(msg: str, send, nb_id: str):

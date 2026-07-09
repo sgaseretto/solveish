@@ -1,6 +1,6 @@
 """Tests for dialeng package init scaffolding."""
 import json
-import pytest
+import tomllib
 from pathlib import Path
 
 
@@ -50,10 +50,17 @@ class TestScaffoldPackage:
 
     def test_does_not_overwrite_existing_pyproject(self, tmp_path):
         from dialeng.services.package_scaffold_service import scaffold_package
-        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'existing'\n")
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'existing'\nversion = '1.2.3'\n")
         _make_notebook(["#| default_exp core", "#| export\nX = 1"], tmp_path / "core.ipynb")
-        with pytest.raises(FileExistsError):
-            scaffold_package(tmp_path, package_name="mylib")
+        scaffold_package(tmp_path, package_name="mylib")
+
+        content = (tmp_path / "pyproject.toml").read_text()
+        parsed = tomllib.loads(content)
+        assert parsed["project"]["name"] == "existing"
+        assert parsed["project"]["version"] == "1.2.3"
+        assert parsed["tool"]["nbdev"]["lib_name"] == "mylib"
+        assert content.count("[project]") == 1
+        assert content.count("[tool.nbdev]") == 1
 
     def test_scans_notebooks_for_modules(self, tmp_path):
         from dialeng.services.package_scaffold_service import scan_notebook_modules

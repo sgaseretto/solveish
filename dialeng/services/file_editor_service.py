@@ -38,6 +38,8 @@ _TEXT_EXTENSIONS = {
 class FileLease:
     client_id: str
     encoding: str
+    mtime_ns: int
+    size: int
     acquired_at: float
     last_seen_at: float
 
@@ -50,6 +52,8 @@ class FileOpenResult:
     content: str = ""
     language: str = "plaintext"
     encoding: str = "utf-8"
+    mtime_ns: int = 0
+    size: int = 0
     reason: str = ""
 
     @property
@@ -110,6 +114,8 @@ class FileEditorService:
         self._leases[canonical_rel] = FileLease(
             client_id=client_id,
             encoding=inspection.encoding,
+            mtime_ns=inspection.mtime_ns,
+            size=inspection.size,
             acquired_at=lease.acquired_at if lease else now,
             last_seen_at=now,
         )
@@ -136,7 +142,15 @@ class FileEditorService:
         if lease and lease.client_id == client_id:
             self._leases.pop(canonical_rel, None)
 
-    def save_file(self, rel_path: str, client_id: str, content: str) -> FileOpenResult:
+    def save_file(
+        self,
+        rel_path: str,
+        client_id: str,
+        content: str,
+        *,
+        expected_mtime_ns: int | None = None,
+        expected_size: int | None = None,
+    ) -> FileOpenResult:
         self._cleanup_expired_leases()
         path = self.resolve_rel_path(rel_path)
         if path is None or not path.exists() or not path.is_file():
@@ -152,11 +166,27 @@ class FileEditorService:
                 reason="This file is currently being edited by another Dialeng session.",
             )
 
+        current_mtime_ns, current_size = self._file_signature(path)
+        expected_mtime = expected_mtime_ns if expected_mtime_ns is not None and expected_mtime_ns >= 0 else lease.mtime_ns
+        expected_file_size = expected_size if expected_size is not None and expected_size >= 0 else lease.size
+        if (current_mtime_ns, current_size) != (expected_mtime, expected_file_size):
+            return FileOpenResult(
+                status="conflict",
+                rel_path=canonical_rel,
+                abs_path=path,
+                reason="This file changed on disk since it was opened. Reload before saving.",
+                mtime_ns=current_mtime_ns,
+                size=current_size,
+            )
+
         path.write_text(content, encoding=lease.encoding)
         lease.last_seen_at = time.monotonic()
         inspection = self._inspect_file(path)
         inspection.rel_path = canonical_rel
         inspection.abs_path = path
+        lease.encoding = inspection.encoding
+        lease.mtime_ns = inspection.mtime_ns
+        lease.size = inspection.size
         return inspection
 
     def _canonical_rel_path(self, rel_path: str) -> str | None:
@@ -177,6 +207,7 @@ class FileEditorService:
 
     def _inspect_file(self, path: Path) -> FileOpenResult:
         raw = path.read_bytes()
+        mtime_ns, size = self._file_signature(path)
         encoding = self._detect_encoding(raw)
         if encoding in {"utf-16", "utf-32"}:
             try:
@@ -188,6 +219,8 @@ class FileEditorService:
                     abs_path=path,
                     reason="This file could not be decoded as text.",
                     language="plaintext",
+                    mtime_ns=mtime_ns,
+                    size=size,
                 )
             return FileOpenResult(
                 status="editable",
@@ -196,6 +229,8 @@ class FileEditorService:
                 content=text,
                 language=self._language_for_path(path),
                 encoding=encoding,
+                mtime_ns=mtime_ns,
+                size=size,
             )
 
         if self._is_binary(raw, path):
@@ -205,6 +240,8 @@ class FileEditorService:
                 abs_path=path,
                 reason="This file is not plain text and cannot be edited in Dialeng.",
                 language="plaintext",
+                mtime_ns=mtime_ns,
+                size=size,
             )
 
         text = None
@@ -223,6 +260,8 @@ class FileEditorService:
                 abs_path=path,
                 reason="This file could not be decoded as text.",
                 language="plaintext",
+                mtime_ns=mtime_ns,
+                size=size,
             )
 
         return FileOpenResult(
@@ -232,7 +271,13 @@ class FileEditorService:
             content=text,
             language=self._language_for_path(path),
             encoding=chosen_encoding,
+            mtime_ns=mtime_ns,
+            size=size,
         )
+
+    def _file_signature(self, path: Path) -> tuple[int, int]:
+        stat = path.stat()
+        return stat.st_mtime_ns, stat.st_size
 
     def _language_for_path(self, path: Path) -> str:
         suffix = path.suffix.lower()

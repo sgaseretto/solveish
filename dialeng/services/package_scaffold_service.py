@@ -1,9 +1,14 @@
 """Scaffold an nbdev-compatible package from existing dialeng notebooks."""
 import logging
+import re
 from pathlib import Path
 from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _has_toml_section(content: str, section: str) -> bool:
+    return bool(re.search(rf"(?m)^\[{re.escape(section)}\]\s*$", content))
 
 
 def scan_notebook_modules(root: Path) -> Dict[str, Path]:
@@ -35,14 +40,29 @@ def scaffold_package(root: Path, package_name: Optional[str] = None) -> Path:
     modules = scan_notebook_modules(root)
     module_list = ", ".join(f'"{m}"' for m in sorted(modules.keys()))
 
-    nbdev_sections = f"""[project]
+    project_section = f"""[project]
 name = "{package_name}"
 version = "0.0.1"
 description = ""
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
+"""
 
+    build_section = """[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+"""
+
+    nbdev_section = f"""[tool.nbdev]
+lib_name = "{package_name}"
+lib_path = "{package_name}"
+nbs_path = "."
+doc_path = "_docs"
+# Discovered modules: {module_list}
+"""
+
+    nbdev_sections = f"""{project_section}
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -58,12 +78,17 @@ doc_path = "_docs"
     if pyproject_path.exists():
         existing = pyproject_path.read_text(encoding="utf-8")
         # Check if already scaffolded
-        if "[tool.nbdev]" in existing:
+        if _has_toml_section(existing, "tool.nbdev"):
             print(f"\npyproject.toml already has [tool.nbdev] — skipping scaffold.")
             print(f"Edit {pyproject_path} manually if you need changes.")
             return pyproject_path
-        # Merge: append the new sections to the existing content
-        content = existing.rstrip() + "\n\n" + nbdev_sections
+        sections = []
+        if not _has_toml_section(existing, "project"):
+            sections.append(project_section)
+        if not _has_toml_section(existing, "build-system"):
+            sections.append(build_section)
+        sections.append(nbdev_section)
+        content = existing.rstrip() + "\n\n" + "\n\n".join(section.strip() for section in sections) + "\n"
         pyproject_path.write_text(content, encoding="utf-8")
         print(f"\nExtended existing pyproject.toml with package sections.")
     else:

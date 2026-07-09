@@ -38,6 +38,7 @@ def PromptCellView(cell, notebook_id: str):
     body = Div(
         # Hidden source field for hx-vals
         Input(type="hidden", id=f"source-{cell.id}", name="source", value=cell.source),
+        Input(type="hidden", id=f"version-{cell.id}", name="expected_version", value=str(cell.version)),
         user_prompt_section,
         # AI response section with preview/edit toggle
         Div(
@@ -49,6 +50,7 @@ def PromptCellView(cell, notebook_id: str):
                          cls="prompt-content", name="output", id=f"output-{cell.id}",
                          placeholder="Click Run to generate response...",
                          hx_post=f"/dialeng/{notebook_id}/cell/{cell.id}/output",
+                         hx_include=f"#version-{cell.id}",
                          hx_trigger="blur changed", hx_swap="none",
                          style="display: none; min-height: 80px;",
                          onblur=f"switchToPreview('{cell.id}', 'output')"),
@@ -75,7 +77,7 @@ def _user_prompt_section_preview(cell, notebook_id: str, input_collapse_cls: str
                      id=f"prompt-{cell.id}",
                      placeholder="Ask the AI anything...",
                      hx_post=f"/dialeng/{notebook_id}/cell/{cell.id}/source",
-                     hx_include=f"#source-{cell.id}",
+                     hx_include=f"#source-{cell.id}, #version-{cell.id}",
                      hx_trigger="blur changed", hx_swap="none",
                      style="display: none;",
                      oninput=f"document.getElementById('source-{cell.id}').value = this.value",
@@ -97,7 +99,7 @@ def _user_prompt_section_editable(cell, notebook_id: str, input_collapse_cls: st
                      id=f"prompt-{cell.id}",
                      placeholder="Ask the AI anything...",
                      hx_post=f"/dialeng/{notebook_id}/cell/{cell.id}/source",
-                     hx_include=f"#source-{cell.id}",
+                     hx_include=f"#source-{cell.id}, #version-{cell.id}",
                      hx_trigger="blur changed", hx_swap="none",
                      oninput=f"document.getElementById('source-{cell.id}').value = this.value"),
             cls=f"prompt-input {input_collapse_cls}".strip(),

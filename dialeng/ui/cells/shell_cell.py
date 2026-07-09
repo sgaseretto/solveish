@@ -46,7 +46,7 @@ def ShellCellHeader(cell, notebook_id: str, safe_mode: bool = False):
         hx_post=f"/dialeng/{notebook_id}/cell/{cell.id}/run",
         hx_target=f"#cell-{cell.id}",
         hx_swap="none",
-        hx_vals=f"js:{{source: document.getElementById('source-{cell.id}')?.value || ''}}",
+        hx_vals=f"js:{{source: document.getElementById('source-{cell.id}')?.value || '', expected_version: document.getElementById('version-{cell.id}')?.value || '-1'}}",
         hx_timeout="120s",
         onclick=run_onclick,
         title="Run (Shift+Enter)"
@@ -130,9 +130,11 @@ def ShellCellView(cell, notebook_id: str, safe_mode: bool = False):
 
     body = Div(
         # Hidden textarea for form submission - Monaco reads from this
+        Input(type="hidden", id=f"version-{cell.id}", name="expected_version", value=str(cell.version)),
         Textarea(cell.source, name="source", id=f"source-{cell.id}",
                  style="display: none;",
                  hx_post=f"/dialeng/{notebook_id}/cell/{cell.id}/source",
+                 hx_include=f"#version-{cell.id}",
                  hx_trigger="blur changed", hx_swap="none"),
         # Monaco Editor container - with collapse support
         # Uses shell mode for shell syntax highlighting

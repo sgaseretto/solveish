@@ -15,17 +15,24 @@ ensuring the notebook cells are the sole source of truth.
 """
 import asyncio
 import sys
-import os
 
-# IMPORTANT: Detect credentials BEFORE entering async context
-# This is needed because the credential probe creates its own event loop
-print("Pre-loading credentials (before async context)...")
-from dialeng.services.credential_service import detect_credentials
-_creds = detect_credentials()
-print(f"Detected: provider={_creds.provider}, backend={_creds.backend}")
+_creds = None
 
 
-async def test_stateless_sdk_direct():
+def _get_creds():
+    """Detect credentials lazily so pytest collection stays side-effect free."""
+    global _creds
+    if _creds is None:
+        # IMPORTANT: Detect credentials BEFORE entering async context.
+        # This is needed because the credential probe creates its own event loop.
+        print("Pre-loading credentials (before async context)...")
+        from dialeng.services.credential_service import detect_credentials
+        _creds = detect_credentials()
+        print(f"Detected: provider={_creds.provider}, backend={_creds.backend}")
+    return _creds
+
+
+async def _run_stateless_sdk_direct():
     """Test stateless behavior using SDK directly."""
     print("\n" + "=" * 60)
     print("Testing STATELESS behavior with claude-agent-sdk direct")
@@ -34,7 +41,8 @@ async def test_stateless_sdk_direct():
     # Create LLMService - credentials already detected above
     from dialeng.services.llm_service import LLMService
     service = LLMService()
-    print(f"Using provider: {_creds.provider}, backend: {_creds.backend}")
+    creds = _get_creds()
+    print(f"Using provider: {creds.provider}, backend: {creds.backend}")
 
     # Query 1: "Hello! My name is John"
     print("\n[Step 1] Sending: 'Hello! My name is John'")
@@ -114,7 +122,7 @@ async def test_stateless_sdk_direct():
         return False
 
 
-async def test_compare_providers():
+async def _run_compare_providers():
     """Compare SDK direct mode."""
     print("\n" + "=" * 60)
     print("Comparing SDK direct mode")
@@ -126,7 +134,7 @@ async def test_compare_providers():
     print("\n--- Testing with use_sdk_direct=True ---")
     reset_config_cache()
     # Manually set config (or modify dialeng_config.json)
-    result_sdk = await test_stateless_sdk_direct()
+    result_sdk = await _run_stateless_sdk_direct()
 
     print("\n" + "=" * 60)
     print(f"SDK Direct Result: {'PASS' if result_sdk else 'FAIL'}")
@@ -149,7 +157,8 @@ async def main():
     print("3. Ask 'Can you remind me my name?'")
     print("4. Verify response says 'Mark', NOT 'John'")
 
-    success = await test_compare_providers()
+    _get_creds()
+    success = await _run_compare_providers()
 
     print("\n" + "=" * 60)
     print("FINAL RESULT:")

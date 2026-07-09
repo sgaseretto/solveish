@@ -58,6 +58,50 @@ def test_save_requires_lock_owner_and_updates_content(tmp_path: Path):
     assert path.read_text(encoding="utf-8") == 'print("new")\n'
 
 
+def test_save_rejects_external_file_change(tmp_path: Path):
+    root = tmp_path / "notebooks"
+    root.mkdir()
+    path = root / "script.py"
+    path.write_text('print("old")\n', encoding="utf-8")
+
+    service = FileEditorService(root)
+    opened = service.open_file("script.py", "client-a")
+    assert opened.status == "editable"
+
+    path.write_text('print("external")\n', encoding="utf-8")
+    rejected = service.save_file(
+        "script.py",
+        "client-a",
+        'print("stale")\n',
+        expected_mtime_ns=opened.mtime_ns,
+        expected_size=opened.size,
+    )
+
+    assert rejected.status == "conflict"
+    assert path.read_text(encoding="utf-8") == 'print("external")\n'
+
+
+def test_save_refreshes_file_signature(tmp_path: Path):
+    root = tmp_path / "notebooks"
+    root.mkdir()
+    path = root / "script.py"
+    path.write_text('print("old")\n', encoding="utf-8")
+
+    service = FileEditorService(root)
+    opened = service.open_file("script.py", "client-a")
+    saved = service.save_file(
+        "script.py",
+        "client-a",
+        'print("new content")\n',
+        expected_mtime_ns=opened.mtime_ns,
+        expected_size=opened.size,
+    )
+
+    assert saved.status == "editable"
+    assert saved.size == path.stat().st_size
+    assert saved.mtime_ns == path.stat().st_mtime_ns
+
+
 def test_binary_files_are_noneditable(tmp_path: Path):
     root = tmp_path / "notebooks"
     root.mkdir()
@@ -115,4 +159,6 @@ def test_file_view_route_returns_fragment_only(tmp_path: Path):
     assert response.status_code == 200
     assert "<!doctype html>" not in response.text.lower()
     assert '<input type="hidden" value="editable" id="file-editor-state"' in response.text
+    assert 'id="file-editor-mtime-ns"' in response.text
+    assert 'id="file-editor-size"' in response.text
     assert '<textarea id="file-source"' in response.text

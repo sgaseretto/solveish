@@ -11,7 +11,7 @@ from dialeng.services.kernel.subprocess_kernel import SubprocessKernel
 from dialeng.services.kernel.kernel_service import KernelService
 
 
-async def test_basic_streaming():
+async def _run_basic_streaming():
     """Test basic streaming output."""
     print("=" * 60)
     print("Test 1: Basic streaming output")
@@ -42,7 +42,7 @@ print("Done!")
     print("\nTest 1 PASSED\n")
 
 
-async def test_kernel_service():
+async def _run_kernel_service():
     """Test KernelService with Cell object."""
     print("=" * 60)
     print("Test 2: KernelService with Cell")
@@ -72,7 +72,7 @@ async def test_kernel_service():
     print("\nTest 2 PASSED\n")
 
 
-async def test_namespace_persistence():
+async def _run_namespace_persistence():
     """Test that variables persist between executions."""
     print("=" * 60)
     print("Test 3: Namespace persistence")
@@ -96,7 +96,7 @@ async def test_namespace_persistence():
     print("\nTest 3 PASSED\n")
 
 
-async def test_error_handling():
+async def _run_error_handling():
     """Test error output."""
     print("=" * 60)
     print("Test 4: Error handling")
@@ -121,7 +121,7 @@ async def test_error_handling():
     print("\nTest 4 PASSED\n")
 
 
-async def test_interrupt():
+async def _run_interrupt():
     """Test hard interrupt via SIGINT."""
     print("=" * 60)
     print("Test 5: Hard interrupt")
@@ -186,11 +186,11 @@ async def main():
     print("SUBPROCESS KERNEL TESTS")
     print("=" * 60 + "\n")
 
-    await test_basic_streaming()
-    await test_kernel_service()
-    await test_namespace_persistence()
-    await test_error_handling()
-    await test_interrupt()
+    await _run_basic_streaming()
+    await _run_kernel_service()
+    await _run_namespace_persistence()
+    await _run_error_handling()
+    await _run_interrupt()
 
     print("=" * 60)
     print("ALL TESTS PASSED!")

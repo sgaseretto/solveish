@@ -100,6 +100,35 @@ Key details:
 
 This keeps locking backend-authoritative without requiring notebook WebSockets.
 
+## External Change Detection
+
+The lease is not the only safety check. Files can still change outside Dialeng through an editor, terminal command, git checkout, or another process. To avoid silently overwriting those changes, the file editor tracks an on-disk signature:
+
+- `mtime_ns`
+- file size
+
+`GET /dialeng/file/view` returns hidden `file-editor-mtime-ns` and `file-editor-size` fields with the editable fragment. `POST /dialeng/file/save` echoes those values as `expected_mtime_ns` and `expected_size`.
+
+```mermaid
+sequenceDiagram
+    participant Browser as "File editor tab"
+    participant Server as "Dialeng server"
+    participant Disk as "Filesystem"
+
+    Browser->>Server: GET /dialeng/file/view
+    Server->>Disk: stat + read file
+    Server-->>Browser: content + mtime_ns + size
+
+    Disk->>Disk: file changed externally
+
+    Browser->>Server: POST /dialeng/file/save expected_mtime_ns/size
+    Server->>Disk: stat file
+    Server-->>Browser: conflict, do not write stale content
+    Browser->>Server: reloadFileEditorView()
+```
+
+If the current file signature does not match the expected signature, the save is rejected with status `conflict` and the browser reloads the file fragment. After a successful save, the server returns the new signature and the browser updates the hidden metadata for the next save.
+
 ## Client Flow
 
 The standalone page shell in [`dialeng/ui/file_editor.py`](../../dialeng/ui/file_editor.py) sets:

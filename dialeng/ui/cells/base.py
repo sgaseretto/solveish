@@ -115,7 +115,7 @@ def _run_button(cell, notebook_id: str):
                   hx_post=f"/dialeng/{notebook_id}/cell/{cell.id}/run",
                   hx_target=f"#cell-{cell.id}",
                   hx_swap="none" if cell.cell_type == "code" else "outerHTML",
-                  hx_vals=f"js:{{source: document.getElementById('source-{cell.id}')?.value || ''}}",
+                  hx_vals=f"js:{{source: document.getElementById('source-{cell.id}')?.value || '', expected_version: document.getElementById('version-{cell.id}')?.value || '-1'}}",
                   hx_timeout="120s",
                   onclick=onclick,
                   title="Run (Shift+Enter)")

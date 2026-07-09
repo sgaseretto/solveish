@@ -80,6 +80,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a Colab terminal helper for the future `/colab/tty` runtime-proxy WebSocket path without exposing a terminal UI yet
 - Added `tests/test_colab_cli_alignment.py` covering assignment parsing, keep-alive behavior, Contents API transfer payloads, session metadata, auth provider selection, and Colab terminal path helpers
 
+#### Kernel And State Robustness
+- Added `BroadcastManager` to centralize WebSocket connection bookkeeping and dead-client cleanup across snapshots, cell streams, prompt streams, and structural messages
+- Added kernel conformance tests covering the shared `BaseKernel`/`KernelService` contract for setup code, project file sync, execution, and shutdown
+- Added runtime notebook revision metadata and cell version checks so source/output commits from stale tabs can be rejected instead of silently overwriting newer backend state
+- Added file-editor external-change detection using file `mtime_ns`/size signatures so saves are rejected when the file changed on disk after it was opened
+- Added structured operation logs with correlation ids for cell source/output commits, cell runs, file saves, and kernel setup
+
 ### Fixed
 
 #### Colab Connection Robustness
@@ -108,6 +115,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Committed cell source/output edits now broadcast canonical backend state to every open tab instead of assuming the initiating tab's DOM is the source of truth
 - Running a code or prompt cell with fresher in-editor text now commits and broadcasts that source before execution, so other tabs no longer see only the new output while keeping stale or empty input
 - Code and shell source commits now clear outputs and execution metadata consistently in all tabs because the backend owns the committed cell version
+- Cell source/output posts now send an `expected_version`; if another tab or backend tool already advanced the cell, Dialeng broadcasts a conflict event and keeps the newer backend version
 - Notebook toolbar settings (`mode`, `model`, `safe_mode`) now synchronize across tabs via kernel snapshots
 - Outline refresh is now driven by a backend revision bump after note edits, structural cell changes, kernel restarts, and completed code execution instead of local client guesses
 - Structural cell routes and type changes now avoid mixing local HTMX swaps with authoritative WebSocket/OOB updates, reducing another class of notebook-state divergence

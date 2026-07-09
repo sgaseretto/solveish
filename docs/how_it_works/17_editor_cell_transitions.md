@@ -180,8 +180,49 @@ For operations that change source code or cell classes, JSON messages update the
 
 | Message Type | Fields | Client Action |
 |-------------|--------|---------------|
-| `cell_source_update` | `cell_id`, `source` | `editor.setValue(source)` — preserves editor DOM |
+| `cell_source_update` | `cell_id`, `source`, `version`, `notebook_revision` | `editor.setValue(source)` and update hidden expected-version state |
 | `cell_class_update` | `cell_id`, `cls` | `cell.className = cls` — no DOM replacement |
+| `cell_conflict` | `cell_id`, `expected_version`, `actual_version` | Show a warning and keep the backend-authored cell state |
+
+## Backend Revisions And Conflict Checks
+
+Cell source and output edits use two revision layers:
+
+- `cell.version`: persisted on the runtime cell object and incremented when source or output changes.
+- `notebook_revision`: runtime-only counter incremented for backend-authoritative mutations such as add, delete, move, source/output edits, type changes, and dialoghelper edits.
+
+Editable cell fragments render a hidden `expected_version` input. Browser posts include that value when committing source/output or when running a cell with unsaved editor text. The server accepts the edit only if the expected version still matches the current backend cell version.
+
+```mermaid
+sequenceDiagram
+    participant TabA as "Tab A"
+    participant TabB as "Tab B"
+    participant Server as "Dialeng server"
+
+    TabA->>Server: POST source expected_version=3
+    Server->>Server: update source, cell.version=4, notebook_revision=12
+    Server-->>TabA: cell_source_update version=4
+    Server-->>TabB: cell_source_update version=4
+
+    TabB->>Server: POST stale source expected_version=3
+    Server-->>TabB: cell_conflict actual_version=4
+    Server-->>TabB: cell_source_update version=4
+```
+
+This keeps multi-tab behavior backend-authoritative without introducing collaborative merge semantics. Stale edits are rejected, and the browser updates the hidden expected-version field from snapshots and websocket messages.
+
+## Broadcast Service
+
+Raw WebSocket connection bookkeeping is centralized in `dialeng/services/broadcast_service.py`.
+
+The app-level helpers still own notebook-specific payloads (`cell_add`, `cell_move`, `kernel_snapshot`, stream chunks), but `BroadcastManager` owns:
+
+- registering and removing per-notebook websocket send callables
+- broadcasting raw text or JSON
+- pruning dead senders after failed sends
+- broadcasting JSON to every active notebook
+
+Keeping this logic out of individual routes prevents stale websocket references and makes prompt/code/kernel broadcasts share the same cleanup path.
 
 ## HTMX Lifecycle Guards
 

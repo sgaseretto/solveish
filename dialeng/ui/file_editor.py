@@ -38,6 +38,8 @@ def FileEditorPane(result: FileOpenResult):
             Input(type="hidden", id="file-editor-state", value="editable"),
             Input(type="hidden", id="file-editor-language", value=result.language),
             Input(type="hidden", id="file-editor-path", value=result.rel_path),
+            Input(type="hidden", id="file-editor-mtime-ns", value=str(result.mtime_ns)),
+            Input(type="hidden", id="file-editor-size", value=str(result.size)),
             Textarea(result.content, id="file-source", style="display:none;"),
             Div(id="file-monaco", cls="file-monaco"),
             id="file-editor-fragment",
