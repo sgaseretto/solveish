@@ -24,6 +24,8 @@ Read the documents in numerical order for the best understanding of the system:
 | 15 | [15_extension_registries.md](15_extension_registries.md) | Kernel, provider, toolbar, and settings registries |
 | 16 | [16_craft_template_autorun.md](16_craft_template_autorun.md) | CRAFT, TEMPLATE, and AUTORUN folder support |
 | 17 | [17_editor_cell_transitions.md](17_editor_cell_transitions.md) | Monaco editor lifecycle, cell transitions, scroll preservation, FOUST known issue |
+| 20 | [20_multi_provider_llm_and_codex.md](20_multi_provider_llm_and_codex.md) | Provider inventory, OpenAI Codex transport/OAuth, backend-authoritative model selection |
+| 21 | [21_performance_reliability.md](21_performance_reliability.md) | Runtime registry, revisioned WebSockets, backpressure, atomic persistence, lazy editors, caches, and diagnostics |
 
 ## Purpose
 
@@ -40,6 +42,7 @@ These documents are intended for developers who want to:
 | Goal | Start with |
 |------|------------|
 | Learn the interface / UI | [GUI Overview](../guides/gui_overview.md) |
+| Reproduce notebook UI regressions | [Notebook Regression QA](../guides/notebook_regression_qa.md) |
 | Understand the data model | [01_state_management.md](01_state_management.md) |
 | Add a new cell type | [08_extension_system.md](08_extension_system.md) → [07_code_organization.md](07_code_organization.md) |
 | Create a custom callback | [08_extension_system.md](08_extension_system.md) |
@@ -60,6 +63,7 @@ These documents are intended for developers who want to:
 | Set up own Colab OAuth | [Colab OAuth Setup Guide](../guides/colab_oauth_setup.md) |
 | Remote notebook API | [05_dialoghelper_integration.md](05_dialoghelper_integration.md) |
 | LLM integration | [06_llm_integration.md](06_llm_integration.md) |
+| Multi-provider and OpenAI Codex internals | [20_multi_provider_llm_and_codex.md](20_multi_provider_llm_and_codex.md) |
 | Headless interaction | [05_dialoghelper_integration.md](05_dialoghelper_integration.md) |
 | Run shell commands | [11_shell_integration.md](11_shell_integration.md) |
 | Add shell cell type | [11_shell_integration.md](11_shell_integration.md) |
@@ -74,6 +78,9 @@ These documents are intended for developers who want to:
 | Editor flash / transition bugs | [17_editor_cell_transitions.md](17_editor_cell_transitions.md) |
 | Scroll jumping on cell operations | [17_editor_cell_transitions.md](17_editor_cell_transitions.md) |
 | Monaco editor lifecycle | [17_editor_cell_transitions.md](17_editor_cell_transitions.md) |
+| Diagnose performance or reconnect behavior | [21_performance_reliability.md](21_performance_reliability.md) |
+| Configure atomic saves or optional autosave | [21_performance_reliability.md](21_performance_reliability.md) (Persistence section) |
+| Understand runtime revisions and recovery | [21_performance_reliability.md](21_performance_reliability.md) (WebSocket section) |
 
 ## Related Documentation
 

@@ -10,6 +10,10 @@ An open-source Solveit-like notebook built entirely with **FastHTML**. Features 
 - **Shell command execution**: Run bash commands with `%bash` magic, `!cmd`, or dedicated shell cells
 - **Safe Mode**: Optional safecmd validation to block dangerous commands in shared/LLM notebooks
 - **Real-time collaboration**: Share URL to collaborate - see cell changes, outputs, and AI responses in real-time
+- **Resilient runtime state**: Revisioned WebSocket recovery, bounded slow-tab isolation, and backend-authoritative cell order
+- **Large notebook performance**: Lazy Monaco activation, off-screen editor disposal, bounded output rendering, and targeted caches
+- **Safe persistence**: Atomic explicit saves by default, with optional disabled-by-default autosave and recovery snapshots
+- **Runtime diagnostics**: Inspect browser, provider, kernel, queue, setup, save, and revision state from the toolbar
 - **Editable AI responses**: Both user prompts AND AI responses are fully editable
 - **Solveit-compatible**: Standard `.ipynb` format with Solveit metadata conventions
 - **Pure Python**: Built with FastHTML, no JavaScript frameworks
@@ -34,18 +38,19 @@ An open-source Solveit-like notebook built entirely with **FastHTML**. Features 
 ## 🚀 Quick Start
 
 ```bash
-# Clone and setup
-git clone <repo>
-cd llm_notebook
-pip install -r requirements.txt
+# Install directly from GitHub
+uv tool install "dialeng @ git+https://github.com/sgaseretto/solveish.git"
 
-# Run (no API key needed - uses mock LLM)
-python app.py
+# Initialize an idempotent project scaffold, then start Dialeng
+dialeng init ./my-project --name my_pkg
+dialeng ./my-project
 
 # Open http://localhost:8000
 ```
 
-Notebooks are saved to `./notebooks/*.ipynb`.
+For a repository-local install, use `uv add "dialeng @ git+https://github.com/sgaseretto/solveish.git"`
+and run `uv run dialeng init .` followed by `uv run dialeng .`. See the
+[project initialization guide](docs/guides/project_initialization.md).
 
 ---
 

@@ -705,22 +705,11 @@ class ColabKernel(BaseKernel):
                         )
 
                     elif msg_type == "execute_result":
-                        data_content = content.get("data", {})
-                        # If result contains rich MIME types (images, HTML),
-                        # treat as display_data so they get rendered properly
-                        _RICH_MIMES = {"image/png", "image/jpeg", "image/svg+xml", "text/html", "image/gif"}
-                        if _RICH_MIMES & set(data_content.keys()):
-                            yield CellOutput(
-                                output_type="display_data",
-                                content=data_content,
-                                metadata=content.get("metadata"),
-                            )
-                        else:
-                            yield CellOutput(
-                                output_type="execute_result",
-                                content=data_content.get("text/plain", ""),
-                                metadata=content.get("metadata"),
-                            )
+                        yield CellOutput(
+                            output_type="execute_result",
+                            content=content.get("data", {}),
+                            metadata=content.get("metadata"),
+                        )
 
                     elif msg_type == "clear_output":
                         yield CellOutput(

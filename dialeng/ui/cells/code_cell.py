@@ -42,35 +42,58 @@ def _render_cell_outputs(cell) -> tuple:
 
     elements = []
     has_error = False
-    stream_parts = []  # raw text, before ansi conversion
+    stream_parts = []  # raw text, before ANSI conversion
+    stream_name = None
+
+    def flush_stream():
+        nonlocal stream_parts, stream_name
+        if not stream_parts:
+            return
+        text = _process_carriage_returns(''.join(stream_parts))
+        elements.append(Pre(
+            NotStr(ansi_to_html(text)),
+            cls=f"output-item stream-output {stream_name or 'stdout'}",
+            data_output_type="stream",
+        ))
+        stream_parts = []
+        stream_name = None
 
     for out in cell.normalized_outputs():
-        if out.output_type in ('stream', 'execute_result'):
+        if out.output_type == 'stream':
+            next_stream = out.stream_name or 'stdout'
+            if stream_parts and next_stream != stream_name:
+                flush_stream()
+            stream_name = next_stream
             stream_parts.append(str(out.content))
         elif out.output_type == 'error':
+            flush_stream()
             has_error = True
-            if out.traceback:
-                stream_parts.extend(out.traceback)
-            else:
-                stream_parts.append(f"{out.ename}: {out.evalue}")
-        elif out.output_type == 'display_data':
-            # Flush any accumulated stream text before display_data
-            if stream_parts:
-                text = _process_carriage_returns(''.join(stream_parts))
-                elements.append(Pre(NotStr(ansi_to_html(text)), cls="stream-output"))
-                stream_parts = []
-            # Render the MIME bundle to HTML
+            error_text = (
+                '\n'.join(line.rstrip('\n') for line in out.traceback)
+                if out.traceback
+                else f"{out.ename}: {out.evalue}"
+            )
+            elements.append(Pre(
+                NotStr(ansi_to_html(error_text)),
+                cls="output-item stream-output stderr error-output",
+                data_output_type="error",
+            ))
+        elif out.output_type in {'display_data', 'execute_result'}:
+            flush_stream()
             html = render_mime_bundle(
                 out.content if isinstance(out.content, dict) else {'text/plain': str(out.content)},
                 out.metadata
             )
-            elements.append(Div(NotStr(html), cls="display-data"))
+            kind = 'execute-result' if out.output_type == 'execute_result' else 'display-data'
+            attrs = {
+                'cls': f"output-item display-data {kind}",
+                'data_output_type': out.output_type,
+            }
+            if out.display_id:
+                attrs['data_display_id'] = out.display_id
+            elements.append(Div(NotStr(html), **attrs))
 
-    # Flush remaining stream text
-    if stream_parts:
-        text = _process_carriage_returns(''.join(stream_parts))
-        has_error = has_error or ('Error' in text or 'Traceback' in text)
-        elements.append(Pre(NotStr(ansi_to_html(text)), cls="stream-output"))
+    flush_stream()
 
     return elements, has_error
 
@@ -102,7 +125,7 @@ def CodeCellView(cell, notebook_id: str):
                  hx_trigger="blur changed", hx_swap="none"),
         # Monaco Editor container - with collapse support
         Div(
-            Div(id=f"monaco-{cell.id}", cls="monaco-container"),
+            Div(Pre(cell.source, cls="monaco-placeholder"), id=f"monaco-{cell.id}", cls="monaco-container"),
             cls=f"cell-input {input_collapse_cls}".strip(),
             data_collapse_section="input"
         ),

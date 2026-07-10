@@ -55,6 +55,7 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
         model: str,
         use_thinking: bool,
         config: Any,
+        cancel_event: Any = None,
     ) -> AsyncIterator[Dict]:
         """Stream response using claude-agent-sdk directly.
 
@@ -141,6 +142,8 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
         try:
             sdk_prompt = prompt_stream() if not isinstance(prompt_payload, str) else prompt_payload
             async for message in sdk_query(prompt=sdk_prompt, options=options):
+                if cancel_event and cancel_event.is_set():
+                    return
                 if isinstance(message, ResultMessage):
                     if hasattr(message, 'usage') and message.usage:
                         self._last_result.usage = message.usage
@@ -214,6 +217,7 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
         notebook_id: str,
         registry: Any,
         max_steps: int,
+        cancel_event: Any = None,
     ) -> AsyncIterator[Dict]:
         """Stream with MCP-based tool calling for claude-agent-sdk.
 
@@ -341,6 +345,8 @@ class ClaudeAgentSdkProvider(BaseLLMProvider):
             in_tool_block = False
 
             async for message in sdk_query(prompt=message_generator(), options=options):
+                if cancel_event and cancel_event.is_set():
+                    return
                 if isinstance(message, ResultMessage):
                     if hasattr(message, 'usage') and message.usage:
                         self._last_result.usage = message.usage

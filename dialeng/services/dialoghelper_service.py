@@ -11,10 +11,13 @@ service implements the server-side logic that dialoghelper's call_endp() calls.
 """
 import os
 import re
+import copy
 import logging
-from collections import defaultdict
+import time
+from collections import defaultdict, OrderedDict
 from typing import List, Dict, Optional, Tuple, Any
 from xml.sax.saxutils import escape as xml_escape
+from dialeng.services.performance_service import performance_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +30,47 @@ _clipboards: Dict[str, List[Dict]] = defaultdict(list)
 
 # Per-notebook change logs for log_changed support
 _change_logs: Dict[str, List[Dict]] = defaultdict(list)
+
+_CONTEXT_CELL_CACHE_MAX = 2048
+_context_cell_cache: OrderedDict[tuple, tuple[List[Dict], int]] = OrderedDict()
+_context_reports: OrderedDict[tuple[str, str], Dict] = OrderedDict()
+
+
+def _cell_context_cache_key(cell) -> tuple:
+    return (
+        cell.id,
+        cell.version,
+        str(cell.cell_type),
+        bool(cell.skipped),
+        bool(cell.pinned),
+    )
+
+
+def _cached_cell_messages(cell) -> tuple[List[Dict], int]:
+    key = _cell_context_cache_key(cell)
+    cached = _context_cell_cache.get(key)
+    if cached is not None:
+        _context_cell_cache.move_to_end(key)
+        performance_monitor.increment("prompt.context_cell_cache.hit")
+        return copy.deepcopy(cached[0]), cached[1]
+    messages = cell_to_messages(cell)
+    estimated_chars = estimate_cell_context_chars(cell)
+    _context_cell_cache[key] = (copy.deepcopy(messages), estimated_chars)
+    _context_cell_cache.move_to_end(key)
+    while len(_context_cell_cache) > _CONTEXT_CELL_CACHE_MAX:
+        _context_cell_cache.popitem(last=False)
+    performance_monitor.increment("prompt.context_cell_cache.miss")
+    return messages, estimated_chars
+
+
+def get_context_inspection(notebook_id: str, current_cell_id: str) -> Dict | None:
+    report = _context_reports.get((notebook_id, current_cell_id))
+    return copy.deepcopy(report) if report is not None else None
+
+
+def clear_context_cache() -> None:
+    _context_cell_cache.clear()
+    _context_reports.clear()
 
 # ============================================================================
 # Core Cell Query Functions (reused by endpoints AND context building)
@@ -596,7 +640,7 @@ def get_change_log(notebook_id: str) -> List[Dict]:
 # LLM Context Building (leverages the functions above)
 # ============================================================================
 
-def build_context_messages(notebook, current_cell_id: str) -> List[Dict]:
+def _build_context_messages(notebook, current_cell_id: str) -> List[Dict]:
     """
     Build LLM context messages using dialoghelper functions.
 
@@ -650,14 +694,14 @@ def build_context_messages(notebook, current_cell_id: str) -> List[Dict]:
 
     # 3. Calculate size-aware window. Pinned cells are preserved even if they
     # consume most of the budget; recent non-pinned cells fill the remainder.
-    pinned_budget = sum(estimate_cell_context_chars(cell) for _, cell in pinned_results)
+    pinned_budget = sum(_cached_cell_messages(cell)[1] for _, cell in pinned_results)
     remaining_budget = max(0, MAX_CONTEXT_CHARS - pinned_budget)
     window_tuples = []
     used_budget = 0
 
     if remaining_budget > 0:
         for idx, cell in reversed(non_pinned_tuples):
-            cell_budget = estimate_cell_context_chars(cell)
+            cell_budget = _cached_cell_messages(cell)[1]
             if window_tuples and used_budget + cell_budget > remaining_budget:
                 continue
             if len(window_tuples) >= MAX_CONTEXT_CELLS:
@@ -685,7 +729,7 @@ def build_context_messages(notebook, current_cell_id: str) -> List[Dict]:
     # 5. Convert to messages (in chronological order)
     messages = []
     for idx, cell in all_tuples:
-        cell_messages = cell_to_messages(cell)
+        cell_messages, _ = _cached_cell_messages(cell)
         messages.extend(cell_messages)
         # Log each cell being included
         logger.info(f"build_context_messages: Cell[{idx}] type={cell.cell_type} id={cell.id}")
@@ -694,6 +738,7 @@ def build_context_messages(notebook, current_cell_id: str) -> List[Dict]:
         logger.info(f"  -> {len(cell_messages)} messages")
 
     # 6. Prepend CRAFT.ipynb context (note/prompt cells from CRAFT files)
+    craft_message_count = 0
     notebook_path = getattr(notebook, 'path', None)
     if notebook_path:
         try:
@@ -705,12 +750,97 @@ def build_context_messages(notebook, current_cell_id: str) -> List[Dict]:
             if craft_paths:
                 craft_messages = get_craft_context(craft_paths)
                 if craft_messages:
+                    craft_message_count = len(craft_messages)
                     logger.info(f"build_context_messages: Prepending {len(craft_messages)} CRAFT messages")
                     messages = craft_messages + messages
         except Exception as e:
             logger.error(f"build_context_messages: CRAFT context error: {e}")
 
+    image_count = 0
+    image_bytes = 0
+    message_summaries = []
+    context_chars = 0
+    for message in messages:
+        content = message.get("content", "")
+        context_chars += _message_content_char_budget(content)
+        if isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") in {"image", "image_url"}:
+                    image_count += 1
+                    image_bytes += len(str(block.get("source") or block.get("image_url") or ""))
+        message_summaries.append({
+            "role": message.get("role", "user"),
+            "content_chars": _message_content_char_budget(content),
+        })
+
+    included_indices = {idx for idx, _ in all_tuples}
+    skipped_cells = [
+        {"cell_id": cell.id, "index": idx, "reason": "skipped"}
+        for idx, cell in enumerate(notebook.cells[:current_idx])
+        if cell.skipped
+    ]
+    truncated_cells = [
+        {"cell_id": cell.id, "index": idx, "reason": "context_budget"}
+        for idx, cell in non_pinned_tuples
+        if idx not in included_indices
+    ]
+    report_key = (str(getattr(notebook, "id", "")), current_cell_id)
+    _context_reports[report_key] = {
+        "notebook_id": report_key[0],
+        "current_cell_id": current_cell_id,
+        "included_cells": [
+            {
+                "cell_id": cell.id,
+                "index": idx,
+                "cell_type": str(cell.cell_type),
+                "pinned": bool(cell.pinned),
+                "message_count": len(_cached_cell_messages(cell)[0]),
+            }
+            for idx, cell in all_tuples
+        ],
+        "skipped_cells": skipped_cells,
+        "truncated_cells": truncated_cells,
+        "messages": message_summaries,
+        "craft_message_count": craft_message_count,
+        "image_count": image_count,
+        "encoded_image_chars": image_bytes,
+        "context_chars": context_chars,
+        "estimated_input_tokens": max(1, context_chars // 4) if context_chars else 0,
+        "max_context_chars": MAX_CONTEXT_CHARS,
+        "dynamic_injections": "evaluated_fresh_during_prompt_execution",
+    }
+    _context_reports.move_to_end(report_key)
+    while len(_context_reports) > 200:
+        _context_reports.popitem(last=False)
+
     logger.info(f"build_context_messages: Final context has {len(messages)} messages")
+    return messages
+
+
+def build_context_messages(notebook, current_cell_id: str) -> List[Dict]:
+    """Build prompt context and record aggregate preparation cost."""
+    start = time.perf_counter()
+    try:
+        messages = _build_context_messages(notebook, current_cell_id)
+    except Exception as exc:
+        performance_monitor.observe_duration(
+            "prompt.context_build",
+            (time.perf_counter() - start) * 1000,
+            labels={"outcome": "error"},
+            cell_count=len(getattr(notebook, "cells", [])),
+            error_type=type(exc).__name__,
+        )
+        raise
+    performance_monitor.observe_duration(
+        "prompt.context_build",
+        (time.perf_counter() - start) * 1000,
+        labels={"outcome": "success"},
+        cell_count=len(getattr(notebook, "cells", [])),
+        message_count=len(messages),
+        context_chars=sum(len(str(message.get("content", ""))) for message in messages),
+    )
     return messages
 
 

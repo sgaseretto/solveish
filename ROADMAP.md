@@ -2,6 +2,11 @@
 
 This document outlines the planned features and development direction for Dialeng.
 
+For the detailed engineering plan covering startup performance, WebSocket
+recovery, runtime lifecycle state, large-notebook rendering, optional autosave,
+diagnostics, and fault testing, see the
+[Performance, Reliability, and UX Roadmap](docs/superpowers/plans/2026-07-09-performance-reliability-ux-roadmap.md).
+
 ## Current Status: v0.3.1
 
 ✅ **Completed in v0.1.0 (MVP)**

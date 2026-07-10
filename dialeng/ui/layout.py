@@ -5,6 +5,7 @@ Page layout and container components.
 """
 
 from fasthtml.common import *
+import json
 from typing import List, Optional
 from pathlib import Path
 from .cells import CellView
@@ -48,12 +49,137 @@ def AllCells(nb):
     return Div(*items, id="cells")
 
 
+def ProviderSelect(nb, available_providers: list):
+    """Backend-authored provider selector, including an unavailable saved value."""
+    options = []
+    for provider in available_providers:
+        provider_id = provider["id"]
+        authenticated = bool(provider.get("authenticated"))
+        validation_state = provider.get("validation_state", "ready")
+        label = provider.get("label", provider_id)
+        if validation_state == "validating":
+            label = f"{label} (validating...)"
+        elif not authenticated:
+            label = f"{label} (unavailable)"
+        options.append(Option(
+            label,
+            value=provider_id,
+            selected=nb.llm_provider == provider_id,
+            disabled=not authenticated,
+        ))
+    return Select(
+        *options,
+        cls="model-select provider-select",
+        name="provider",
+        id="provider-select",
+        hx_post=f"/dialeng/{nb.id}/provider",
+        hx_target="#model-select",
+        hx_swap="outerHTML",
+        title="LLM provider",
+        style="display: none;" if nb.dialog_mode == "mock" else "",
+    )
+
+
+def ModelSelect(nb, available_models: list):
+    """Backend-authored model selector for the notebook's selected provider."""
+    return Select(
+        *[Option(label, value=model_id, selected=nb.model == model_id)
+          for model_id, label in available_models],
+        cls="model-select",
+        name="model",
+        id="model-select",
+        hx_post=f"/dialeng/{nb.id}/model",
+        hx_swap="none",
+        title="Model",
+        style="display: none;" if nb.dialog_mode == "mock" else "",
+    )
+
+
+def WorkspacePage(root: Path, config: Optional[DialengConfig] = None,
+                  kernel_notebooks: Optional[set] = None,
+                  notebook_deleted: bool = False):
+    """Render the project shell without opening or creating a notebook."""
+    title = "Notebook deleted" if notebook_deleted else "No notebook open"
+    description = (
+        "The notebook and its attached kernel were removed. Select another file "
+        "from the explorer or create a new notebook."
+        if notebook_deleted else
+        "Select a notebook from the explorer or create one to start working."
+    )
+    return Titled(
+        "Dialeng Workspace",
+        icon_sprites,
+        Div(
+            FileExplorerSidebar(
+                root,
+                root,
+                "",
+                active_file_relpath="",
+                kernel_notebooks=kernel_notebooks or set(),
+            ),
+            Div(
+                Div(
+                    Div(
+                        Button(
+                            icon_sprites('panel-left-open', sz=16),
+                            cls="btn btn-sm file-explorer-toggle-btn",
+                            onclick="toggleFileExplorer()",
+                            title="Toggle file explorer (Ctrl+Shift+E)",
+                        ),
+                        Span(icon_sprites('notebook', sz=16), "Dialeng", cls="toolbar-title"),
+                        cls="toolbar-left",
+                    ),
+                    Div(
+                        Button(
+                            icon_sprites('settings', sz=16),
+                            cls="btn btn-sm settings-btn",
+                            id="settings-btn",
+                            onclick="toggleSettings()",
+                            title="Settings",
+                        ),
+                        Button(
+                            icon_sprites('sun', sz=16),
+                            cls="theme-toggle",
+                            id="theme-toggle",
+                            onclick="toggleTheme()",
+                            title="Toggle light/dark theme",
+                        ),
+                        cls="toolbar-right",
+                    ),
+                    cls="toolbar-container",
+                ),
+                Div(
+                    Div(icon_sprites('notebook-text', sz=34), cls="workspace-empty-icon"),
+                    H2(title),
+                    P(description),
+                    Button(
+                        icon_sprites('file-plus', sz=15),
+                        " New notebook",
+                        cls="btn btn-primary",
+                        onclick="toggleNewItemModal()",
+                    ),
+                    cls="workspace-empty-card",
+                ),
+                Script("window.NOTEBOOK_ID = ''; window.NOTEBOOK_TERMINAL_STATE = true;"),
+                cls="container workspace-container",
+            ),
+            cls="main-layout",
+        ),
+        NewItemModal(),
+        DeleteConfirmModal(),
+        SettingsOverlay() if config else None,
+        SettingsSidebar(config) if config else None,
+    )
+
+
 def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, available_models: list,
+                 available_providers: Optional[list] = None,
                  config: Optional[DialengConfig] = None, shfmt_available: bool = True,
                  colab_enabled: bool = False, colab_authenticated: bool = False,
                  colab_account_email: Optional[str] = None,
                  notebooks_dir: Optional[Path] = None, kernel_alive: bool = False,
-                 kernel_notebooks: Optional[set] = None, has_craft_code: bool = False):
+                 kernel_notebooks: Optional[set] = None, has_craft_code: bool = False,
+                 initial_revisions: Optional[dict] = None):
     """Render the complete notebook page.
 
     Args:
@@ -129,13 +255,8 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                             hx_post=f"/dialeng/{nb.id}/mode", hx_swap="none", title="AI Mode",
                             onchange="toggleModelSelect(this.value)"
                         ),
-                        Select(
-                            *[Option(label, value=model_id, selected=nb.model == model_id)
-                              for model_id, label in available_models],
-                            cls="model-select", name="model", id="model-select",
-                            hx_post=f"/dialeng/{nb.id}/model", hx_swap="none", title="Model",
-                            style="display: none;" if nb.dialog_mode == "mock" else ""
-                        ),
+                        ProviderSelect(nb, available_providers or []),
+                        ModelSelect(nb, available_models),
                         # Safe mode toggle for shell commands
                         Button(
                             icon_sprites('shield-check' if nb.safe_mode else 'shield-off', sz=14),
@@ -154,8 +275,15 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                                style="display: none;"),
                         Button(icon_sprites('save', sz=14), cls="btn btn-sm btn-save", id="save-btn",
                                hx_post=f"/dialeng/{nb.id}/save", hx_target="#status", title="Save (Ctrl+S)"),
+                        Span(
+                            "Modified" if nb.modified else "Saved",
+                            id="notebook-save-state",
+                            cls=f"notebook-save-state {'modified' if nb.modified else 'saved'}",
+                        ),
                         Button(icon_sprites('download', sz=14), cls="btn btn-sm",
                                hx_get=f"/dialeng/{nb.id}/export", title="Download .ipynb"),
+                        Button(icon_sprites('activity', sz=14), cls="btn btn-sm btn-icon",
+                               onclick="showKernelDiagnostics()", title="Kernel diagnostics"),
                         Button(icon_sprites('keyboard', sz=14), cls="btn btn-sm",
                                onclick="toggleKeyboardShortcuts()", title="Keyboard shortcuts (?)"),
                         # Extension toolbar items
@@ -169,6 +297,7 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                 AllCells(nb),
                 Script(f"""
                     window.NOTEBOOK_ID = '{nb.id}';
+                    window.INITIAL_REVISIONS = {json.dumps(initial_revisions or {})};
                     window.KERNEL_ALIVE = {'true' if kernel_alive else 'false'};
                     window.KERNEL_STATE = {{
                         kernel: {{
@@ -184,6 +313,7 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                         auth: {{ enabled: {'true' if colab_enabled else 'false'}, authenticated: {'true' if colab_authenticated else 'false'} }}
                     }};
                     window.HAS_CRAFT_CODE = {'true' if has_craft_code else 'false'};
+                    window.AUTOSAVE_ENABLED = {'true' if config.autosave_enabled else 'false'};
                 """),
                 Script(f"document.addEventListener('DOMContentLoaded', () => connectWebSocket('{nb.id}'));"),
                 Div(id="ephemeral"),  # Container for dialoghelper script injection (matches add_scr default)

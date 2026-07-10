@@ -288,6 +288,10 @@ class ToolRegistry:
         """Get Anthropic tool schemas for all built-in tools."""
         return list(self._builtin_schemas.values())
 
+    def get_builtin_schema(self, name: str) -> Optional[dict]:
+        """Get one built-in schema by name."""
+        return self._builtin_schemas.get(name)
+
     def get_builtin_names(self) -> List[str]:
         """Get names of all registered built-in tools."""
         return list(self._builtin_tools.keys())

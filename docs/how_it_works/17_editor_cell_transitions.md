@@ -285,26 +285,61 @@ The notebook used to rely on HTMX `outerHTML` swaps for structural operations. A
 
 ## Cell Focus Navigation
 
-### Shift+Enter Focus Flow
+### Run Focus Flow
 
-When pressing Shift+Enter in a code cell, the editor must move focus to the next cell regardless of type:
+A normal toolbar Run or Shift+Enter advances to the next cell regardless of
+the source or destination cell type. The browser that initiated the run owns
+this navigation; the backend owns execution state and output, but never sends
+a delayed focus command when a prompt finishes.
 
 ```javascript
-function focusNextCell(cellId) {
-    setFocusedCell(cellId);  // Visual highlight
+document.addEventListener('htmx:beforeRequest', (event) => {
+    if (!isCellRunRequest(event)) return;
+    const advance = runIntentTracker.consume(event.detail.elt);
+    if (!advance || !kernelAcceptedRun(event)) return;
 
-    if (cell.dataset.type === 'code' || cell.dataset.type === 'shell') {
-        monacoEditors[cellId].focus();  // Focus Monaco editor
-    } else {
-        // For note/prompt cells: move DOM focus to the cell element
-        // This removes focus from the previous Monaco editor
-        cell.tabIndex = -1;
-        cell.focus();
-    }
+    // Let the originating click finish before selecting the destination.
+    requestAnimationFrame(() => moveToNextCell(sourceCell));
+});
+
+async function focusNextCell(cellId) {
+    const cell = document.getElementById(`cell-${cellId}`);
+    cell.scrollIntoView({behavior: 'auto', block: 'nearest'});
+    await focusCellWithoutScroll(cellId, window.scrollY);
+    cell.scrollIntoView({behavior: 'auto', block: 'nearest'});
 }
 ```
 
-**Why `cell.focus()` is needed:** Without it, the Monaco editor in the previous code cell retains keyboard focus. The next Shift+Enter would fire the Monaco action handler again, re-running the same cell instead of advancing.
+`RunIntentTracker` makes the semantic difference explicit: normal Run and
+Shift+Enter advance, while Ctrl/Cmd+Enter and batch runs stay in place. The
+intent is consumed once, including after a kernel-selection flow, so keyboard
+handlers and the HTMX request cannot both advance the notebook.
+
+The animation-frame boundary is required because the original Run button
+click also bubbles through the source cell's selection handler. Advancing
+synchronously would focus the next editor and then re-highlight the source
+cell. `focusCellWithoutScroll()` uses `preventScroll`, waits for lazy Monaco
+initialization, and restores the revealed viewport anchor so browser focus
+cannot scroll the document back to the top.
+
+For a final cell, `moveToNextCell()` submits one backend-authoritative cell add.
+The resulting structural WebSocket event inserts and focuses that new cell.
+Prompt and code run responses both use `hx_swap="none"`; streamed/OOB output
+updates do not replace the whole cell or alter local focus.
+
+### Run Control Lifecycle
+
+Run and Cancel controls are updated by one idempotent client helper rather than
+by whichever event happens to arrive last. A running transition adds the
+`streaming` class, disables and hides Run, and shows Cancel. Completion,
+cancellation, request failure, timeout, and no-kernel recovery all perform the
+inverse transition and explicitly set `runButton.disabled = false`.
+
+This explicit unlock matters for prompt reruns. Prompt completion also sends a
+granular header update, but that update is not responsible for restoring the
+button. If a collaboration event is delayed or skipped, the existing DOM button
+is still runnable. Changing mode, provider, or model therefore cannot preserve a
+stale disabled button from an earlier Mock or provider-backed run.
 
 ## Granular DOM Operations (Phase 3 — FOUST Elimination)
 
@@ -361,7 +396,12 @@ flowchart LR
 
 ### Prompt Cell Completion
 
-Prompt completion sends `CellHeaderOOB` + `cell_class_update` JSON. The output was already streamed via `stream_chunk`/`stream_end` messages during execution.
+Prompt completion sends `CellHeaderOOB` + `cell_class_update` JSON. The output
+was already streamed via `stream_chunk`/`stream_end` messages during execution.
+The run route returns an empty response and does not append a cell, replace the
+prompt cell, or direct browser focus. This keeps navigation local to the tab
+that initiated the run and prevents completion from pulling another tab or a
+long notebook back to an obsolete scroll position.
 
 ### Remaining FOUST Case
 

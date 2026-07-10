@@ -16,6 +16,7 @@ class ProviderInfo:
     supports_native_tools: bool  # True for claudette (Anthropic tool calling)
     supports_mcp_tools: bool     # True for claude_agent_sdk (MCP-based tools)
     supports_streaming: bool = True
+    capabilities: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -64,6 +65,7 @@ class BaseLLMProvider(ABC):
         model: str,
         use_thinking: bool,
         config: Any,
+        cancel_event: Any = None,
     ) -> AsyncIterator[Dict]:
         """Stream a plain response (no tools).
 
@@ -93,6 +95,7 @@ class BaseLLMProvider(ABC):
         notebook_id: str,
         registry: Any,
         max_steps: int,
+        cancel_event: Any = None,
     ) -> AsyncIterator[Dict]:
         """Stream a response with tool calling support.
 
@@ -117,6 +120,10 @@ class BaseLLMProvider(ABC):
     def get_info(self) -> ProviderInfo:
         """Return static provider metadata."""
         ...
+
+    async def refresh_authentication(self) -> bool:
+        """Refresh provider credentials when supported."""
+        return False
 
     @property
     def last_result(self) -> LLMResult:

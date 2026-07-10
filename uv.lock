@@ -919,12 +919,14 @@ dependencies = [
     { name = "pexpect" },
     { name = "pshnb" },
     { name = "python-fasthtml" },
+    { name = "pyyaml" },
     { name = "safecmd" },
     { name = "safepyrun" },
     { name = "tiktoken" },
     { name = "tqdm" },
     { name = "tracefunc", version = "0.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "tracefunc", version = "0.0.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "websockets" },
     { name = "yt-dlp" },
 ]
 
@@ -957,11 +959,13 @@ requires-dist = [
     { name = "pexpect", specifier = ">=4.9.0" },
     { name = "pshnb" },
     { name = "python-fasthtml", specifier = ">=0.12.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "safecmd" },
     { name = "safepyrun" },
     { name = "tiktoken", specifier = ">=0.7.0" },
     { name = "tqdm", specifier = ">=4.66.0" },
     { name = "tracefunc" },
+    { name = "websockets", specifier = ">=15.0.1" },
     { name = "yt-dlp", specifier = ">=2024.1.0" },
 ]
 

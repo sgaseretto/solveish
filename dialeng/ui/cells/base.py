@@ -80,6 +80,12 @@ def CellHeader(cell, notebook_id: str, collapse_controls: list = None):
                    cls=f"btn btn-sm btn-icon state-toggle{' active' if cell.is_exported else ''}",
                    onclick=f"toggleCellState('{cell.id}', 'is_exported')",
                    title="Toggle export (e)"),
+            Button(
+                ss('list-tree', sz=14),
+                cls="btn btn-sm btn-icon",
+                onclick=f"showContextInspector('{cell.id}')",
+                title="Inspect LLM context",
+            ) if cell.cell_type == "prompt" else None,
             TypeSelect(cell.id, cell.cell_type, notebook_id),
             _run_button(cell, notebook_id),
             _cancel_button(cell, notebook_id),
@@ -108,15 +114,19 @@ def _run_button(cell, notebook_id: str):
         onclick = (f"syncMonacoToTextarea('{cell.id}'); "
                    f"syncPromptContent('{cell.id}'); "
                    f"startStreaming('{cell.id}', {str(cell.use_thinking).lower()});")
+        onpointerdown = (f"syncMonacoToTextarea('{cell.id}'); "
+                         f"syncPromptContent('{cell.id}');")
     else:
         onclick = f"syncMonacoToTextarea('{cell.id}'); prepareCodeRun('{cell.id}');"
+        onpointerdown = f"syncMonacoToTextarea('{cell.id}');"
 
     return Button(ss('play', sz=14), cls="btn btn-sm btn-run",
                   hx_post=f"/dialeng/{notebook_id}/cell/{cell.id}/run",
                   hx_target=f"#cell-{cell.id}",
-                  hx_swap="none" if cell.cell_type == "code" else "outerHTML",
-                  hx_vals=f"js:{{source: document.getElementById('source-{cell.id}')?.value || '', expected_version: document.getElementById('version-{cell.id}')?.value || '-1'}}",
+                  hx_swap="none",
+                  hx_vals=f"js:{{source: getCellSourceForRequest('{cell.id}'), expected_version: document.getElementById('version-{cell.id}')?.value || '-1'}}",
                   hx_timeout="120s",
+                  onpointerdown=onpointerdown,
                   onclick=onclick,
                   title="Run (Shift+Enter)")
 

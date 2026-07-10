@@ -21,10 +21,12 @@ class Notebook:
     cells: List[Cell] = field(default_factory=list)
     dialog_mode: str = "learning"
     model: Optional[str] = None  # LLM model to use (None = use config default)
+    llm_provider: Optional[str] = None  # Backend-qualified provider selection
 
     # File info
     path: Optional[Path] = None
     modified: bool = False
+    disk_signature: Optional[tuple[int, int, str]] = field(default=None, repr=False, compare=False)
 
     # Solveit metadata
     solveit_ver: int = 2
@@ -134,6 +136,8 @@ class Notebook:
                 "title": self.title,
                 "solveit_dialog_mode": self.dialog_mode,
                 "dialeng_model": self.model,
+                "solveit_model": self.model,
+                "dialeng_provider": self.llm_provider,
                 "solveit_ver": self.solveit_ver,
                 "dialeng_safe_mode": self.safe_mode,
                 "dialeng_kernel_type": self.kernel_type,
@@ -165,20 +169,39 @@ class Notebook:
             cells=cells,
             dialog_mode=saved_mode,
             model=effective_model,
+            llm_provider=metadata.get("dialeng_provider") or None,
             solveit_ver=metadata.get("solveit_ver", 2),
             safe_mode=metadata.get("dialeng_safe_mode", False),
             kernel_type=metadata.get("dialeng_kernel_type", "local"),
             colab_runtime_type=metadata.get("dialeng_colab_runtime_type", "cpu"),
         )
 
-    def save(self, path: str):
-        """Save notebook to .ipynb file."""
+    def save(
+        self,
+        path: str,
+        *,
+        atomic: bool = True,
+        check_external: bool = True,
+        overwrite_external: bool = False,
+    ):
+        """Save the notebook atomically by default."""
         p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, 'w') as f:
-            json.dump(self.to_ipynb(), f, indent=2)
-        self.path = p
-        self.modified = False
+        if atomic:
+            from dialeng.services.persistence_service import save_notebook_atomic
+            save_notebook_atomic(
+                self,
+                p,
+                check_external=check_external,
+                overwrite_external=overwrite_external,
+            )
+        else:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, 'w', encoding='utf-8') as f:
+                json.dump(self.to_ipynb(), f, indent=2)
+            self.path = p
+            self.modified = False
+            from dialeng.services.persistence_service import file_signature
+            self.disk_signature = file_signature(p)
 
     @classmethod
     def load(cls, path: str, default_dialog_mode: str = "learning",
@@ -198,4 +221,6 @@ class Notebook:
                             model_validator=model_validator)
         nb.title = Path(path).stem
         nb.path = Path(path)
+        from dialeng.services.persistence_service import file_signature
+        nb.disk_signature = file_signature(nb.path)
         return nb

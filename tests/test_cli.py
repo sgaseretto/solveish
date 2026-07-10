@@ -78,6 +78,33 @@ class TestResolveRootDir:
         assert result == env_dir
 
 
+class TestAppMain:
+    """Test CLI-to-reload-worker startup state."""
+
+    def test_exports_selected_root_for_reload_worker(self, tmp_path, monkeypatch):
+        from dialeng import app as app_module
+
+        captured = {}
+        monkeypatch.delenv("DIALENG_NOTEBOOKS_DIR", raising=False)
+        monkeypatch.setattr(
+            app_module,
+            "set_root_dir",
+            lambda root: captured.setdefault("root", root),
+        )
+        monkeypatch.setattr(
+            app_module,
+            "serve",
+            lambda **kwargs: captured.setdefault("serve", kwargs),
+        )
+
+        app_module.main(tmp_path, port=9876)
+
+        expected = tmp_path.resolve()
+        assert captured["root"] == expected
+        assert app_module.os.environ["DIALENG_NOTEBOOKS_DIR"] == str(expected)
+        assert captured["serve"]["port"] == 9876
+
+
 class TestPackageSubcommand:
     """Test that 'dialeng package init' subcommand is parsed."""
 

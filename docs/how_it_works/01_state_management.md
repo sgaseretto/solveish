@@ -1,658 +1,257 @@
-# State Management - Technical Documentation
+# State Management
 
-This document explains how Dialeng manages notebook and cell state, including the in-memory data structures, persistence to disk, and state synchronization across the application.
-
-## Table of Contents
-
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [Data Structures](#data-structures)
-4. [State Lifecycle](#state-lifecycle)
-5. [CRUD Operations](#crud-operations)
-6. [Persistence](#persistence)
-7. [State Synchronization](#state-synchronization)
-8. [Key Files and Functions](#key-files-and-functions)
-9. [Extending the State System](#extending-the-state-system)
-
----
-
-## Overview
-
-Dialeng uses a simple but effective state management approach:
-
-- **In-memory dictionary** holds all active notebooks
-- **Lazy loading** - notebooks are loaded from disk on first access
-- **Manual save** - changes persist to `.ipynb` files when user clicks Save (Ctrl+S)
-- **Direct mutation** - routes modify the in-memory objects directly
-- **HTMX re-rendering** - UI updates by re-rendering FastHTML components
-
-```mermaid
-flowchart LR
-    subgraph Memory["In-Memory State"]
-        notebooks["notebooks: Dict[str, Notebook]"]
-        nb1["Notebook 'demo'"]
-        nb2["Notebook 'project'"]
-        notebooks --> nb1
-        notebooks --> nb2
-    end
-
-    subgraph Disk["File System"]
-        dir["notebooks/"]
-        f1["demo.ipynb"]
-        f2["project.ipynb"]
-        dir --> f1
-        dir --> f2
-    end
-
-    Memory <-->|"load/save"| Disk
-```
-
----
+Dialeng keeps notebook state backend-authoritative. The in-memory `Notebook`
+document is owned by one `NotebookRuntime`; browser tabs submit versioned
+mutations and reconcile from revisioned events rather than acting as competing
+sources of truth.
 
 ## Architecture
 
-### State Flow
-
 ```mermaid
 flowchart TB
-    subgraph UserAction["User Action"]
-        click["Click Run/Add/Delete"]
-        type["Type in Cell"]
-        save["Click Save"]
-    end
-
-    subgraph HTMX["HTMX Layer"]
-        post["POST /dialeng/{id}/cell/..."]
-    end
-
-    subgraph Route["FastHTML Route"]
-        getNb["get_notebook(id)"]
-        mutate["Mutate notebook/cell"]
-        render["Return HTML component"]
-    end
-
-    subgraph State["State Layer"]
-        dict["notebooks dict"]
-        nb["Notebook object"]
-        cells["Cell objects"]
-    end
-
-    subgraph Persistence["Persistence Layer"]
-        saveNb["save_notebook(id)"]
-        ipynb["*.ipynb file"]
-    end
-
-    click --> post
-    type --> post
-    post --> getNb
-    getNb --> dict
-    dict --> nb
-    nb --> cells
-    mutate --> cells
-    render --> HTMX
-
-    save --> saveNb
-    saveNb --> ipynb
+    Browser["Browser tabs"] -->|"structure revision / cell version"| Routes
+    Routes["FastHTML routes"] --> Registry["NotebookRuntimeRegistry"]
+    Registry --> Runtime["NotebookRuntime"]
+    Runtime --> Notebook["Notebook + cells"]
+    Runtime --> Queue["ExecutionQueue"]
+    Runtime --> Tasks["setup/sync tasks"]
+    Routes --> Persistence["atomic persistence"]
+    Runtime --> Protocol["stream revisions"]
+    Protocol --> Broadcast["BroadcastManager"]
+    Broadcast --> Browser
 ```
 
-### Key Principles
+The supported deployment is one ASGI worker. Runtime state is process-local;
+starting multiple workers is rejected/documented as unsupported until a shared
+coordination layer exists.
 
-1. **Single Source of Truth**: The `notebooks` dictionary is the authoritative state
-2. **Lazy Loading**: Notebooks are only loaded when first accessed
-3. **Optimistic Updates**: UI updates immediately, save is explicit
-4. **No ORM**: Direct JSON serialization to `.ipynb` format
+## Notebook Document
 
----
+`dialeng/document/notebook.py` defines durable notebook state:
 
-## Data Structures
+- ordered `Cell` objects;
+- dialog mode;
+- provider-qualified LLM selection and model;
+- local or Colab kernel preference;
+- safe shell mode;
+- path, modified flag, and disk signature.
 
-### Global State (`app.py:348-356`)
+`dialeng/document/cell.py` defines source, output, execution metadata, collapse
+state, skipped/pinned/export flags, and a monotonically increasing cell
+`version`. Notebook metadata remains Solveit-compatible and persists
+`dialeng_provider` plus the existing model fields.
 
-```python
-# In-memory notebook storage
-notebooks: Dict[str, Notebook] = {}
+The document converts to and from standard `.ipynb` JSON through
+`document/serialization.py`. Prompt input and editable assistant output share a
+markdown cell separated by the Solveit reply marker.
 
-# Notebook files directory
-NOTEBOOKS_DIR = Path("notebooks")
-NOTEBOOKS_DIR.mkdir(exist_ok=True)
+## Runtime Ownership
 
-# WebSocket connections (for collaboration)
-ws_connections: Dict[str, List[Any]] = {}
-
-# Track cancelled cell generations
-cancelled_cells: set = set()
-```
-
-### Notebook Class (`app.py:205-242`)
+`NotebookRuntimeRegistry` owns all mutable notebook-scoped runtime state:
 
 ```python
 @dataclass
-class Notebook:
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
-    title: str = "Untitled Notebook"
-    cells: List[Cell] = field(default_factory=list)
-    dialog_mode: str = "learning"  # Solveit compatibility
-
-    def to_ipynb(self) -> Dict[str, Any]:
-        """Convert to Jupyter .ipynb format"""
-        return {
-            "nbformat": 4, "nbformat_minor": 5,
-            "metadata": {
-                "kernelspec": {"display_name": "Python 3", ...},
-                "solveit_dialog_mode": self.dialog_mode,
-                "solveit_ver": SOLVEIT_VER
-            },
-            "cells": [cell.to_jupyter_cell() for cell in self.cells]
-        }
-
-    @classmethod
-    def from_ipynb(cls, data: Dict[str, Any], notebook_id: str) -> "Notebook":
-        """Load from Jupyter .ipynb format"""
-        metadata = data.get("metadata", {})
-        cells = [Cell.from_jupyter_cell(c) for c in data.get("cells", [])]
-        return cls(
-            id=notebook_id,
-            title="Imported Notebook",
-            cells=cells,
-            dialog_mode=metadata.get("solveit_dialog_mode", "learning")
-        )
-
-    def save(self, path: str):
-        with open(path, 'w') as f:
-            json.dump(self.to_ipynb(), f, indent=2)
-
-    @classmethod
-    def load(cls, path: str) -> "Notebook":
-        with open(path) as f:
-            data = json.load(f)
-        nb_id = Path(path).stem
-        nb = cls.from_ipynb(data, nb_id)
-        nb.title = Path(path).stem
-        return nb
+class NotebookRuntime:
+    notebook_id: str
+    lifecycle: LifecycleState
+    notebook: Notebook | None
+    mutation_lock: asyncio.Lock
+    execution_queue: ExecutionQueue | None
+    kernel_generation: int
+    notebook_revision: int
+    structure_revision: int
+    outline_revision: int
+    setup_task: asyncio.Task | None
+    sync_task: asyncio.Task | None
+    data_queues: dict[str, asyncio.Queue]
+    stream_revisions: dict[str, int]
+    completed_operations: OrderedDict[str, Any]
 ```
 
-### Cell Class (`document/cell.py`)
+Compatibility field maps expose selected runtime fields to older call sites
+without creating a second source of state. New code should use registry methods
+or a service instead of adding another application-global dictionary.
 
-See [02_cell_types.md](02_cell_types.md) for complete Cell documentation. The unified `Cell` dataclass lives in `document/cell.py` and is imported by both `app.py` and the kernel execution layer.
-
----
-
-## State Lifecycle
-
-### 1. Application Startup
+### Lifecycle
 
 ```mermaid
-sequenceDiagram
-    participant App as FastHTML App
-    participant Dir as notebooks/
-    participant Dict as notebooks dict
-
-    App->>Dir: mkdir(exist_ok=True)
-    Note over Dict: Empty dictionary {}
-    Note over App: Ready to serve requests
+stateDiagram-v2
+    [*] --> unloaded
+    unloaded --> active: load or explicit create
+    active --> deleting: delete requested
+    deleting --> deleted: teardown and unlink succeed
+    deleting --> active: teardown or unlink fails
+    active --> stopped: runtime teardown
+    stopped --> active: explicit reopen
+    deleted --> active: explicit recreation only
 ```
 
-### 2. First Notebook Access
+Deletion tombstones prevent a stale tab from invoking a load-or-create path.
+Save, run, and snapshot requests against a deleted notebook return `410 Gone`.
+Only explicit creation clears the tombstone.
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant Route as GET /dialeng/{id}
-    participant Fn as get_notebook()
-    participant Dict as notebooks dict
-    participant Disk as notebooks/*.ipynb
+## Mutation Serialization
 
-    User->>Route: Visit /dialeng/demo
-    Route->>Fn: get_notebook("demo")
-    Fn->>Dict: Check if "demo" exists
-    alt Not in memory
-        Fn->>Disk: Check demo.ipynb exists
-        alt File exists
-            Disk-->>Fn: Load JSON
-            Fn->>Dict: Store Notebook
-        else File doesn't exist
-            Fn->>Dict: Create new Notebook with default cells
-        end
-    end
-    Dict-->>Fn: Return Notebook
-    Fn-->>Route: Return Notebook
-    Route-->>User: Render HTML
-```
+Routes that mutate a notebook use `serialized_notebook_mutation`:
 
-### 3. Cell Modification
+1. Resolve the notebook runtime.
+2. Acquire its async mutation lock.
+3. Compare an optional notebook or structure revision, depending on the route.
+4. Return HTTP `409` on a stale ordering assumption.
+5. Detect an optional `operation_id` replay.
+6. Apply the operation once and retain its bounded result.
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant Route as POST /cell/{id}/source
-    participant Dict as notebooks dict
-    participant WS as WebSocket
+`NotebookMutationService` owns canonical add, delete, move, duplicate, and
+merge operations without transport side effects. Routes advance revisions,
+invalidate the outline, and broadcast the resulting canonical order.
 
-    User->>Route: Type in cell (blur or run triggers POST)
-    Route->>Dict: get_notebook(nb_id)
-    Route->>Dict: Find cell, commit source, bump version
-    Route->>WS: Broadcast committed cell state
-    Route-->>User: Empty response (hx-swap="none")
-    Note over Dict: State updated in memory and marks notebook modified
-    Note over User: Initiating tab keeps local editor DOM; other tabs receive canonical committed state
-```
+The notebook revision identifies durable document mutations, while each
+WebSocket stream has its own event sequence. Keeping those counters separate
+allows multiple UI events for one document revision and prevents unbroadcast
+metadata changes from creating false transport gaps. The structure revision
+changes only when ordered cell IDs change, so a source/output commit cannot
+invalidate a concurrent Shift+Enter add. Cell run source persistence acquires
+the same mutation lock before queueing execution, ensuring revisioned events
+are broadcast in commit order.
 
-### 4. Save to Disk
+Cell source/output updates also carry `expected_version`. A stale commit does
+not overwrite newer backend content; it receives a conflict response/event and
+adopts the current version.
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant Route as POST /dialeng/{id}/save
-    participant Fn as save_notebook()
-    participant Nb as Notebook
-    participant Disk as demo.ipynb
+## Execution State
 
-    User->>Route: Ctrl+S or click Save
-    Route->>Fn: save_notebook("demo")
-    Fn->>Nb: Get from dict
-    Nb->>Nb: to_ipynb()
-    Nb->>Disk: Write JSON
-    Route-->>User: "✓ Saved" status
-```
+`ExecutionQueue` holds references to cells owned by the notebook. Deleting a
+queued cell removes it from the queue first. Completion callbacks verify that
+the runtime, notebook, and target cell still exist before writing final output.
 
----
+Kernel switches and restarts increment `kernel_generation`. Setup, CRAFT, and
+project-sync tasks capture that generation and abort before touching a newer
+kernel. Runtime teardown cancels queue/setup/sync work and is idempotent.
 
-## CRUD Operations
+Local kernels own a subprocess plus input/output multiprocessing queues.
+Shutdown sends a graceful control message, escalates through terminate/kill,
+joins the process after every path, closes both queues, joins queue feeder
+threads, and closes the process handle. This prevents semaphore leaks during
+development reloads.
 
-### Create Cell
+## Revisioned Synchronization
 
-```python
-@rt("/dialeng/{nb_id}/cell/add")
-async def post(nb_id: str, pos: int = -1, type: str = "code"):
-    nb = get_notebook(nb_id)
-    if pos < 0:
-        pos = len(nb.cells)
+Independent stream revisions cover notebook structure, kernel state, outline,
+LLM inventory, output, and persistence. The initial page embeds revision
+baselines. WebSocket events include stream, revision, and event ID.
 
-    # Code cells default to scrollable output
-    if type == "code":
-        nb.cells.insert(pos, Cell(cell_type=type, output_collapse=1))
-    else:
-        nb.cells.insert(pos, Cell(cell_type=type))
+- duplicates and old revisions are ignored;
+- a gap requests one full recovery snapshot;
+- reconnect compares durable client/server revisions;
+- healthy sockets do not poll full state;
+- kernel snapshots advance only the kernel stream unless used as part of a full
+  recovery response.
 
-    nb.modified = True
-
-    # Broadcast backend-authoritative structure payload
-    await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
-    await _mark_outline_dirty(nb_id, reason="cell_add")
-
-    return ""
-```
-
-**Key points:**
-- `pos=-1` means append to end
-- Code cells default to `output_collapse=1` (scrollable)
-- Returns an empty HTTP response; structure updates are applied from the WebSocket payload
-- The payload includes canonical `ordered_cell_ids`, so the browser rebuilds `#cells` from backend order
-
-### Read Cell
-
-Cells are read implicitly when rendering:
-
-```python
-def CellView(cell: Cell, notebook_id: str):
-    """Render a single cell to HTML"""
-    # Reads cell.source, cell.output, cell.cell_type, etc.
-    # Returns FastHTML component
-```
-
-### Update Cell Source
-
-```python
-@rt("/dialeng/{nb_id}/cell/{cid}/source")
-async def post(nb_id: str, cid: str, source: str):
-    nb = get_notebook(nb_id)
-    for c in nb.cells:
-        if c.id == cid:
-            changed = c.update_source(source)
-            if not changed:
-                break
-            nb.modified = True
-
-            if c.cell_type in {"code", "shell"}:
-                await broadcast_json(nb_id, {
-                    "type": "cell_source_update",
-                    "cell_id": c.id,
-                    "source": c.source,
-                    "version": c.version,
-                })
-                await broadcast_to_notebook(nb_id, CellOutputOOB(c))
-                await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
-            else:
-                await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
-
-            if c.cell_type == "note":
-                await _mark_outline_dirty(nb_id, reason="note_source_commit")
-            break
-    return ""
-```
-
-**Key points:**
-- Triggered on blur with `hx-trigger="blur changed"` and also when running a cell with fresher in-editor source
-- Only committed state is synchronized; keystroke-by-keystroke typing is still local
-- Code/shell source commits clear outputs and execution metadata via `CellOutputOOB` + `CellHeaderOOB`
-- Note/prompt commits re-render the full cell so rendered markdown stays authoritative across tabs
-
-### Update Cell Output
-
-```python
-@rt("/dialeng/{nb_id}/cell/{cid}/output")
-async def post(nb_id: str, cid: str, output: str):
-    nb = get_notebook(nb_id)
-    for c in nb.cells:
-        if c.id == cid:
-            changed = c.update_output(output)
-            if not changed:
-                break
-            nb.modified = True
-            if c.cell_type in {"code", "shell"}:
-                await broadcast_to_notebook(nb_id, CellOutputOOB(c))
-                await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
-            else:
-                await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
-            break
-    return ""
-```
-
-**Use case:** Editing AI response in prompt cells (double-click to edit).
-
-### Delete Cell
-
-```python
-@rt("/dialeng/{nb_id}/cell/{cid}")
-async def delete(nb_id: str, cid: str):
-    nb = get_notebook(nb_id)
-    nb.cells = [c for c in nb.cells if c.id != cid]
-    nb.modified = True
-    await broadcast_json(nb_id, _cell_delete_payload(nb, cid))
-    await _mark_outline_dirty(nb_id, reason="cell_delete")
-    return ""
-```
-
-### Move Cell
-
-```python
-@rt("/dialeng/{nb_id}/cell/{cid}/move/{direction}")
-async def post(nb_id: str, cid: str, direction: str):
-    nb = get_notebook(nb_id)
-    moved = nb.move_cell(cid, {"up": -1, "down": 1}[direction])
-    if not moved:
-        return ""
-
-    await broadcast_json(nb_id, _cell_move_payload(nb, cid))
-    await _mark_outline_dirty(nb_id, reason="cell_move")
-    return ""
-```
-
-### Change Cell Type
-
-```python
-@rt("/dialeng/{nb_id}/cell/{cid}/type")
-async def post(nb_id: str, cid: str, cell_type: str):
-    nb = get_notebook(nb_id)
-    for c in nb.cells:
-        if c.id == cid:
-            c.cell_type = cell_type
-            c.clear_outputs()
-            c.version += 1
-            c.last_modified = datetime.now()
-            nb.modified = True
-            await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
-            await _mark_outline_dirty(nb_id, reason="cell_type_change")
-            return ""
-    return ""
-```
-
----
+See [Real-time collaboration](03_real_time_collaboration.md) for protocol and
+backpressure details.
 
 ## Persistence
 
-### File Format
+Explicit save remains the default. `Notebook.save()` writes through
+`persistence_service.atomic_write_json`:
 
-Notebooks are stored as standard Jupyter `.ipynb` files in the `notebooks/` directory:
+1. Serialize the full notebook.
+2. Write a same-directory temporary file.
+3. Flush and `fsync` it.
+4. Atomically replace the canonical path.
+5. Update the notebook disk signature.
 
-```
-notebooks/
-├── demo.ipynb
-├── project.ipynb
-└── tutorial.ipynb
-```
+If replace fails, the prior canonical file remains intact and the temporary
+file is removed. If the on-disk signature changed since load/save, Dialeng
+rejects the write until the user chooses reload or overwrite.
 
-### Notebook Identity
+### Optional autosave
 
-Dialeng uses an encoded notebook id as the canonical notebook key instead of the raw
-relative path. The shared helpers live in [`dialeng/notebook_id.py`](../../dialeng/notebook_id.py).
+Autosave is deliberately disabled by default:
 
-- `demo` → `demo`
-- `demo_project/colab_test` → `demo_project~colab_test`
-- literal `~` characters inside path segments are escaped as `~~`
-
-That encoded id is the single source of truth for:
-
-- `/dialeng/{nb_id}` route parameters
-- in-memory notebook and kernel dictionaries
-- file explorer active/running state matching for both root and nested notebooks
-
-### Save Operation (`app.py:374-377`)
-
-```python
-def save_notebook(notebook_id: str):
-    if notebook_id in notebooks:
-        path = NOTEBOOKS_DIR / f"{notebook_id}.ipynb"
-        notebooks[notebook_id].save(str(path))
+```json
+{
+  "persistence": {
+    "atomic_explicit_save": true,
+    "autosave": {
+      "enabled": false,
+      "debounce_ms": 1500,
+      "idle_only": true,
+      "recovery_snapshots": true,
+      "max_recovery_files": 5
+    }
+  }
+}
 ```
 
-### Load Operation (`app.py:358-372`)
+With autosave disabled, mutations create no autosave timer or recovery file.
+When enabled, repeated mutations coalesce into one debounced save, idle-only
+mode defers active execution, explicit save flushes pending work, and shutdown
+attempts a bounded final flush.
 
-```python
-def get_notebook(notebook_id: str) -> Notebook:
-    """Get or create a notebook - ALWAYS requires notebook_id"""
-    if notebook_id not in notebooks:
-        path = NOTEBOOKS_DIR / f"{notebook_id}.ipynb"
-        if path.exists():
-            # Load from disk
-            notebooks[notebook_id] = Notebook.load(str(path))
-        else:
-            # Create new with default cells
-            nb = Notebook(id=notebook_id, title=notebook_id)
-            nb.cells = [
-                Cell(cell_type="note", source="# Welcome to Dialeng..."),
-                Cell(cell_type="code", source="x = [1, 2, 3]...", output_collapse=1),
-                Cell(cell_type="prompt", source="Hello! What can you help me with?"),
-            ]
-            notebooks[notebook_id] = nb
-    return notebooks[notebook_id]
-```
+Recovery snapshots live under `.dialeng/recovery/` with bounded retention. A
+newer recovery is offered for inspect, restore, or discard; it never silently
+replaces the canonical notebook. Recovery JSON is parsed and loaded as a
+notebook before atomic replacement, so corrupted recovery data cannot damage
+the canonical file.
 
-### List Notebooks (`app.py:379-380`)
+## Caches and Invalidation
 
-```python
-def list_notebooks() -> List[str]:
-    return [p.stem for p in NOTEBOOKS_DIR.glob("*.ipynb")]
-```
+State versions provide cache keys:
 
----
+- prompt context blocks: cell ID/version/type/skipped/pinned;
+- note headings: note-cell version;
+- namespace outline: notebook, kernel generation, execution count;
+- directories: resolved path plus filesystem signature.
 
-## State Synchronization
+Dynamic prompt expressions are not cached and re-evaluate for every prompt.
+Project file watching invalidates only affected directory listings and notifies
+open explorers.
 
-### What Gets Synchronized
+## Diagnostics
 
-| Action | In-Memory | To Disk | To Collaborators |
-|--------|-----------|---------|------------------|
-| Type in cell | Local draft immediately; committed on blur or run | Manual save | **Yes** on commit |
-| Run cell | Immediate | Manual save | **Yes** (OOB swap) |
-| Add cell | Immediate | Manual save | **Yes** (ordered structure payload) |
-| Delete cell | Immediate | Manual save | **Yes** (ordered structure payload) |
-| Move cell | Immediate | Manual save | **Yes** (ordered structure payload) |
-| Change type | Immediate | Manual save | **Yes** (OOB swap) |
-| Collapse | Immediate | Manual save | **Yes** (OOB swap) |
-| Mode / model / safe mode | Immediate | Manual save | **Yes** (kernel snapshot) |
-| Save | N/A | Immediate | **No** |
+`GET /dialeng/{id}/diagnostics` reports content-free lifecycle data:
 
-### Broadcast Pattern
+- runtime lifecycle and mutation lock;
+- kernel generation and connection state;
+- queue order and active setup phase;
+- stream revisions and WebSocket client count;
+- pending autosave state.
 
-Routes that modify shared notebook state now follow one of three backend-authoritative patterns:
+`GET /dialeng/diagnostics/performance` adds bounded counters, timings, browser
+health, and registry summaries without prompt text, source, output, images, or
+credentials.
 
-```python
-@rt("/dialeng/{nb_id}/cell/{cid}/some-action")
-async def post(nb_id: str, cid: str, ...):
-    nb = get_notebook(nb_id)
+## Testing Invariants
 
-    # 1. Find and modify the cell
-    for c in nb.cells:
-        if c.id == cid:
-            # Modify state
-            break
+Tests assert:
 
-    # 2. Broadcast canonical state from the backend
-    await broadcast_json(nb_id, {...})          # in-place cell or structure updates
-    await broadcast_to_notebook(nb_id, ...)     # OOB fragments when full section HTML is needed
-    await broadcast_kernel_snapshot(nb_id)      # notebook/kernel toolbar state
+- unique cell IDs and canonical order after generated mixed mutations;
+- stale revisions fail and duplicate operation IDs are idempotent;
+- source/output conflicts retain the newer backend value;
+- queue and runtime cleanup are idempotent;
+- deleted notebooks reject stale mutations until explicit recreation;
+- atomic-save failure preserves prior bytes;
+- autosave disabled means no background writes;
+- corrupted recovery never replaces canonical state;
+- reconnect gaps converge through authoritative recovery.
 
-    # 3. Return an empty HTTP response when the browser should rely on the broadcast
-    return ""
-```
+## Key Files
 
-In practice:
+| File | Responsibility |
+|---|---|
+| `document/notebook.py` | durable notebook model and serialization entrypoints |
+| `document/cell.py` | cell state, versions, outputs, Jupyter conversion |
+| `services/runtime_registry.py` | ownership, lifecycle, mutation locks, revisions |
+| `services/notebook_mutation_service.py` | canonical structural operations |
+| `services/persistence_service.py` | atomic save, autosave, recovery, conflicts |
+| `services/broadcast_service.py` | bounded per-client WebSocket delivery |
+| `services/websocket_protocol.py` | join, heartbeat, cancellation, recovery negotiation |
+| `app.py` | composition and compatibility route wiring |
 
-- Structural operations (`add`, `delete`, `move`) broadcast `ordered_cell_ids` and the browser reconciles the whole `#cells` structure from backend order.
-- Committed content changes (`source`, `output`) broadcast the committed cell state so other tabs converge on the backend version instead of trusting local draft DOM.
-- Notebook-level controls (`mode`, `model`, `safe_mode`, kernel selection/auth/setup state) are synchronized through the kernel snapshot instead of ad hoc client-side mutation.
+## Related Documents
 
----
-
-## Key Files and Functions
-
-| Location | Purpose |
-|----------|---------|
-| `app.py:348` | `notebooks: Dict[str, Notebook]` - global state |
-| `app.py:349-350` | `NOTEBOOKS_DIR` - file storage path |
-| `app.py:358-372` | `get_notebook()` - lazy load/create |
-| `app.py:374-377` | `save_notebook()` - persist to disk |
-| `app.py:379-380` | `list_notebooks()` - enumerate saved |
-| `app.py:205-242` | `Notebook` class - data model |
-| `app.py:71-165` | `Cell` class - data model |
-| `app.py:2234-2248` | Add cell route |
-| `app.py:2250-2258` | Delete cell route |
-| `app.py:2260-2276` | Update source/output routes |
-| `app.py:2293-2307` | Move cell route |
-| `app.py:2309-2346` | Collapse routes |
-
----
-
-## Extending the State System
-
-### Adding a New Cell Field
-
-1. **Add to Cell dataclass** (`document/cell.py`):
-   ```python
-   @dataclass
-   class Cell:
-       # ... existing fields ...
-       new_field: str = ""
-   ```
-
-2. **Add serialization** in `to_jupyter_cell()` (`document/cell.py`) and `_cell_to_jupyter()` (`document/serialization.py`):
-   ```python
-   if self.new_field:
-       cell["metadata"]["new_field"] = self.new_field
-   ```
-
-3. **Add deserialization** in `from_jupyter_cell()` / `_jupyter_to_cell()` (`document/serialization.py`):
-   ```python
-   new_field=metadata.get("new_field", "")
-   ```
-
-4. **Add route if needed**:
-   ```python
-   @rt("/dialeng/{nb_id}/cell/{cid}/new-field")
-   async def post(nb_id: str, cid: str, value: str):
-       nb = get_notebook(nb_id)
-       for c in nb.cells:
-           if c.id == cid:
-               c.new_field = value
-               await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
-               return CellView(c, nb_id)
-   ```
-
-### Adding a New Notebook Field
-
-1. **Add to Notebook dataclass** (`app.py:205`):
-   ```python
-   @dataclass
-   class Notebook:
-       # ... existing fields ...
-       new_setting: str = "default"
-   ```
-
-2. **Add to `to_ipynb()`** (`app.py:211`):
-   ```python
-   "metadata": {
-       # ... existing metadata ...
-       "new_setting": self.new_setting
-   }
-   ```
-
-3. **Add to `from_ipynb()`** (`app.py:224`):
-   ```python
-   return cls(
-       # ... existing fields ...
-       new_setting=metadata.get("new_setting", "default")
-   )
-   ```
-
-### Alternative Storage Backends
-
-To add a different storage backend (e.g., database, cloud):
-
-```python
-from abc import ABC, abstractmethod
-
-class StorageBackend(ABC):
-    @abstractmethod
-    def save(self, notebook_id: str, notebook: Notebook): ...
-
-    @abstractmethod
-    def load(self, notebook_id: str) -> Notebook: ...
-
-    @abstractmethod
-    def list(self) -> List[str]: ...
-
-    @abstractmethod
-    def exists(self, notebook_id: str) -> bool: ...
-
-class FileStorage(StorageBackend):
-    def __init__(self, directory: Path):
-        self.directory = directory
-
-    def save(self, notebook_id: str, notebook: Notebook):
-        path = self.directory / f"{notebook_id}.ipynb"
-        notebook.save(str(path))
-
-    def load(self, notebook_id: str) -> Notebook:
-        path = self.directory / f"{notebook_id}.ipynb"
-        return Notebook.load(str(path))
-
-    def list(self) -> List[str]:
-        return [p.stem for p in self.directory.glob("*.ipynb")]
-
-    def exists(self, notebook_id: str) -> bool:
-        return (self.directory / f"{notebook_id}.ipynb").exists()
-
-# Usage
-storage = FileStorage(NOTEBOOKS_DIR)
-# Or: storage = DatabaseStorage(connection_string)
-# Or: storage = S3Storage(bucket_name)
-```
-
----
-
-## See Also
-
-- [02_cell_types.md](02_cell_types.md) - Cell types and their behavior
-- [03_real_time_collaboration.md](03_real_time_collaboration.md) - WebSocket broadcasting
-- [../../DEVELOPERS.md](../../DEVELOPERS.md) - General developer guide
+- [Real-time collaboration](03_real_time_collaboration.md)
+- [Kernel execution](04_kernel_execution.md)
+- [LLM integration](06_llm_integration.md)
+- [Performance and reliability](21_performance_reliability.md)

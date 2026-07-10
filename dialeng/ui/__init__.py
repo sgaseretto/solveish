@@ -25,7 +25,7 @@ from .cells import CellView, CellHeader, CodeCellView, NoteCellView, PromptCellV
 from .controls import TypeSelect, CollapseBtn, AddButtons
 
 # Layout
-from .layout import NotebookPage, AllCells, AllCellsContent
+from .layout import NotebookPage, WorkspacePage, AllCells, AllCellsContent, ProviderSelect, ModelSelect
 
 # Settings components
 from .settings import SettingsSidebar, SettingsOverlay, SettingsGroup
@@ -58,8 +58,11 @@ __all__ = [
     'AddButtons',
     # Layout
     'NotebookPage',
+    'WorkspacePage',
     'AllCells',
     'AllCellsContent',
+    'ProviderSelect',
+    'ModelSelect',
     # Settings
     'SettingsSidebar',
     'SettingsOverlay',

@@ -15,11 +15,15 @@ Features:
 from fasthtml.common import *
 from fastcore.utils import *
 import uuid, json, os, sys, io, traceback, asyncio, re, ast, logging, time
+import inspect
+from functools import wraps
 from typing import Optional, List, Dict, Any
-from datetime import datetime
-from contextlib import redirect_stdout, redirect_stderr
+from datetime import datetime, timezone
+from contextlib import asynccontextmanager, redirect_stdout, redirect_stderr
 from enum import Enum
 from pathlib import Path
+from starlette.exceptions import HTTPException
+from starlette.responses import JSONResponse
 from dialeng.notebook_id import (
     nb_id_encode_part as _shared_nb_id_encode_part,
     nb_id_from_path as _shared_nb_id_from_path,
@@ -40,9 +44,14 @@ from dialeng.services.dialoghelper_service import (
     format_msgs_as_xml, format_msgs_as_json,
     clipboard_copy, clipboard_paste,
     log_change, get_change_log,
+    get_context_inspection,
 )
 from dialeng.services.credential_service import (
-    detect_credentials, get_available_modes, print_credential_status, CredentialStatus
+    detect_credentials, detect_credential_inventory, refresh_credential_inventory,
+    refresh_credential_inventory_async,
+    build_initial_credential_inventory, credential_status_from_inventory,
+    get_available_modes, print_credential_status, print_credential_inventory,
+    CredentialInventory, CredentialStatus,
 )
 from dialeng.services.dialeng_config import (
     load_config, get_config, print_config_status, update_config, get_config_dict
@@ -53,12 +62,37 @@ from dialeng.services.shell_service import (
 from dialeng.services.broadcast_service import BroadcastManager
 from dialeng.services.file_editor_service import FileEditorService
 from dialeng.services.operation_log import elapsed_ms, log_operation, new_operation_id
+from dialeng.services.performance_service import (
+    RequestMetricsMiddleware,
+    performance_monitor,
+    monitor_event_loop_lag,
+)
+from dialeng.services.runtime_registry import (
+    LifecycleState,
+    NotebookRuntimeRegistry,
+    RuntimeRevisionConflict,
+)
+from dialeng.services.persistence_service import (
+    AutosaveManager,
+    AutosaveSettings,
+    ExternalFileChangedError,
+    atomic_write_json,
+    discard_recovery,
+    find_newer_recovery,
+)
+from dialeng.services.file_listing_cache import directory_listing_cache
+from dialeng.services.outline_cache import outline_cache
+from dialeng.services.notebook_mutation_service import notebook_mutation_service
+from dialeng.services.openai_codex_auth import get_openai_codex_auth_service
+from dialeng.services.skill_service import set_skill_root
+from dialeng.routes import register_diagnostics_routes, register_websocket_routes
 
 # UI Components (extracted to ui/ package)
 from dialeng.ui import (
     CellView, NotebookPage, AllCells, AllCellsContent,
     AllCellsOOB, CellViewOOB, CellOutputOOB, CellHeaderOOB, AddButtons,
-    TypeSelect, CollapseBtn, get_collapse_class, get_cell_state_classes
+    TypeSelect, CollapseBtn, get_collapse_class, get_cell_state_classes,
+    ModelSelect, WorkspacePage,
 )
 from dialeng.ui.file_editor import FileEditorPage, FileEditorPane
 from dialeng.ui.mime import render_mime_bundle
@@ -81,37 +115,62 @@ SOLVEIT_VER = 2
 # The real config file (inside the notebooks dir) is loaded when set_root_dir() is called.
 DIALENG_CONFIG = load_config(create_if_missing=False)
 
-# Detect credentials at startup
-CREDENTIAL_STATUS = detect_credentials()
+# Build a local-only inventory at import time. Network and subprocess probes run
+# after the server is responsive.
+CREDENTIAL_INVENTORY = build_initial_credential_inventory()
+CREDENTIAL_STATUS = credential_status_from_inventory(CREDENTIAL_INVENTORY)
 AVAILABLE_DIALOG_MODES = get_available_modes(CREDENTIAL_STATUS)
 
-# Models from config - default model depends on detected provider
-AVAILABLE_MODELS = DIALENG_CONFIG.get_model_choices()
-AVAILABLE_MODEL_IDS = [model_id for model_id, _ in AVAILABLE_MODELS]
+# New notebooks use the current default provider's configured model.
 DEFAULT_MODEL = DIALENG_CONFIG.get_default_model(CREDENTIAL_STATUS.backend)
+DEFAULT_LLM_PROVIDER = CREDENTIAL_INVENTORY.default_provider()
+openai_codex_auth_service = get_openai_codex_auth_service()
 
 
-def validate_model_id(model_id: str) -> str:
-    """Validate a model ID and return a valid one.
+def _apply_llm_inventory(inventory: CredentialInventory) -> None:
+    """Apply a completed provider inventory on the application event loop."""
+    global CREDENTIAL_STATUS, CREDENTIAL_INVENTORY, AVAILABLE_DIALOG_MODES
+    global DEFAULT_MODEL, DEFAULT_LLM_PROVIDER
+    global DEFAULT_DIALOG_MODE
+    CREDENTIAL_INVENTORY = inventory
+    selected = CREDENTIAL_INVENTORY.get(CREDENTIAL_INVENTORY.default_provider())
+    if selected and selected.id != "mock_only" and selected.authenticated:
+        CREDENTIAL_STATUS = CredentialStatus(
+            available=True,
+            provider=selected.provider,
+            backend=selected.backend,
+            source=selected.source,
+            details=selected.details,
+        )
+    else:
+        CREDENTIAL_STATUS = CredentialStatus(False, "mock_only", "none", "none", "No LLM provider authenticated")
+    AVAILABLE_DIALOG_MODES = get_available_modes(CREDENTIAL_STATUS)
+    DEFAULT_LLM_PROVIDER = CREDENTIAL_INVENTORY.default_provider()
+    DEFAULT_MODEL = DIALENG_CONFIG.get_default_model(DEFAULT_LLM_PROVIDER)
+    DEFAULT_DIALOG_MODE = DIALENG_CONFIG.default_mode if CREDENTIAL_INVENTORY.available else "mock"
+    llm_service.invalidate_providers()
 
-    Model selection follows this priority:
-    1. If the given model_id exists in available models, use it
-    2. Otherwise, fall back to the provider-specific default
 
-    This ensures per-notebook model selection is remembered (when valid)
-    while gracefully handling cases where saved model IDs become invalid
-    (e.g., config changed, model removed, notebook from different setup).
+def _refresh_llm_runtime(*, probe_all: bool = True) -> None:
+    """Synchronously refresh provider/model availability for explicit actions."""
+    if probe_all:
+        inventory = refresh_credential_inventory(NOTEBOOKS_DIR / ".env")
+    else:
+        inventory = detect_credential_inventory(NOTEBOOKS_DIR / ".env", force=True)
+    _apply_llm_inventory(inventory)
 
-    Args:
-        model_id: The model ID to validate (e.g., from notebook metadata)
 
-    Returns:
-        A valid model ID - either the original if valid, or the default
-    """
-    if model_id in AVAILABLE_MODEL_IDS:
-        return model_id
-    # Model ID not found - use provider default
-    return DEFAULT_MODEL
+def _load_initial_llm_runtime() -> None:
+    """Load local provider hints without running remote probes."""
+    inventory = build_initial_credential_inventory(NOTEBOOKS_DIR / ".env")
+    _apply_llm_inventory(inventory)
+    if "remote_service_state" in globals():
+        remote_service_state["providers"] = (
+            "validating"
+            if any(status.validation_state == "validating" for status in inventory.providers.values())
+            else "ready"
+        )
+        remote_service_state["colab"] = "validating" if DIALENG_CONFIG.colab_enabled else "disabled"
 
 # Load extensions (cell types, callbacks, services)
 # Extensions are Python files in the extensions/ directory
@@ -145,65 +204,48 @@ DEFAULT_DIALOG_MODE = DIALENG_CONFIG.default_mode if CREDENTIAL_STATUS.available
 # - Persistent namespace across cells
 
 kernel_service = KernelService()
+runtime_registry = NotebookRuntimeRegistry()
 
-# Colab session manager — initialized lazily by _init_colab() after the real config is loaded
+# Colab session manager is initialized asynchronously after the server is ready.
 colab_session_manager = None
 colab_auth_service = None
 
 
-def _init_colab():
-    """Initialize Colab services if colab is enabled in the (real) config.
-
-    Called from set_root_dir() after the config file is loaded, NOT at module
-    import time — because the module-level load_config() uses in-memory defaults
-    where colab.enabled is always False.
-    """
+async def _init_colab_async() -> None:
+    """Initialize Colab without blocking application startup or the event loop."""
     global colab_auth_service, colab_session_manager
     if not DIALENG_CONFIG.colab_enabled:
         return
     if colab_auth_service is not None:
         return  # already initialized
 
-    import asyncio
-    import concurrent.futures
     from dialeng.services.colab import ColabAuthService, ColabSessionManager
     from dialeng.services.colab.colab_auth import resolve_oauth_credentials, print_colab_credential_status
 
-    # Resolve and validate OAuth credentials (validates defaults, auto-extracts from VSIX if needed)
-    # Use a thread to avoid "cannot be called from a running event loop" in uvicorn workers
-    def _resolve_creds():
-        return asyncio.run(resolve_oauth_credentials(DIALENG_CONFIG.colab_auth_provider))
-
-    def _validate_session(auth_service):
-        return asyncio.run(auth_service.validate_session())
-
-    def _prune_metadata(manager):
-        return asyncio.run(manager.prune_stale_metadata())
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
-        _colab_creds = _pool.submit(_resolve_creds).result()
+    with performance_monitor.measure("colab.credentials.resolve"):
+        colab_creds = await resolve_oauth_credentials(DIALENG_CONFIG.colab_auth_provider)
 
     colab_auth_service = ColabAuthService(
-        credentials=_colab_creds,
+        credentials=colab_creds,
         auth_provider=DIALENG_CONFIG.colab_auth_provider,
     )
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
-        validated = _pool.submit(_validate_session, colab_auth_service).result()
+    with performance_monitor.measure("colab.session.validate"):
+        validated = await colab_auth_service.validate_session()
     colab_session_manager = ColabSessionManager(
         colab_auth_service,
         default_accelerator=DIALENG_CONFIG.colab_default_accelerator,
     )
     if validated:
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
-                _pool.submit(_prune_metadata, colab_session_manager).result()
+            with performance_monitor.measure("colab.metadata.prune"):
+                await colab_session_manager.prune_stale_metadata()
         except Exception as e:
             logger.warning("Failed to prune Colab session metadata during startup: %s", e)
     kernel_service.set_colab_session_manager(colab_session_manager)
-    print_colab_credential_status(_colab_creds)
+    print_colab_credential_status(colab_creds)
     logger.info(
         "Colab services initialized (oauth_source=%s, auth_provider=%s, authenticated=%s, email=%s, validation_error=%s)",
-        _colab_creds.source,
+        colab_creds.source,
         DIALENG_CONFIG.colab_auth_provider,
         validated,
         colab_auth_service.account_email,
@@ -212,7 +254,7 @@ def _init_colab():
     print(f"   Colab: enabled (authenticated={colab_auth_service.is_authenticated})")
 
 # ExecutionQueue instances per notebook (created lazily)
-execution_queues: Dict[str, ExecutionQueue] = {}
+execution_queues = runtime_registry.field_map("execution_queue")
 
 def get_execution_queue(nb_id: str) -> ExecutionQueue:
     """Get or create execution queue for a notebook."""
@@ -255,18 +297,28 @@ async def finalize_cell_execution(nb_id: str, cell, has_error: bool):
     flattening to a string via cell.output setter, which would destroy
     structured outputs (display_data, MIME bundles, etc.).
     """
-    cell.time_run = datetime.now().strftime("%H:%M:%S")
+    async with runtime_registry.mutation(nb_id):
+        nb = notebooks.get(nb_id)
+        if nb is None or nb.get_cell(cell.id) is None:
+            logger.info(
+                "Ignoring completion for a cell removed during execution (notebook=%s, cell=%s)",
+                nb_id,
+                cell.id,
+            )
+            return
+        cell.time_run = datetime.now().strftime("%H:%M:%S")
+        nb.modified = True
 
-    # Send code_stream_end signal
-    await broadcast_json(nb_id, {"type": "code_stream_end", "cell_id": cell.id, "has_error": has_error})
+        # Send code_stream_end signal
+        await broadcast_json(nb_id, {"type": "code_stream_end", "cell_id": cell.id, "has_error": has_error})
 
-    # Broadcast output + header via targeted OOB swaps (preserves Monaco editor DOM)
-    await broadcast_to_notebook(nb_id, CellOutputOOB(cell))
-    await broadcast_to_notebook(nb_id, CellHeaderOOB(cell, nb_id))
+        # Broadcast output + header via targeted OOB swaps (preserves Monaco editor DOM)
+        await broadcast_to_notebook(nb_id, CellOutputOOB(cell))
+        await broadcast_to_notebook(nb_id, CellHeaderOOB(cell, nb_id))
 
-    cell_type = str(getattr(cell, "cell_type", ""))
-    if cell_type in {"code", "shell"}:
-        await _mark_outline_dirty(nb_id, reason=f"{cell_type}_execution_complete")
+        cell_type = str(getattr(cell, "cell_type", ""))
+        if cell_type in {"code", "shell"}:
+            await _mark_outline_dirty(nb_id, reason=f"{cell_type}_execution_complete")
 
 # ============================================================================
 # Mock LLM with Streaming
@@ -309,7 +361,11 @@ This is a **demo response**. In production, connect to Claude, OpenAI, or local 
 # Storage
 # ============================================================================
 
-notebooks: Dict[str, Notebook] = {}
+notebooks = runtime_registry.field_map("notebook")
+# Deleted notebook IDs remain terminal for already-open browser tabs. Explicit
+# creation clears the tombstone, while stale requests receive HTTP 410.
+deleting_notebooks: set[str] = set()
+deleted_notebooks: Dict[str, Dict[str, Any]] = {}
 NOTEBOOKS_DIR = Path(os.environ.get("DIALENG_NOTEBOOKS_DIR", "notebooks"))
 NOTEBOOKS_DIR.mkdir(exist_ok=True)
 file_editor_service = FileEditorService(NOTEBOOKS_DIR)
@@ -321,36 +377,132 @@ def set_root_dir(root: Path):
     lives alongside the notebooks (not in whatever CWD the command ran from).
     """
     global NOTEBOOKS_DIR, DIALENG_CONFIG
+    if root.resolve() != NOTEBOOKS_DIR.resolve():
+        deleting_notebooks.clear()
+        deleted_notebooks.clear()
     NOTEBOOKS_DIR = root
     NOTEBOOKS_DIR.mkdir(exist_ok=True)
     file_editor_service.set_root(NOTEBOOKS_DIR)
 
     # Reload config from the project directory
     DIALENG_CONFIG = load_config(config_path=NOTEBOOKS_DIR / "dialeng_config.json", force_reload=True)
-
-    # Initialize Colab now that we have the real config
-    _init_colab()
+    set_skill_root(NOTEBOOKS_DIR)
+    _load_initial_llm_runtime()
 
 # Track active WebSocket connections per notebook (list of send functions)
 ws_connections: Dict[str, List[Any]] = {}
-broadcast_manager = BroadcastManager(ws_connections)
+broadcast_manager = BroadcastManager(
+    ws_connections,
+    monitor=performance_monitor,
+    on_client_count_changed=kernel_service.set_client_count,
+)
 
 # Track cancelled cell generations
 cancelled_cells: set = set()
+prompt_cancel_events: Dict[str, asyncio.Event] = {}
 
 # Track non-queue kernel setup/sync work per notebook so the UI can reflect
 # attach/init/upload phases instead of inferring state from cell streaming alone.
-kernel_setup_state: Dict[str, Dict[str, Any]] = {}
-kernel_setup_tasks: Dict[str, asyncio.Task] = {}
-kernel_sync_tasks: Dict[str, asyncio.Task] = {}
-kernel_generations: Dict[str, int] = {}
-notebook_revisions: Dict[str, int] = {}
-outline_revisions: Dict[str, int] = {}
+kernel_setup_state = runtime_registry.field_map("setup_state")
+kernel_setup_tasks = runtime_registry.field_map("setup_task")
+kernel_sync_tasks = runtime_registry.field_map("sync_task")
+kernel_generations = runtime_registry.field_map("kernel_generation")
+notebook_revisions = runtime_registry.field_map("notebook_revision")
+structure_revisions = runtime_registry.field_map("structure_revision")
+outline_revisions = runtime_registry.field_map("outline_revision")
+event_stream_revisions = runtime_registry.field_map("stream_revisions")
 server_shutdown_started = False
+event_loop_monitor_task: Optional[asyncio.Task] = None
+remote_service_init_task: Optional[asyncio.Task] = None
+project_file_watch_task: Optional[asyncio.Task] = None
+remote_service_state = {"providers": "idle", "colab": "idle"}
+
+
+def serialized_notebook_mutation(handler):
+    """Serialize a route mutation and make supplied operation IDs idempotent."""
+    signature = inspect.signature(handler)
+
+    @wraps(handler)
+    async def wrapped(*args, **kwargs):
+        bound = signature.bind_partial(*args, **kwargs)
+        notebook_id = (
+            bound.arguments.get("nb_id")
+            or bound.arguments.get("dlg_name")
+            or bound.arguments.get("name")
+        )
+        expected_revision = bound.arguments.get("expected_revision", -1)
+        expected_structure_revision = bound.arguments.get("expected_structure_revision", -1)
+        operation_id = bound.arguments.get("operation_id") or None
+        if not notebook_id:
+            return await handler(*args, **kwargs)
+        try:
+            async with runtime_registry.mutation(
+                notebook_id,
+                expected_revision=expected_revision,
+                expected_structure_revision=expected_structure_revision,
+                operation_id=operation_id,
+            ) as lease:
+                if lease.duplicate:
+                    performance_monitor.increment("notebook.mutations.duplicate")
+                    return lease.previous_result if lease.previous_result is not None else ""
+                result = await handler(*args, **kwargs)
+                lease.result = result
+                return result
+        except RuntimeRevisionConflict as conflict:
+            performance_monitor.increment("notebook.mutations.revision_conflict")
+            return JSONResponse({
+                "status": "conflict",
+                "type": "notebook_revision_conflict",
+                "revision_domain": conflict.domain,
+                "notebook_id": conflict.notebook_id,
+                "expected_revision": conflict.expected,
+                "actual_revision": conflict.actual,
+            }, status_code=409)
+
+    return wrapped
 
 # DialogHelper data queues for bidirectional browser communication
 # Structure: {notebook_id: {data_id: asyncio.Queue}}
-data_queues: Dict[str, Dict[str, asyncio.Queue]] = {}
+data_queues = runtime_registry.field_map("data_queues")
+
+
+def _notebook_is_idle(notebook_id: str) -> bool:
+    queue = execution_queues.get(notebook_id)
+    queue_idle = True
+    if queue is not None:
+        status = queue.get_status(notebook_id)
+        queue_idle = not status.current_cell_id and not status.queued_cell_ids
+    prompt_active = any(key.startswith(f"{notebook_id}:") for key in prompt_cancel_events)
+    return queue_idle and not prompt_active and notebook_id not in kernel_setup_state
+
+
+async def _on_notebook_autosaved(notebook_id: str, notebook: Notebook, path: Path) -> None:
+    try:
+        from dialeng.services.lib_export_service import maybe_extract
+        result = maybe_extract(path, root_dir=NOTEBOOKS_DIR)
+        if result:
+            _schedule_colab_lib_sync(notebook_id, reason="autosave")
+    except Exception:
+        logger.exception("Autosave lib export failed (notebook=%s)", notebook_id)
+    await broadcast_json(notebook_id, {"type": "notebook_saved", "autosave": True})
+
+
+autosave_manager = AutosaveManager(
+    lambda: NOTEBOOKS_DIR,
+    _notebook_is_idle,
+    monitor=performance_monitor,
+    on_saved=_on_notebook_autosaved,
+)
+
+
+def _autosave_settings() -> AutosaveSettings:
+    return AutosaveSettings(
+        enabled=DIALENG_CONFIG.autosave_enabled,
+        debounce_ms=DIALENG_CONFIG.autosave_debounce_ms,
+        idle_only=DIALENG_CONFIG.autosave_idle_only,
+        recovery_snapshots=DIALENG_CONFIG.autosave_recovery_snapshots,
+        max_recovery_files=DIALENG_CONFIG.autosave_max_recovery_files,
+    )
 
 def get_data_queue(dlg_name: str, data_id: str) -> asyncio.Queue:
     """Get or create a data queue for dialoghelper push/pop operations."""
@@ -384,7 +536,12 @@ def _cancel_task_if_running(task_map: Dict[str, asyncio.Task], nb_id: str, label
         task.cancel()
 
 
-async def _invalidate_kernel_background_work(nb_id: str, reason: str) -> int:
+async def _invalidate_kernel_background_work(
+    nb_id: str,
+    reason: str,
+    *,
+    broadcast_snapshot: bool = True,
+) -> int:
     """Bump notebook generation, cancel stale setup/sync tasks, and clear state."""
     generation = _current_kernel_generation(nb_id) + 1
     kernel_generations[nb_id] = generation
@@ -392,26 +549,37 @@ async def _invalidate_kernel_background_work(nb_id: str, reason: str) -> int:
     _cancel_task_if_running(kernel_sync_tasks, nb_id, "kernel_sync", reason)
     if kernel_setup_state.pop(nb_id, None) is not None:
         logger.info("Cleared kernel setup state after invalidation (notebook=%s, reason=%s, generation=%s)", nb_id, reason, generation)
-    await broadcast_kernel_snapshot(nb_id)
+    if broadcast_snapshot:
+        await broadcast_kernel_snapshot(nb_id)
     return generation
 
 
-async def _teardown_notebook_runtime(nb_id: str, reason: str) -> None:
+async def _teardown_notebook_runtime(
+    nb_id: str,
+    reason: str,
+    *,
+    broadcast_snapshot: bool = True,
+    drop_connections: bool = True,
+) -> None:
     """Cancel notebook work, release kernel resources, and clear ephemeral state."""
-    generation = await _invalidate_kernel_background_work(nb_id, reason=f"teardown:{reason}")
-    if nb_id in execution_queues:
-        execution_queues[nb_id].cancel_all()
-        del execution_queues[nb_id]
+    generation = await _invalidate_kernel_background_work(
+        nb_id,
+        reason=f"teardown:{reason}",
+        broadcast_snapshot=broadcast_snapshot,
+    )
+    queue = execution_queues.pop(nb_id, None)
+    if queue:
+        try:
+            queue.cancel_all(nb_id)
+        except Exception:
+            logger.exception("Failed to cancel execution queue during notebook teardown (notebook=%s)", nb_id)
     if kernel_service.has_kernel(nb_id):
         await kernel_service.shutdown_async(nb_id)
-    kernel_setup_tasks.pop(nb_id, None)
-    kernel_sync_tasks.pop(nb_id, None)
-    kernel_setup_state.pop(nb_id, None)
-    kernel_generations.pop(nb_id, None)
-    notebook_revisions.pop(nb_id, None)
-    outline_revisions.pop(nb_id, None)
-    data_queues.pop(nb_id, None)
-    broadcast_manager.drop_notebook(nb_id)
+    lifecycle = LifecycleState.DELETED if "delete" in reason else LifecycleState.STOPPED
+    runtime_registry.clear_runtime(nb_id, lifecycle=lifecycle)
+    outline_cache.invalidate_notebook(nb_id)
+    if drop_connections:
+        broadcast_manager.drop_notebook(nb_id)
     logger.info(
         "Notebook runtime torn down (notebook=%s, reason=%s, invalidated_generation=%s)",
         nb_id,
@@ -454,7 +622,7 @@ async def _shutdown_server_runtime(reason: str = "server_shutdown") -> None:
 
     for nb_id, queue in list(execution_queues.items()):
         try:
-            queue.cancel_all()
+            queue.cancel_all(nb_id)
         except Exception as e:
             logger.warning("Failed to cancel execution queue during shutdown (notebook=%s): %s", nb_id, e)
     execution_queues.clear()
@@ -464,6 +632,10 @@ async def _shutdown_server_runtime(reason: str = "server_shutdown") -> None:
     finally:
         kernel_setup_state.clear()
         kernel_generations.clear()
+        notebook_revisions.clear()
+        structure_revisions.clear()
+        outline_revisions.clear()
+        event_stream_revisions.clear()
         data_queues.clear()
         logger.info("Dialeng shutdown cleanup complete")
 
@@ -480,15 +652,46 @@ def _assert_kernel_generation_current(nb_id: str, generation: int, source: str) 
 def _get_auth_snapshot() -> dict:
     """Return the current Colab auth status in a JSON-safe structure."""
     if not colab_auth_service:
+        enabled = bool(getattr(DIALENG_CONFIG, "colab_enabled", False))
         return {
-            "enabled": False,
+            "enabled": enabled,
             "authenticated": False,
             "has_tokens": False,
             "email": None,
             "validation_error": None,
+            "validation_state": remote_service_state["colab"],
             "auth_provider": getattr(DIALENG_CONFIG, "colab_auth_provider", "oauth_local"),
         }
-    return colab_auth_service.get_status()
+    status = colab_auth_service.get_status()
+    status["validation_state"] = remote_service_state["colab"]
+    return status
+
+
+def _get_llm_status_snapshot(nb: Optional[Notebook] = None) -> dict:
+    """Return provider/model availability without exposing credentials."""
+    selected_provider = getattr(nb, "llm_provider", None) or DEFAULT_LLM_PROVIDER
+    selected_model = getattr(nb, "model", None) or DIALENG_CONFIG.get_default_model(selected_provider)
+    providers = []
+    for status in CREDENTIAL_INVENTORY.providers.values():
+        if status.id == "mock_only":
+            continue
+        if (
+            status.authenticated
+            or status.validation_state == "validating"
+            or status.id == selected_provider
+        ):
+            providers.append(status.to_dict())
+    selected = CREDENTIAL_INVENTORY.get(selected_provider)
+    return {
+        "available": CREDENTIAL_INVENTORY.available,
+        "default_provider": CREDENTIAL_INVENTORY.default_provider(),
+        "selected_provider": selected_provider,
+        "selected_model": selected_model,
+        "selection_available": bool(selected and selected.authenticated),
+        "validation_state": remote_service_state["providers"],
+        "providers": providers,
+        "openai_auth": openai_codex_auth_service.status(),
+    }
 
 
 def _get_queue_payload(nb_id: str) -> dict:
@@ -515,10 +718,12 @@ def _build_notebook_snapshot(nb_id: str) -> dict:
     return {
         "title": nb.title,
         "revision": _get_notebook_revision(nb_id),
+        "structure_revision": _get_structure_revision(nb_id),
         "ordered_cell_ids": _ordered_cell_ids(nb),
         "cell_versions": {cell.id: cell.version for cell in nb.cells},
         "dialog_mode": nb.dialog_mode,
         "model": nb.model,
+        "llm_provider": nb.llm_provider,
         "safe_mode": nb.safe_mode,
         "kernel_type": getattr(nb, "kernel_type", "local"),
         "colab_runtime_type": getattr(nb, "colab_runtime_type", "cpu"),
@@ -530,16 +735,37 @@ def _get_notebook_revision(nb_id: str) -> int:
     return notebook_revisions.get(nb_id, 0)
 
 
+def _get_structure_revision(nb_id: str) -> int:
+    """Return the current token for ordered cell structure mutations."""
+    return structure_revisions.get(nb_id, 0)
+
+
 def _touch_notebook_revision(nb_id: str, reason: str) -> int:
     """Bump runtime revision for backend-authoritative notebook mutations."""
-    notebook_revisions[nb_id] = notebook_revisions.get(nb_id, 0) + 1
+    revision = runtime_registry.next_notebook_revision(nb_id)
     logger.info(
         "Notebook revision advanced (notebook=%s, revision=%s, reason=%s)",
         nb_id,
-        notebook_revisions[nb_id],
+        revision,
         reason,
     )
-    return notebook_revisions[nb_id]
+    notebook = notebooks.get(nb_id)
+    if notebook is not None:
+        autosave_manager.schedule(nb_id, notebook, _autosave_settings())
+    return revision
+
+
+def _touch_structure_revision(nb_id: str, reason: str) -> int:
+    """Advance cell-order state and the durable notebook event stream together."""
+    structure_revision = runtime_registry.next_structure_revision(nb_id)
+    _touch_notebook_revision(nb_id, reason)
+    logger.info(
+        "Notebook structure revision advanced (notebook=%s, revision=%s, reason=%s)",
+        nb_id,
+        structure_revision,
+        reason,
+    )
+    return structure_revision
 
 
 def _expected_version_conflicts(cell, expected_version: int = -1) -> bool:
@@ -551,6 +777,62 @@ def _get_outline_revision(nb_id: str) -> int:
     return outline_revisions.get(nb_id, 0)
 
 
+def _get_stream_revision(nb_id: str, stream: str) -> int:
+    if stream == "outline":
+        return _get_outline_revision(nb_id)
+    return event_stream_revisions.get(nb_id, {}).get(stream, 0)
+
+
+def _next_stream_revision(nb_id: str, stream: str) -> int:
+    return runtime_registry.next_stream_revision(nb_id, stream)
+
+
+def _event_stream(event_type: str) -> str:
+    if event_type == "notebook_saved":
+        return "persistence"
+    if event_type == "llm_status":
+        return "llm"
+    if event_type.startswith("cell_") or event_type == "prompt_output_update":
+        return "notebook"
+    if event_type in {
+        "stream_chunk", "stream_end", "prompt_stream_start", "thinking_start", "thinking_end",
+        "code_stream_start", "code_stream_chunk", "code_stream_end", "code_display_data",
+        "code_update_display", "code_clear_output", "var_substituted", "tool_available",
+        "tool_call", "tool_result", "llm_usage", "tool_confirmation_request",
+    }:
+        return "output"
+    return "kernel"
+
+
+def _protocol_event(nb_id: str, data: dict) -> dict:
+    """Attach a monotonic stream revision and deduplication ID to an event."""
+    payload = dict(data)
+    event_type = str(payload.get("type") or "event")
+    requested_stream = payload.get("stream")
+    if event_type == "code_stream_chunk" and requested_stream in {"stdout", "stderr"}:
+        # Jupyter's stdout/stderr channel is payload data, not a protocol
+        # revision stream. Keeping both in `stream` caused false gaps after a
+        # page reload because clients never snapshot a `stdout` revision.
+        payload["output_stream"] = requested_stream
+        stream = "output"
+    else:
+        stream = str(requested_stream or _event_stream(event_type))
+    payload["stream"] = stream
+    payload.setdefault("notebook_id", nb_id)
+    payload.setdefault("stream", stream)
+    payload.setdefault("event_id", uuid.uuid4().hex)
+    if stream == "notebook":
+        payload.setdefault("notebook_revision", _get_notebook_revision(nb_id))
+    if "revision" not in payload:
+        if stream == "outline":
+            payload["revision"] = _get_outline_revision(nb_id)
+        else:
+            payload["revision"] = _next_stream_revision(nb_id, stream)
+    if event_type in {"kernel_snapshot", "queue_update", "llm_status"}:
+        payload["authoritative"] = True
+    return payload
+
+
 def _parse_kernel_connection_state(raw_state: Optional[str]) -> tuple[str, Optional[str]]:
     """Split a kernel connection_state into machine state + detail."""
     if not raw_state:
@@ -558,6 +840,18 @@ def _parse_kernel_connection_state(raw_state: Optional[str]) -> tuple[str, Optio
     if raw_state.startswith("initializing:"):
         return "initializing", raw_state.split(":", 1)[1].strip()
     return raw_state, None
+
+
+def _get_revision_snapshot(nb_id: str) -> dict[str, int]:
+    """Return the current revision baseline for every client event stream."""
+    return {
+        "notebook": _get_stream_revision(nb_id, "notebook"),
+        "kernel": _get_stream_revision(nb_id, "kernel"),
+        "outline": _get_outline_revision(nb_id),
+        "llm": _get_stream_revision(nb_id, "llm"),
+        "output": _get_stream_revision(nb_id, "output"),
+        "persistence": _get_stream_revision(nb_id, "persistence"),
+    }
 
 
 def _build_kernel_snapshot(nb_id: str) -> dict:
@@ -606,10 +900,16 @@ def _build_kernel_snapshot(nb_id: str) -> dict:
         and connection_state not in {"connecting", "initializing"}
     )
 
+    revisions = _get_revision_snapshot(nb_id)
     return {
         "type": "kernel_snapshot",
         "notebook_id": nb_id,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "stream": "kernel",
+        "revision": revisions["kernel"],
+        "event_id": uuid.uuid4().hex,
+        "authoritative": True,
+        "revisions": revisions,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "notebook": _build_notebook_snapshot(nb_id),
         "kernel": {
             "selected_type": selected_kernel_type,
@@ -639,6 +939,7 @@ def _build_kernel_snapshot(nb_id: str) -> dict:
             "revision": _get_outline_revision(nb_id),
         },
         "auth": auth_payload,
+        "llm": _get_llm_status_snapshot(nb),
     }
 
 
@@ -649,7 +950,8 @@ async def send_kernel_snapshot(nb_id: str, send) -> None:
 
 async def broadcast_kernel_snapshot(nb_id: str):
     """Broadcast the latest notebook/kernel snapshot to all clients."""
-    await broadcast_manager.broadcast_text(nb_id, json.dumps(_build_kernel_snapshot(nb_id)))
+    _next_stream_revision(nb_id, "kernel")
+    await broadcast_manager.broadcast_json(nb_id, _build_kernel_snapshot(nb_id))
 
 
 async def broadcast_all_kernel_snapshots():
@@ -658,13 +960,24 @@ async def broadcast_all_kernel_snapshots():
         await broadcast_kernel_snapshot(nb_id)
 
 
+async def broadcast_llm_status(nb_id: str) -> None:
+    """Broadcast provider/model inventory independently of kernel state."""
+    payload = {"type": "llm_status", **_get_llm_status_snapshot(get_notebook(nb_id))}
+    await broadcast_manager.broadcast_json(nb_id, _protocol_event(nb_id, payload))
+
+
+async def broadcast_all_llm_statuses() -> None:
+    for nb_id in broadcast_manager.notebook_ids():
+        await broadcast_llm_status(nb_id)
+
+
 async def _mark_outline_dirty(nb_id: str, reason: str, *, broadcast_snapshot: bool = True) -> None:
     """Bump the outline revision when server state changes can affect it."""
-    outline_revisions[nb_id] = outline_revisions.get(nb_id, 0) + 1
+    revision = runtime_registry.next_outline_revision(nb_id)
     logger.info(
         "Outline marked dirty (notebook=%s, revision=%s, reason=%s)",
         nb_id,
-        outline_revisions[nb_id],
+        revision,
         reason,
     )
     if broadcast_snapshot:
@@ -675,11 +988,11 @@ async def _mark_all_outlines_dirty(reason: str) -> None:
     """Bump outline revisions for all active notebooks, then broadcast snapshots once."""
     notebook_ids = set(notebooks.keys()) | set(broadcast_manager.notebook_ids()) | set(kernel_service._kernels.keys())
     for nb_id in notebook_ids:
-        outline_revisions[nb_id] = outline_revisions.get(nb_id, 0) + 1
+        revision = runtime_registry.next_outline_revision(nb_id)
         logger.info(
             "Outline marked dirty (notebook=%s, revision=%s, reason=%s)",
             nb_id,
-            outline_revisions[nb_id],
+            revision,
             reason,
         )
     if notebook_ids:
@@ -702,7 +1015,7 @@ async def _set_kernel_setup_state(
         "detail": detail,
         "is_active": is_active,
         "generation": generation if generation is not None else _current_kernel_generation(nb_id),
-        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     logger.info(
         "Kernel setup state updated (notebook=%s, source=%s, phase=%s, active=%s, generation=%s, detail=%s)",
@@ -726,15 +1039,44 @@ async def _clear_kernel_setup_state(nb_id: str, *, expected_generation: Optional
 
 def _load_notebook(path: str) -> Notebook:
     """Load a notebook with app-level credential/model validation."""
-    nb = Notebook.load(str(path),
-                       default_dialog_mode=DEFAULT_DIALOG_MODE,
-                       model_validator=validate_model_id)
-    # Override mode to mock if no credentials available
-    if not CREDENTIAL_STATUS.available:
+    start = time.perf_counter()
+    try:
+        nb = Notebook.load(str(path),
+                           default_dialog_mode=DEFAULT_DIALOG_MODE)
+    except Exception as exc:
+        performance_monitor.observe_duration(
+            "notebook.load",
+            elapsed_ms(start),
+            labels={"outcome": "error"},
+            error_type=type(exc).__name__,
+        )
+        raise
+    # Legacy notebooks did not persist a provider. Migrate them to the highest
+    # priority authenticated Claude backend (or the current default).
+    if not nb.llm_provider:
+        nb.llm_provider = CREDENTIAL_INVENTORY.default_provider()
+        nb.modified = True
+    selected = CREDENTIAL_INVENTORY.get(nb.llm_provider)
+    if nb.llm_provider == "mock_only" and CREDENTIAL_INVENTORY.available:
+        nb.llm_provider = CREDENTIAL_INVENTORY.default_provider()
+        selected = CREDENTIAL_INVENTORY.get(nb.llm_provider)
+        nb.modified = True
+    # Only force mock when there is no authenticated real provider at all.
+    # Persisted unavailable selections remain visible and are rejected at run.
+    if not CREDENTIAL_INVENTORY.available:
         nb.dialog_mode = "mock"
-    # Ensure model is always set (old notebooks may not have it saved)
-    if not nb.model:
-        nb.model = DEFAULT_MODEL
+    if selected and (selected.authenticated or not nb.model):
+        validated_model = DIALENG_CONFIG.validate_model(nb.llm_provider, nb.model)
+        if validated_model != nb.model:
+            nb.model = validated_model
+            nb.modified = True
+    performance_monitor.observe_duration(
+        "notebook.load",
+        elapsed_ms(start),
+        labels={"outcome": "success"},
+        cell_count=len(nb.cells),
+        file_bytes=Path(path).stat().st_size if Path(path).exists() else 0,
+    )
     return nb
 
 
@@ -793,6 +1135,8 @@ def _find_notebook_by_name(name: str) -> Optional[str]:
     if not target.exists() or not target.resolve().is_relative_to(NOTEBOOKS_DIR.resolve()):
         return None
     nb_id = _nb_id_from_path(target)
+    if nb_id in deleting_notebooks or nb_id in deleted_notebooks:
+        return None
     # Load into memory if not already
     if nb_id not in notebooks:
         nb = _load_notebook(target)
@@ -800,8 +1144,18 @@ def _find_notebook_by_name(name: str) -> Optional[str]:
         notebooks[nb_id] = nb
     return nb_id
 
+def _assert_notebook_available(notebook_id: str) -> None:
+    """Reject stale requests for a deleting or deleted notebook."""
+    if notebook_id in deleting_notebooks or notebook_id in deleted_notebooks:
+        raise HTTPException(
+            status_code=410,
+            detail=f"Notebook '{notebook_id}' was deleted.",
+        )
+
+
 def get_notebook(notebook_id: str) -> Notebook:
     """Get or create a notebook - ALWAYS requires notebook_id"""
+    _assert_notebook_available(notebook_id)
     if notebook_id not in notebooks:
         path = _find_notebook_path(notebook_id)
         if path:
@@ -811,6 +1165,7 @@ def get_notebook(notebook_id: str) -> Notebook:
         else:
             nb = Notebook(id=notebook_id, title=notebook_id,
                          dialog_mode=DEFAULT_DIALOG_MODE, model=DEFAULT_MODEL,
+                         llm_provider=DEFAULT_LLM_PROVIDER,
                          colab_runtime_type=DIALENG_CONFIG.colab_default_runtime)
             nb.cells = [
                 Cell(cell_type="note", source="# Welcome to Dialeng! 🚀\n\nAn open-source notebook with **prompt cells** for AI interaction.\n\n**Keyboard Shortcuts (Jupyter-style):**\n- `Shift+Enter` - Run cell (recommended)\n- `Ctrl/Cmd+Enter` - Run cell (alternative)\n- `Ctrl/Cmd+S` - Save notebook\n- `D D` - Delete cell (press D twice)\n- `Ctrl/Cmd+Shift+C` - Add code cell\n- `Ctrl/Cmd+Shift+N` - Add note cell\n- `Ctrl/Cmd+Shift+P` - Add prompt cell\n- `Alt+↑/↓` - Move cell up/down\n- `Escape` - Exit edit mode\n- Double-click - Edit markdown/response"),
@@ -829,12 +1184,36 @@ def get_notebook(notebook_id: str) -> Notebook:
             notebooks[notebook_id] = nb
     return notebooks[notebook_id]
 
-def save_notebook(notebook_id: str):
+def save_notebook(notebook_id: str, *, overwrite_external: bool = False):
+    _assert_notebook_available(notebook_id)
     if notebook_id in notebooks:
         nb = notebooks[notebook_id]
         # Use existing path if set (preserves subdirectory location), else reconstruct from ID
         path = nb.path if nb.path else NOTEBOOKS_DIR / f"{_nb_id_to_relpath(notebook_id)}.ipynb"
-        nb.save(str(path))
+        start = time.perf_counter()
+        autosave_manager.cancel_pending(notebook_id)
+        try:
+            nb.save(
+                str(path),
+                atomic=DIALENG_CONFIG.persistence_atomic_explicit_save,
+                overwrite_external=overwrite_external,
+            )
+        except Exception as exc:
+            performance_monitor.observe_duration(
+                "notebook.save",
+                elapsed_ms(start),
+                labels={"mode": "explicit", "outcome": "error"},
+                cell_count=len(nb.cells),
+                error_type=type(exc).__name__,
+            )
+            raise
+        performance_monitor.observe_duration(
+            "notebook.save",
+            elapsed_ms(start),
+            labels={"mode": "explicit", "outcome": "success"},
+            cell_count=len(nb.cells),
+            file_bytes=Path(path).stat().st_size if Path(path).exists() else 0,
+        )
         # Auto-extract #| export cells to lib dir if notebook has #| default_exp
         try:
             from dialeng.services.lib_export_service import maybe_extract
@@ -1104,7 +1483,11 @@ async def broadcast_json(nb_id: str, data: dict, exclude_send=None):
     need full HTML OOB swaps. The client-side WebSocket handler processes
     these by type.
     """
-    await broadcast_manager.broadcast_json(nb_id, data, exclude_send=exclude_send)
+    await broadcast_manager.broadcast_json(
+        nb_id,
+        _protocol_event(nb_id, data),
+        exclude_send=exclude_send,
+    )
 
 
 async def broadcast_all_json(data: dict):
@@ -1133,6 +1516,7 @@ def _cell_add_payload(nb, nb_id: str, cell_id: str) -> dict:
         "html": cell_html + add_html,
         "ordered_cell_ids": _ordered_cell_ids(nb),
         "notebook_revision": _get_notebook_revision(nb_id),
+        "structure_revision": _get_structure_revision(nb_id),
         "cell_versions": {c.id: c.version for c in nb.cells},
     }
 
@@ -1144,6 +1528,7 @@ def _cell_delete_payload(nb, nb_id: str, cell_id: str) -> dict:
         "cell_id": cell_id,
         "ordered_cell_ids": _ordered_cell_ids(nb),
         "notebook_revision": _get_notebook_revision(nb_id),
+        "structure_revision": _get_structure_revision(nb_id),
         "cell_versions": {c.id: c.version for c in nb.cells},
     }
 
@@ -1155,7 +1540,23 @@ def _cell_move_payload(nb, nb_id: str, cell_id: str) -> dict:
         "cell_id": cell_id,
         "ordered_cell_ids": _ordered_cell_ids(nb),
         "notebook_revision": _get_notebook_revision(nb_id),
+        "structure_revision": _get_structure_revision(nb_id),
         "cell_versions": {c.id: c.version for c in nb.cells},
+    }
+
+
+def _cell_type_payload(nb, nb_id: str, cell_id: str) -> dict:
+    """Build a revisioned full-cell replacement after changing cell type."""
+    cell = nb.get_cell(cell_id)
+    if cell is None:
+        raise ValueError(f"Cell {cell_id} not found in notebook {nb_id}")
+    return {
+        "type": "cell_type_change",
+        "cell_id": cell.id,
+        "cell_type": str(cell.cell_type),
+        "version": cell.version,
+        "html": to_xml(CellView(cell, nb_id)),
+        "notebook_revision": _get_notebook_revision(nb_id),
     }
 
 
@@ -1164,23 +1565,44 @@ def _cell_source_payload(nb_id: str, cell) -> dict:
     return {
         "type": "cell_source_update",
         "cell_id": cell.id,
+        "cell_type": str(cell.cell_type),
         "source": cell.source,
+        "output": cell.output if str(cell.cell_type) == "prompt" else None,
+        "execution_count": cell.execution_count,
+        "time_run": cell.time_run,
         "version": cell.version,
         "notebook_revision": _get_notebook_revision(nb_id),
     }
 
 
-async def _broadcast_cell_version_conflict(nb_id: str, cell, expected_version: int) -> None:
+def _cell_output_commit_payload(nb_id: str, cell) -> dict:
+    """Advance browser revisions for persisted output-only mutations."""
+    return {
+        "type": "cell_output_commit",
+        "cell_id": cell.id,
+        "version": cell.version,
+        "notebook_revision": _get_notebook_revision(nb_id),
+    }
+
+
+async def _broadcast_cell_version_conflict(
+    nb_id: str,
+    cell,
+    expected_version: int,
+    *,
+    field: str = "source",
+) -> None:
     await broadcast_json(nb_id, {
         "type": "cell_conflict",
         "cell_id": cell.id,
+        "conflict_field": field,
         "expected_version": expected_version,
         "actual_version": cell.version,
         "source": cell.source,
+        "output": cell.output,
         "version": cell.version,
         "notebook_revision": _get_notebook_revision(nb_id),
     })
-    await broadcast_json(nb_id, _cell_source_payload(nb_id, cell))
 
 
 def _commit_cell_source(nb_id: str, nb, cell, source: str, *, reason: str) -> bool:
@@ -1248,14 +1670,20 @@ async def broadcast_cell_output(nb_id: str, cell_id: str, output):
             "stream": output.stream_name
         }
     elif output.output_type == 'execute_result':
+        html_content = render_mime_bundle(
+            output.content if isinstance(output.content, dict) else {"text/plain": str(output.content)},
+            output.metadata,
+        )
         msg_data = {
-            "type": "code_stream_chunk",
+            "type": "code_display_data",
             "cell_id": cell_id,
-            "chunk": output.content,
-            "stream": "stdout"
+            "html": html_content,
+            "output_kind": "execute_result",
         }
     elif output.output_type == 'error':
         tb_text = '\n'.join(output.traceback or [])
+        if not tb_text:
+            tb_text = f"{output.ename or 'Error'}: {output.evalue or ''}".rstrip()
         msg_data = {
             "type": "code_stream_chunk",
             "cell_id": cell_id,
@@ -1267,7 +1695,8 @@ async def broadcast_cell_output(nb_id: str, cell_id: str, output):
         msg_data = {
             "type": "code_display_data",
             "cell_id": cell_id,
-            "html": html_content
+            "html": html_content,
+            "output_kind": "display_data",
         }
         if output.display_id:
             msg_data["display_id"] = output.display_id
@@ -1280,10 +1709,11 @@ async def broadcast_cell_output(nb_id: str, cell_id: str, output):
             "display_id": output.display_id
         }
     elif output.output_type == 'clear_output':
+        wait = output.content.get("wait", False) if isinstance(output.content, dict) else output.content
         msg_data = {
             "type": "code_clear_output",
             "cell_id": cell_id,
-            "wait": output.content  # bool: wait for next output before clearing
+            "wait": bool(wait),
         }
     else:
         return  # Unknown type, skip
@@ -1305,43 +1735,210 @@ async def broadcast_cell_output(nb_id: str, cell_id: str, output):
 # FastHTML App with WebSocket
 # ============================================================================
 
+
+def _static_asset_url(relative_path: str) -> str:
+    """Return a package static URL that changes when the asset changes."""
+    asset = Path(__file__).parent / "static" / relative_path
+    try:
+        version = f"{asset.stat().st_mtime_ns:x}"
+    except OSError:
+        version = "missing"
+    return f"/static/{relative_path}?v={version}"
+
+
 app, rt = fast_app(
     pico=False,
+    # Cell and notebook mutations must not depend on a public CDN being
+    # reachable. FastHTML still supplies its other default browser helpers.
+    htmx=False,
     exts='ws',
     static_path=str(Path(__file__).parent),
     hdrs=(
+        Script(src=_static_asset_url("vendor/htmx-2.0.7.min.js")),
         # CSS - External stylesheets (order matters: themes first for variables)
-        Link(rel="stylesheet", href="/static/css/themes.css"),
-        Link(rel="stylesheet", href="/static/css/base.css"),
-        Link(rel="stylesheet", href="/static/css/components.css"),
-        Link(rel="stylesheet", href="/static/css/editor.css"),
-        # Monaco Editor (AMD loader - Monaco modules loaded in app.js via require())
-        Script(src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.min.js"),
+        Link(rel="stylesheet", href=_static_asset_url("css/themes.css")),
+        Link(rel="stylesheet", href=_static_asset_url("css/base.css")),
+        Link(rel="stylesheet", href=_static_asset_url("css/components.css")),
+        Link(rel="stylesheet", href=_static_asset_url("css/editor.css")),
         # Highlight.js for markdown code blocks
         Link(rel="stylesheet", href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"),
         Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"),
+        Script(src=_static_asset_url("js/event_dispatcher.js")),
+        Script(src=_static_asset_url("js/notebook_client.js")),
+        Script(src=_static_asset_url("js/prompt_response_editor.js")),
+        Script(src=_static_asset_url("js/structure_controller.js")),
+        Script(src=_static_asset_url("js/execution_ui.js")),
+        Script(src=_static_asset_url("js/notifications.js")),
+        Script(src=_static_asset_url("js/browser_diagnostics.js")),
         # App JS - External JavaScript (after libraries)
-        Script(src="/static/js/app.js"),
+        Script(src=_static_asset_url("js/app.js")),
     )
 )
+app.add_middleware(RequestMetricsMiddleware, monitor=performance_monitor)
+
+
+async def _initialize_remote_services() -> None:
+    """Validate providers and Colab in the background, then notify open tabs."""
+    remote_service_state["providers"] = "validating"
+    remote_service_state["colab"] = "validating" if DIALENG_CONFIG.colab_enabled else "disabled"
+    performance_monitor.record_event("remote_services.begin")
+    provider_task = asyncio.create_task(
+        refresh_credential_inventory_async(NOTEBOOKS_DIR / ".env"),
+        name="dialeng-provider-inventory",
+    )
+    colab_task = asyncio.create_task(_init_colab_async(), name="dialeng-colab-init")
+    provider_result, colab_result = await asyncio.gather(
+        provider_task,
+        colab_task,
+        return_exceptions=True,
+    )
+
+    if isinstance(provider_result, BaseException):
+        remote_service_state["providers"] = "error"
+        performance_monitor.record_event(
+            "remote_services.provider_failed",
+            error_type=type(provider_result).__name__,
+        )
+        logger.exception(
+            "Provider inventory validation failed",
+            exc_info=(type(provider_result), provider_result, provider_result.__traceback__),
+        )
+    else:
+        _apply_llm_inventory(provider_result)
+        remote_service_state["providers"] = "ready"
+
+    if isinstance(colab_result, BaseException):
+        remote_service_state["colab"] = "error"
+        performance_monitor.record_event(
+            "remote_services.colab_failed",
+            error_type=type(colab_result).__name__,
+        )
+        logger.exception(
+            "Colab background initialization failed",
+            exc_info=(type(colab_result), colab_result, colab_result.__traceback__),
+        )
+    elif DIALENG_CONFIG.colab_enabled:
+        remote_service_state["colab"] = "ready"
+
+    await broadcast_all_llm_statuses()
+    await broadcast_all_kernel_snapshots()
+    performance_monitor.record_event(
+        "remote_services.complete",
+        provider_available=CREDENTIAL_INVENTORY.available,
+        colab_ready=colab_auth_service is not None,
+    )
+
+
+async def _watch_project_files() -> None:
+    """Invalidate affected explorer directories and notify open tabs."""
+    try:
+        from watchfiles import awatch
+    except ImportError:
+        logger.warning("watchfiles is unavailable; external explorer changes require refresh")
+        return
+    async for changes in awatch(NOTEBOOKS_DIR):
+        affected: set[str] = set()
+        for _change, raw_path in changes:
+            changed = Path(raw_path)
+            try:
+                relative = changed.resolve().relative_to(NOTEBOOKS_DIR.resolve())
+            except ValueError:
+                continue
+            if any(part in {".git", "__pycache__", ".ipynb_checkpoints", "recovery"} for part in relative.parts):
+                continue
+            parent = changed.parent
+            directory_listing_cache.invalidate(parent)
+            try:
+                parent_relative = parent.resolve().relative_to(NOTEBOOKS_DIR.resolve())
+                affected.add("" if str(parent_relative) == "." else parent_relative.as_posix())
+            except ValueError:
+                continue
+        if affected:
+            await broadcast_all_json({
+                "type": "file_explorer_changed",
+                "paths": sorted(affected),
+            })
+
 
 # AUTORUN processing on startup (async, needs event loop)
-@app.on_event("startup")
 async def _autorun_startup():
     # Reload config from the correct path — the Uvicorn reloader spawns a worker
     # process that re-imports this module, but set_root_dir() only runs in main().
     # Without this, DIALENG_CONFIG has DEFAULT_CONFIG (no extension settings).
-    global DIALENG_CONFIG
-    DIALENG_CONFIG = load_config(config_path=NOTEBOOKS_DIR / "dialeng_config.json", force_reload=True)
-    # Initialize Colab in the worker process (set_root_dir() only runs in the main process)
-    _init_colab()
-    await process_autorun(kernel_service, notebooks_dir=NOTEBOOKS_DIR)
+    global DIALENG_CONFIG, event_loop_monitor_task, remote_service_init_task, project_file_watch_task
+    performance_monitor.record_event("startup.begin")
+    with performance_monitor.measure("startup.config"):
+        DIALENG_CONFIG = load_config(config_path=NOTEBOOKS_DIR / "dialeng_config.json", force_reload=True)
+        set_skill_root(NOTEBOOKS_DIR)
+    with performance_monitor.measure("startup.provider_inventory.local"):
+        _load_initial_llm_runtime()
+    if remote_service_init_task is None or remote_service_init_task.done():
+        remote_service_init_task = asyncio.create_task(
+            _initialize_remote_services(),
+            name="dialeng-remote-services",
+        )
+    with performance_monitor.measure("startup.autorun"):
+        await process_autorun(kernel_service, notebooks_dir=NOTEBOOKS_DIR)
+    if event_loop_monitor_task is None or event_loop_monitor_task.done():
+        event_loop_monitor_task = asyncio.create_task(
+            monitor_event_loop_lag(performance_monitor),
+            name="dialeng-event-loop-monitor",
+        )
+    if project_file_watch_task is None or project_file_watch_task.done():
+        project_file_watch_task = asyncio.create_task(
+            _watch_project_files(),
+            name="dialeng-project-file-watch",
+        )
+    performance_monitor.record_event("startup.complete")
 
 
-@app.on_event("shutdown")
 async def _app_shutdown():
     """Release notebook kernels and background tasks on server shutdown."""
+    global event_loop_monitor_task, remote_service_init_task, project_file_watch_task
+    if remote_service_init_task and not remote_service_init_task.done():
+        remote_service_init_task.cancel()
+        await asyncio.gather(remote_service_init_task, return_exceptions=True)
+    remote_service_init_task = None
+    if event_loop_monitor_task and not event_loop_monitor_task.done():
+        event_loop_monitor_task.cancel()
+        await asyncio.gather(event_loop_monitor_task, return_exceptions=True)
+    event_loop_monitor_task = None
+    if project_file_watch_task and not project_file_watch_task.done():
+        project_file_watch_task.cancel()
+        await asyncio.gather(project_file_watch_task, return_exceptions=True)
+    project_file_watch_task = None
+    await autosave_manager.flush_all(timeout_seconds=3.0)
     await _shutdown_server_runtime()
+
+
+@asynccontextmanager
+async def _app_lifespan(_app):
+    """Own all application background work within one ASGI lifecycle."""
+    await _autorun_startup()
+    try:
+        yield
+    finally:
+        await _app_shutdown()
+
+
+app.router.lifespan_context = _app_lifespan
+
+
+register_diagnostics_routes(
+    rt,
+    performance_monitor=performance_monitor,
+    runtime_registry=runtime_registry,
+    broadcast_manager=broadcast_manager,
+    autosave_manager=autosave_manager,
+    build_kernel_snapshot=_build_kernel_snapshot,
+    runtime_counts=lambda: {
+        "notebooks_loaded": len(notebooks),
+        "kernels_attached": len(kernel_service._kernels),
+        "execution_queues": len(execution_queues),
+        "setup_tasks": len(kernel_setup_tasks),
+        "sync_tasks": len(kernel_sync_tasks),
+    },
+)
 
 # ============================================================================
 # Extension Development Endpoints
@@ -1402,7 +1999,19 @@ async def get(path: str):
 
 @rt("/")
 def get():
-    return RedirectResponse("/dialeng/default", status_code=302)
+    return RedirectResponse("/dialeng/workspace", status_code=302)
+
+
+@rt("/dialeng/workspace")
+def get(deleted: str = ""):
+    """Render the project shell without implicitly creating a notebook."""
+    kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
+    return WorkspacePage(
+        NOTEBOOKS_DIR,
+        config=get_config(),
+        kernel_notebooks=kernel_nbs,
+        notebook_deleted=deleted.lower() in {"1", "true", "yes"},
+    )
 
 @rt("/dialeng/")
 async def get(name: str = ""):
@@ -1415,13 +2024,10 @@ async def get(name: str = ""):
     if name:
         nb_id = _find_notebook_by_name(name)
         if not nb_id:
-            # Notebook not found at that path — create it
-            dir_part = str(Path(name).parent) if '/' in name else ""
-            name_part = Path(name).name
-            return RedirectResponse(f"/dialeng/new?dir={dir_part}&name={name_part}", status_code=302)
+            return RedirectResponse("/dialeng/workspace", status_code=302)
         # Render the notebook page directly (same as /dialeng/{nb_id})
         return await _render_notebook_page(nb_id)
-    return RedirectResponse("/dialeng/default", status_code=302)
+    return RedirectResponse("/dialeng/workspace", status_code=302)
 
 @rt("/dialeng/new")
 def get(dir: str = "", name: str = ""):
@@ -1431,6 +2037,8 @@ def get(dir: str = "", name: str = ""):
 
     # Derive URL-safe ID from path: "subfolder/test.ipynb" → "subfolder_test"
     new_id = _nb_id_from_path(file_path)
+    deleted_notebooks.pop(new_id, None)
+    deleting_notebooks.discard(new_id)
 
     # If this notebook already exists in memory (e.g., re-creation after delete),
     # remove the stale version so we get fresh template cells
@@ -1438,6 +2046,7 @@ def get(dir: str = "", name: str = ""):
 
     nb = Notebook(id=new_id, title=display_name,
                   dialog_mode=DEFAULT_DIALOG_MODE, model=DEFAULT_MODEL,
+                  llm_provider=DEFAULT_LLM_PROVIDER,
                   colab_runtime_type=DIALENG_CONFIG.colab_default_runtime)
 
     # Load cells from TEMPLATE.ipynb (parent-first hierarchy)
@@ -1506,37 +2115,75 @@ def post(path: str = "", name: str = "", active_notebook_id: str = "", active_fi
 
 @rt("/files/delete")
 async def post(path: str = "", active_notebook_id: str = "", active_file_relpath: str = ""):
-    """Delete a file and return updated file list."""
+    """Delete a file and return explorer HTML plus deletion metadata."""
     from dialeng.ui.file_explorer import FileListContent
     if not path or '..' in path:
-        return Div("Invalid path", cls="status error")
+        return JSONResponse({"ok": False, "message": "Invalid path"}, status_code=400)
     target = NOTEBOOKS_DIR / path
     if not target.resolve().is_relative_to(NOTEBOOKS_DIR.resolve()):
-        return Div("Invalid path", cls="status error")
+        return JSONResponse({"ok": False, "message": "Invalid path"}, status_code=400)
+    deleted_nb_id = None
     if target.exists() and target.is_file():
-        target.unlink()
         if target.suffix == ".ipynb":
             nb_id = _nb_id_from_path(target)
-            await _teardown_notebook_runtime(nb_id, reason="file_delete")
-            if nb_id in notebooks:
-                del notebooks[nb_id]
+            async with runtime_registry.get_or_create(nb_id).mutation_lock:
+                deleting_notebooks.add(nb_id)
+                runtime_registry.set_lifecycle(nb_id, LifecycleState.DELETING)
+                try:
+                    await _teardown_notebook_runtime(
+                        nb_id,
+                        reason="file_delete",
+                        broadcast_snapshot=False,
+                        drop_connections=False,
+                    )
+                    target.unlink()
+                    notebooks.pop(nb_id, None)
+                    deleted_notebooks[nb_id] = {
+                        "path": path,
+                        "deleted_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    deleted_nb_id = nb_id
+                    await broadcast_json(nb_id, {
+                        "type": "notebook_deleted",
+                        "notebook_id": nb_id,
+                        "path": path,
+                        "workspace_url": "/dialeng/workspace?deleted=1",
+                        "message": "Notebook deleted. Its kernel and pending work were stopped.",
+                    })
+                    broadcast_manager.drop_notebook(nb_id)
+                except Exception:
+                    logger.exception("Notebook deletion failed (notebook=%s, path=%s)", nb_id, path)
+                    deleting_notebooks.discard(nb_id)
+                    runtime_registry.set_lifecycle(nb_id, LifecycleState.ACTIVE)
+                    await broadcast_kernel_snapshot(nb_id)
+                    raise
+                finally:
+                    deleting_notebooks.discard(nb_id)
+        else:
+            target.unlink()
     parent = target.parent
     kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
     next_active_file = "" if active_file_relpath == path else active_file_relpath
-    return FileListContent(
+    explorer = FileListContent(
         parent,
         NOTEBOOKS_DIR,
-        active_notebook_id,
+        "" if deleted_nb_id == active_notebook_id else active_notebook_id,
         active_file_relpath=next_active_file,
         kernel_notebooks=kernel_nbs,
     )
+    return JSONResponse({
+        "ok": True,
+        "html": to_xml(explorer),
+        "deleted_notebook_id": deleted_nb_id,
+        "workspace_url": "/dialeng/workspace?deleted=1" if deleted_nb_id else None,
+    })
 
 
 @rt("/dialeng/file")
 def get(path: str = ""):
     """Render a standalone text-file editor shell."""
     if not path:
-        return RedirectResponse("/dialeng/default", status_code=302)
+        return RedirectResponse("/dialeng/workspace", status_code=302)
     target = file_editor_service.resolve_rel_path(path)
     if target is None or not target.exists() or not target.is_file():
         return Titled("File not found - Dialeng", Div("File not found.", cls="status error"))
@@ -1658,7 +2305,10 @@ async def _render_notebook_page(nb_id: str):
     config = get_config()
     nb_kernel_alive = kernel_service.kernel_is_alive(nb_id)
     kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
-    return NotebookPage(nb, nb_list, AVAILABLE_DIALOG_MODES, AVAILABLE_MODELS, config,
+    llm_snapshot = _get_llm_status_snapshot(nb)
+    available_models = DIALENG_CONFIG.get_model_choices(nb.llm_provider)
+    return NotebookPage(nb, nb_list, AVAILABLE_DIALOG_MODES, available_models,
+                        available_providers=llm_snapshot["providers"], config=config,
                         shfmt_available=SHFMT_AVAILABLE,
                         colab_enabled=colab_auth_service is not None,
                         colab_authenticated=colab_auth_service.is_authenticated if colab_auth_service else False,
@@ -1666,18 +2316,94 @@ async def _render_notebook_page(nb_id: str):
                         notebooks_dir=NOTEBOOKS_DIR,
                         kernel_alive=nb_kernel_alive,
                         kernel_notebooks=kernel_nbs,
-                        has_craft_code=has_craft_code)
+                        has_craft_code=has_craft_code,
+                        initial_revisions=_get_revision_snapshot(nb_id))
 
 @rt("/dialeng/{nb_id}")
 async def get(nb_id: str):
     if not nb_id or not nb_id.strip():
-        return RedirectResponse("/dialeng/default", status_code=302)
+        return RedirectResponse("/dialeng/workspace", status_code=302)
+    if nb_id in deleting_notebooks or nb_id in deleted_notebooks:
+        return RedirectResponse("/dialeng/workspace?deleted=1", status_code=302)
+    if nb_id not in notebooks and _find_notebook_path(nb_id) is None:
+        return RedirectResponse("/dialeng/workspace", status_code=302)
     return await _render_notebook_page(nb_id)
 
 @rt("/dialeng/{nb_id}/save")
-def post(nb_id: str):
-    save_notebook(nb_id)
-    return Div("✓ Saved", cls="status success")
+async def post(nb_id: str, overwrite: bool = False):
+    try:
+        save_notebook(nb_id, overwrite_external=overwrite)
+    except ExternalFileChangedError as exc:
+        return JSONResponse({
+            "status": "conflict",
+            "type": "external_file_changed",
+            "message": str(exc),
+            "reload_url": f"/dialeng/{nb_id}",
+            "overwrite_url": f"/dialeng/{nb_id}/save?overwrite=true",
+        }, status_code=409)
+    await broadcast_json(nb_id, {"type": "notebook_saved"})
+    return Div("Saved", cls="status success")
+
+
+@rt("/dialeng/{nb_id}/recovery/status")
+def get(nb_id: str):
+    if not DIALENG_CONFIG.autosave_enabled or not DIALENG_CONFIG.autosave_recovery_snapshots:
+        return {"enabled": False, "available": False}
+    nb = get_notebook(nb_id)
+    canonical = Path(nb.path) if nb.path else NOTEBOOKS_DIR / f"{_nb_id_to_relpath(nb_id)}.ipynb"
+    candidate = find_newer_recovery(NOTEBOOKS_DIR, nb_id, canonical)
+    if candidate is None:
+        return {"enabled": True, "available": False}
+    return {
+        "enabled": True,
+        "available": True,
+        "created_at": datetime.fromtimestamp(
+            candidate.stat().st_mtime,
+            tz=timezone.utc,
+        ).isoformat(),
+        "inspect_url": f"/dialeng/file?path={candidate.relative_to(NOTEBOOKS_DIR).as_posix()}",
+    }
+
+
+@rt("/dialeng/{nb_id}/recovery")
+async def post(nb_id: str, action: str):
+    nb = get_notebook(nb_id)
+    canonical = Path(nb.path) if nb.path else NOTEBOOKS_DIR / f"{_nb_id_to_relpath(nb_id)}.ipynb"
+    candidate = find_newer_recovery(NOTEBOOKS_DIR, nb_id, canonical)
+    if candidate is None:
+        return JSONResponse({"ok": False, "message": "No newer recovery snapshot."}, status_code=404)
+    if action == "discard":
+        discard_recovery(candidate, NOTEBOOKS_DIR)
+        return {"ok": True, "action": "discarded"}
+    if action != "restore":
+        return JSONResponse({"ok": False, "message": "Invalid recovery action."}, status_code=400)
+
+    try:
+        recovered_data = json.loads(candidate.read_text(encoding="utf-8"))
+        # Validate notebook structure before replacing the canonical file.
+        Notebook.load(str(candidate), default_dialog_mode=DEFAULT_DIALOG_MODE)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
+        logger.warning(
+            "Recovery snapshot validation failed (notebook=%s, path=%s): %s",
+            nb_id,
+            candidate,
+            exc,
+        )
+        return JSONResponse({
+            "ok": False,
+            "status": "invalid_recovery",
+            "message": "The recovery snapshot is invalid and was not restored.",
+        }, status_code=422)
+    atomic_write_json(canonical, recovered_data)
+    restored = Notebook.load(str(canonical), default_dialog_mode=DEFAULT_DIALOG_MODE)
+    restored.id = nb_id
+    notebooks[nb_id] = restored
+    notebook_revisions.pop(nb_id, None)
+    structure_revisions.pop(nb_id, None)
+    event_stream_revisions.pop(nb_id, None)
+    discard_recovery(candidate, NOTEBOOKS_DIR)
+    await broadcast_json(nb_id, {"type": "notebook_reloaded"})
+    return {"ok": True, "action": "restored"}
 
 @rt("/dialeng/{nb_id}/mode")
 async def post(nb_id: str, mode: str):
@@ -1690,10 +2416,39 @@ async def post(nb_id: str, mode: str):
 @rt("/dialeng/{nb_id}/model")
 async def post(nb_id: str, model: str):
     nb = get_notebook(nb_id)
+    valid_model = DIALENG_CONFIG.validate_model(nb.llm_provider, model)
+    if valid_model != model:
+        await broadcast_json(nb_id, {
+            "type": "status_message",
+            "message": f"Model '{model}' is not available for {nb.llm_provider}.",
+            "tone": "error",
+        })
+        return ""
     nb.model = model
     nb.modified = True
+    await broadcast_llm_status(nb_id)
     await broadcast_kernel_snapshot(nb_id)
     return ""
+
+
+@rt("/dialeng/{nb_id}/provider")
+async def post(nb_id: str, provider: str):
+    """Select an authenticated provider and its compatible backend default."""
+    nb = get_notebook(nb_id)
+    status = CREDENTIAL_INVENTORY.get(provider)
+    if not status or not status.authenticated or provider == "mock_only":
+        await broadcast_json(nb_id, {
+            "type": "status_message",
+            "message": "That LLM provider is not authenticated.",
+            "tone": "error",
+        })
+        return ModelSelect(nb, DIALENG_CONFIG.get_model_choices(nb.llm_provider))
+    nb.llm_provider = provider
+    nb.model = DIALENG_CONFIG.validate_model(provider, None)
+    nb.modified = True
+    await broadcast_llm_status(nb_id)
+    await broadcast_kernel_snapshot(nb_id)
+    return ModelSelect(nb, DIALENG_CONFIG.get_model_choices(provider))
 
 @rt("/dialeng/{nb_id}/safe_mode")
 async def post(nb_id: str, safe_mode: str = "false"):
@@ -2091,6 +2846,7 @@ def _schedule_notebook_kernel_setup(
 # ============================================================================
 
 @rt("/dialeng/{nb_id}/kernel/type")
+@serialized_notebook_mutation
 async def post(nb_id: str, kernel_type: str):
     """Change the kernel type for a notebook."""
     nb = get_notebook(nb_id)
@@ -2108,6 +2864,8 @@ async def post(nb_id: str, kernel_type: str):
     nb.kernel_type = kernel_type
     if kernel_type == "colab" and not getattr(nb, "colab_runtime_type", ""):
         nb.colab_runtime_type = DIALENG_CONFIG.colab_default_runtime
+    nb.modified = True
+    _touch_notebook_revision(nb_id, "kernel_type_change")
     runtime_type = nb.colab_runtime_type
     await kernel_service.set_kernel_type(nb_id, kernel_type, runtime_type=runtime_type)
 
@@ -2124,6 +2882,7 @@ async def post(nb_id: str, kernel_type: str):
     return Div(f"Kernel: {reg.label}", cls="status success")
 
 @rt("/dialeng/{nb_id}/kernel/runtime")
+@serialized_notebook_mutation
 async def post(nb_id: str, runtime_type: str):
     """Change the Colab runtime type (cpu/gpu/tpu) for a notebook."""
     nb = get_notebook(nb_id)
@@ -2133,6 +2892,8 @@ async def post(nb_id: str, runtime_type: str):
         return Div("Runtime type only applies to Colab kernels", cls="status error")
 
     nb.colab_runtime_type = runtime_type
+    nb.modified = True
+    _touch_notebook_revision(nb_id, "kernel_runtime_change")
     await _invalidate_kernel_background_work(nb_id, reason=f"runtime_type:{runtime_type}")
 
     # New kernel needs fresh CRAFT initialization
@@ -2166,7 +2927,32 @@ def get(nb_id: str):
 @rt("/dialeng/{nb_id}/kernel/snapshot")
 def get(nb_id: str):
     """Get the backend-authoritative kernel snapshot for the notebook."""
+    if nb_id in deleting_notebooks or nb_id in deleted_notebooks:
+        return JSONResponse({
+            "type": "notebook_deleted",
+            "notebook_id": nb_id,
+            "workspace_url": "/dialeng/workspace?deleted=1",
+            "message": "Notebook deleted.",
+        }, status_code=410)
     return _build_kernel_snapshot(nb_id)
+
+
+@rt("/dialeng/{nb_id}/recovery")
+def get(nb_id: str):
+    """Return full rendered cells plus authoritative runtime revisions after a gap."""
+    if nb_id in deleting_notebooks or nb_id in deleted_notebooks:
+        return JSONResponse({
+            "type": "notebook_deleted",
+            "notebook_id": nb_id,
+            "workspace_url": "/dialeng/workspace?deleted=1",
+            "message": "Notebook deleted.",
+        }, status_code=410)
+    nb = get_notebook(nb_id)
+    return {
+        "type": "recovery_snapshot",
+        "cells_html": to_xml(AllCells(nb)),
+        "snapshot": _build_kernel_snapshot(nb_id),
+    }
 
 @rt("/dialeng/{nb_id}/kernel/info")
 def get(nb_id: str):
@@ -2390,7 +3176,13 @@ async def get(nb_id: str):
     headings = []
     for cell in nb.cells:
         if cell.cell_type == "note":
-            cell_headings = extract_headings_from_markdown(cell.source)
+            cell_headings, cache_hit = outline_cache.headings(
+                cell,
+                extract_headings_from_markdown,
+            )
+            performance_monitor.increment(
+                "outline.heading_cache_hit" if cache_hit else "outline.heading_cache_miss"
+            )
             for h in cell_headings:
                 headings.append({
                     'text': h['text'],
@@ -2405,7 +3197,18 @@ async def get(nb_id: str):
     # Only get namespace info if the kernel is alive for this notebook
     if kernel_service.has_kernel(nb_id) and kernel_service.kernel_is_alive(nb_id):
         try:
-            ns_info = await kernel_service.get_namespace_info(nb_id)
+            kernel = kernel_service.get_kernel(nb_id)
+            status = kernel.get_status()
+            generation = _current_kernel_generation(nb_id)
+            execution_count = status.execution_count
+            ns_info = outline_cache.get_namespace(nb_id, generation, execution_count)
+            if ns_info is None:
+                performance_monitor.increment("outline.namespace_cache_miss")
+                ns_info = await kernel_service.get_namespace_info(nb_id)
+                if ns_info:
+                    outline_cache.set_namespace(nb_id, generation, execution_count, ns_info)
+            else:
+                performance_monitor.increment("outline.namespace_cache_hit")
             if ns_info:
                 variables = ns_info.get('variables', [])
                 functions = ns_info.get('functions', [])
@@ -2417,6 +3220,73 @@ async def get(nb_id: str):
 # ============================================================================
 # Settings Endpoints
 # ============================================================================
+
+
+async def _refresh_llm_after_auth() -> None:
+    """Rebuild inventory/provider instances and notify every connected tab."""
+    _refresh_llm_runtime()
+    await broadcast_all_llm_statuses()
+    await broadcast_all_kernel_snapshots()
+
+
+@rt("/dialeng/{nb_id}/llm/status")
+def get(nb_id: str):
+    return {"type": "llm_status", **_get_llm_status_snapshot(get_notebook(nb_id))}
+
+
+@rt("/auth/openai/start")
+async def post():
+    """Start or join the single server-global Codex OAuth flow."""
+    try:
+        return openai_codex_auth_service.start_login()
+    except Exception as exc:
+        logger.exception("Failed to start OpenAI Codex OAuth")
+        return Response(
+            content=json.dumps({"ok": False, "error": str(exc)}),
+            status_code=400,
+            media_type="application/json",
+        )
+
+
+@rt("/auth/openai/status")
+async def get():
+    """Return OAuth status and finish a loopback callback when one arrived."""
+    try:
+        completed = await openai_codex_auth_service.complete_loopback_if_ready()
+        if completed:
+            await _refresh_llm_after_auth()
+        return openai_codex_auth_service.status()
+    except Exception as exc:
+        openai_codex_auth_service.last_error = str(exc)
+        logger.exception("Failed to complete OpenAI Codex loopback OAuth")
+        return openai_codex_auth_service.status()
+
+
+@rt("/auth/openai/complete")
+async def post(request):
+    """Complete OAuth from a pasted redirect URL, code#state, or bare code."""
+    try:
+        data = await request.json()
+        await openai_codex_auth_service.complete_authorization(
+            str(data.get("code", "")), str(data.get("state", ""))
+        )
+        await _refresh_llm_after_auth()
+        return openai_codex_auth_service.status()
+    except Exception as exc:
+        openai_codex_auth_service.last_error = str(exc)
+        logger.exception("Failed to complete OpenAI Codex manual OAuth")
+        return Response(
+            content=json.dumps({"authenticated": False, "error": str(exc)}),
+            status_code=400,
+            media_type="application/json",
+        )
+
+
+@rt("/auth/openai/logout")
+async def post():
+    openai_codex_auth_service.logout()
+    await _refresh_llm_after_auth()
+    return openai_codex_auth_service.status()
 
 @rt("/settings")
 def get():
@@ -2476,6 +3346,8 @@ async def post(request):
         # Reload the global config
         global DIALENG_CONFIG, colab_auth_service, colab_session_manager
         DIALENG_CONFIG = load_config(config_path=config_path, force_reload=True)
+        set_skill_root(NOTEBOOKS_DIR)
+        _refresh_llm_runtime()
 
         # Lazily initialize or tear down Colab services based on new config
         colab_changed = False
@@ -2531,6 +3403,9 @@ async def post(request):
 
         if colab_changed:
             await _mark_all_outlines_dirty("colab_settings_change")
+        else:
+            await broadcast_all_kernel_snapshots()
+        await broadcast_all_llm_statuses()
 
         if colab_changed:
             return Div(
@@ -2550,13 +3425,20 @@ async def post(request):
 
 # Cell operations - now include notebook ID in path
 @rt("/dialeng/{nb_id}/cell/add")
-async def post(nb_id: str, pos: int = -1, type: str = "code"):
+@serialized_notebook_mutation
+async def post(
+    nb_id: str,
+    pos: int = -1,
+    type: str = "code",
+    expected_revision: int = -1,
+    expected_structure_revision: int = -1,
+    operation_id: str = "",
+):
     nb = get_notebook(nb_id)
     if pos < 0:
         pos = len(nb.cells)
-    nb.cells.insert(pos, Cell(cell_type=type))
-    nb.modified = True
-    _touch_notebook_revision(nb_id, "cell_add")
+    new_cell = notebook_mutation_service.add(nb, position=pos, cell_type=type)
+    _touch_structure_revision(nb_id, "cell_add")
 
     # FOUST fix (FOUST = Flash of Unstyled Text — Monaco renders code white first,
     # then tokenizes async via web worker; destroying/recreating the editor causes a
@@ -2564,22 +3446,29 @@ async def post(nb_id: str, pos: int = -1, type: str = "code"):
     # Broadcast a structural cell_add payload instead of replacing #cells. The
     # browser reconciles its DOM from the backend-authored ordered_cell_ids list,
     # so add/move/delete all share one structural source of truth.
-    new_cell = nb.cells[pos]
     await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
     await _mark_outline_dirty(nb_id, reason="cell_add")
 
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}")
-async def delete(nb_id: str, cid: str):
+@serialized_notebook_mutation
+async def delete(
+    nb_id: str,
+    cid: str,
+    expected_revision: int = -1,
+    expected_structure_revision: int = -1,
+    operation_id: str = "",
+):
     nb = get_notebook(nb_id)
 
     # Remove from execution queue if queued
     queue = get_execution_queue(nb_id)
     queue.cancel_queued(nb_id, cid)
 
-    nb.cells = [c for c in nb.cells if c.id != cid]
-    nb.modified = True
+    removed = notebook_mutation_service.delete(nb, cid)
+    if removed is None:
+        return ""
 
     # Broadcast queue state update
     await broadcast_queue_state(nb_id)
@@ -2587,18 +3476,31 @@ async def delete(nb_id: str, cid: str):
     # FOUST fix: broadcast granular cell_delete JSON instead of AllCellsOOB.
     # The client removes just this cell + its adjacent add-row from DOM.
     # Other cells' Monaco editors are completely untouched.
-    _touch_notebook_revision(nb_id, "cell_delete")
+    _touch_structure_revision(nb_id, "cell_delete")
     await broadcast_json(nb_id, _cell_delete_payload(nb, nb_id, cid))
     await _mark_outline_dirty(nb_id, reason="cell_delete")
 
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/source")
-async def post(nb_id: str, cid: str, source: str, expected_version: int = -1):
+@serialized_notebook_mutation
+async def post(
+    nb_id: str,
+    cid: str,
+    source: str,
+    expected_version: int = -1,
+    expected_revision: int = -1,
+    operation_id: str = "",
+):
     nb = get_notebook(nb_id)
     for c in nb.cells:
         if c.id == cid:
             if _expected_version_conflicts(c, expected_version):
+                # A blur request can race a type change that already committed
+                # the exact same source. Treat that retry as idempotent instead
+                # of surfacing a false conflict after the DOM replacement.
+                if c.source == source:
+                    return ""
                 log_operation(
                     logger,
                     "cell_source_conflict",
@@ -2637,12 +3539,13 @@ async def post(nb_id: str, cid: str, source: str, expected_version: int = -1):
                 c.version,
             )
 
+            # Every persisted source mutation must advance the browser's
+            # notebook revision, including note/prompt cells that also receive
+            # an HTML OOB refresh for their rendered preview.
+            await broadcast_json(nb_id, _cell_source_payload(nb_id, c))
             if cell_type in {"code", "shell"}:
-                await broadcast_json(nb_id, _cell_source_payload(nb_id, c))
                 await broadcast_to_notebook(nb_id, CellOutputOOB(c))
                 await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
-            else:
-                await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
 
             if cell_type == "note":
                 await _mark_outline_dirty(nb_id, reason="note_source_commit")
@@ -2650,7 +3553,15 @@ async def post(nb_id: str, cid: str, source: str, expected_version: int = -1):
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/output")
-async def post(nb_id: str, cid: str, output: str, expected_version: int = -1):
+@serialized_notebook_mutation
+async def post(
+    nb_id: str,
+    cid: str,
+    output: str,
+    expected_version: int = -1,
+    expected_revision: int = -1,
+    operation_id: str = "",
+):
     nb = get_notebook(nb_id)
     for c in nb.cells:
         if c.id == cid:
@@ -2668,8 +3579,15 @@ async def post(nb_id: str, cid: str, output: str, expected_version: int = -1):
                     "Rejected stale cell output commit (notebook=%s, cell=%s, expected_version=%s, actual_version=%s)",
                     nb_id, cid, expected_version, c.version,
                 )
-                await _broadcast_cell_version_conflict(nb_id, c, expected_version)
-                return {"status": "conflict", "version": c.version}
+                await _broadcast_cell_version_conflict(
+                    nb_id, c, expected_version, field="output",
+                )
+                return {
+                    "status": "conflict",
+                    "conflict_field": "output",
+                    "version": c.version,
+                    "output": c.output,
+                }
 
             changed = _commit_cell_output(nb_id, nb, c, output, reason="cell_output_commit")
             if not changed:
@@ -2694,20 +3612,61 @@ async def post(nb_id: str, cid: str, output: str, expected_version: int = -1):
             )
 
             if cell_type in {"code", "shell"}:
+                await broadcast_json(nb_id, _cell_output_commit_payload(nb_id, c))
                 await broadcast_to_notebook(nb_id, CellOutputOOB(c))
                 await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
             elif cell_type == "prompt":
                 await broadcast_json(nb_id, _prompt_output_payload(nb_id, c))
             else:
+                await broadcast_json(nb_id, _cell_output_commit_payload(nb_id, c))
                 await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
             break
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/type")
-async def post(nb_id: str, cid: str, cell_type: str):
+@serialized_notebook_mutation
+async def post(
+    nb_id: str, cid: str, cell_type: str,
+    source: Optional[str] = None,
+    expected_version: int = -1,
+    expected_cell_type: str = "",
+    expected_revision: int = -1, operation_id: str = "",
+):
     nb = get_notebook(nb_id)
+    allowed_types = {value for value, _label in registry.get_cell_type_choices()}
+    if cell_type not in allowed_types:
+        return JSONResponse({"status": "invalid_cell_type"}, status_code=400)
+
     for c in nb.cells:
         if c.id == cid:
+            current_type = str(c.cell_type)
+            if expected_cell_type and current_type != expected_cell_type:
+                await _broadcast_cell_version_conflict(nb_id, c, expected_version)
+                return JSONResponse({
+                    "status": "conflict",
+                    "actual_type": current_type,
+                    "actual_version": c.version,
+                }, status_code=409)
+
+            # The note/prompt editor's blur save and the select change can be
+            # dispatched almost simultaneously. A one-step version advance is
+            # safe when it committed the exact source included in this request.
+            if _expected_version_conflicts(c, expected_version):
+                if source is None or source != c.source:
+                    await _broadcast_cell_version_conflict(nb_id, c, expected_version)
+                    return JSONResponse({
+                        "status": "conflict",
+                        "actual_type": current_type,
+                        "actual_version": c.version,
+                    }, status_code=409)
+
+            source_changed = source is not None and source != c.source
+            type_changed = current_type != cell_type
+            if not source_changed and not type_changed:
+                return ""
+
+            if source_changed:
+                c.source = source
             c.cell_type = cell_type
             c.clear_outputs()
             c.version += 1
@@ -2715,31 +3674,35 @@ async def post(nb_id: str, cid: str, cell_type: str):
             nb.modified = True
             _touch_notebook_revision(nb_id, "cell_type_change")
 
-            # Cell type change is the ONE case where CellViewOOB is correct:
-            # the input section fundamentally changes (Monaco editor ↔ textarea),
-            # so full DOM replacement is unavoidable and expected.
-            await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
+            # Type changes require a full cell replacement, but the event must
+            # still participate in the notebook revision stream. Unrevisioned
+            # OOB HTML left the initiating tab stale and broke later mutations.
+            await broadcast_json(nb_id, _cell_type_payload(nb, nb_id, cid))
             await _mark_outline_dirty(nb_id, reason="cell_type_change")
 
             return ""
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/move/{direction}")
-async def post(nb_id: str, cid: str, direction: str):
+@serialized_notebook_mutation
+async def post(
+    nb_id: str, cid: str, direction: str,
+    expected_revision: int = -1, expected_structure_revision: int = -1,
+    operation_id: str = "",
+):
     nb = get_notebook(nb_id)
     direction_map = {"up": -1, "down": 1}
     move_delta = direction_map.get(direction)
     if move_delta is None:
         return ""
 
-    moved = nb.move_cell(cid, move_delta)
+    moved = notebook_mutation_service.move(nb, cid, move_delta)
     if not moved:
         return ""
-    nb.modified = True
 
     # Broadcast the backend-authoritative cell order so every client reorders
     # the existing DOM nodes from the same source of truth.
-    _touch_notebook_revision(nb_id, "cell_move")
+    _touch_structure_revision(nb_id, "cell_move")
     await broadcast_json(nb_id, _cell_move_payload(nb, nb_id, cid))
     await _mark_outline_dirty(nb_id, reason="cell_move")
 
@@ -2749,35 +3712,37 @@ async def post(nb_id: str, cid: str, direction: str):
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/duplicate")
-async def post(nb_id: str, cid: str):
+@serialized_notebook_mutation
+async def post(
+    nb_id: str, cid: str,
+    expected_revision: int = -1, expected_structure_revision: int = -1,
+    operation_id: str = "",
+):
     """Duplicate a cell, inserting the copy immediately after the original."""
     nb = get_notebook(nb_id)
-    for i, c in enumerate(nb.cells):
-        if c.id == cid:
-            new_cell = Cell(
-                cell_type=c.cell_type,
-                source=c.source,
-                skipped=c.skipped,
-                pinned=c.pinned,
-                is_exported=c.is_exported,
-            )
-            nb.cells.insert(i + 1, new_cell)
-            nb.modified = True
-            _touch_notebook_revision(nb_id, "cell_duplicate")
-            await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
-            await _mark_outline_dirty(nb_id, reason="cell_duplicate")
-            return ""
+    new_cell = notebook_mutation_service.duplicate(nb, cid)
+    if new_cell is not None:
+        _touch_structure_revision(nb_id, "cell_duplicate")
+        await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
+        await _mark_outline_dirty(nb_id, reason="cell_duplicate")
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/clear-output")
-async def post(nb_id: str, cid: str):
+@serialized_notebook_mutation
+async def post(
+    nb_id: str, cid: str,
+    expected_revision: int = -1, operation_id: str = "",
+):
     """Clear outputs from a cell."""
     nb = get_notebook(nb_id)
     for c in nb.cells:
         if c.id == cid:
             c.clear_outputs()
+            c.version += 1
+            c.last_modified = datetime.now()
             nb.modified = True
             _touch_notebook_revision(nb_id, "cell_clear_output")
+            await broadcast_json(nb_id, _cell_output_commit_payload(nb_id, c))
             cell_type = str(getattr(c, "cell_type", ""))
             if cell_type in {"code", "shell"}:
                 await broadcast_to_notebook(nb_id, CellOutputOOB(c))
@@ -2788,30 +3753,35 @@ async def post(nb_id: str, cid: str):
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/merge-below")
-async def post(nb_id: str, cid: str):
+@serialized_notebook_mutation
+async def post(
+    nb_id: str, cid: str,
+    expected_revision: int = -1, expected_structure_revision: int = -1,
+    operation_id: str = "",
+):
     """Merge cell with the one below it (append source, delete below)."""
     nb = get_notebook(nb_id)
-    for i, c in enumerate(nb.cells):
-        if c.id == cid and i + 1 < len(nb.cells):
-            below = nb.cells[i + 1]
-            _commit_cell_source(nb_id, nb, c, c.source.rstrip('\n') + '\n' + below.source, reason="cell_merge_below_source")
-            # Remove the cell below
-            del nb.cells[i + 1]
-            _touch_notebook_revision(nb_id, "cell_merge_below")
-            await broadcast_json(nb_id, _cell_delete_payload(nb, nb_id, below.id))
-            cell_type = str(getattr(c, "cell_type", ""))
-            if cell_type in {"code", "shell"}:
-                await broadcast_json(nb_id, _cell_source_payload(nb_id, c))
-                await broadcast_to_notebook(nb_id, CellOutputOOB(c))
-                await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
-            else:
-                await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
-            await _mark_outline_dirty(nb_id, reason="cell_merge_below")
-            return ""
+    result = notebook_mutation_service.merge_below(nb, cid)
+    if result is not None:
+        _touch_structure_revision(nb_id, "cell_merge_below")
+        await broadcast_json(nb_id, _cell_delete_payload(nb, nb_id, result.removed.id))
+        cell_type = str(getattr(result.target, "cell_type", ""))
+        if cell_type in {"code", "shell"}:
+            await broadcast_json(nb_id, _cell_source_payload(nb_id, result.target))
+            await broadcast_to_notebook(nb_id, CellOutputOOB(result.target))
+            await broadcast_to_notebook(nb_id, CellHeaderOOB(result.target, nb_id))
+        else:
+            await broadcast_to_notebook(nb_id, CellViewOOB(result.target, nb_id))
+        await _mark_outline_dirty(nb_id, reason="cell_merge_below")
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/extract-code-blocks")
-async def post(nb_id: str, cid: str):
+@serialized_notebook_mutation
+async def post(
+    nb_id: str, cid: str,
+    expected_revision: int = -1, expected_structure_revision: int = -1,
+    operation_id: str = "",
+):
     """Extract fenced code blocks from cell output, create new code cells below."""
     import re
     nb = get_notebook(nb_id)
@@ -2827,20 +3797,28 @@ async def post(nb_id: str, cid: str):
                 new_cell = Cell(cell_type="code", source=block.strip())
                 nb.cells.insert(i + 1 + j, new_cell)
                 nb.modified = True
-                _touch_notebook_revision(nb_id, "extract_code_blocks")
+                _touch_structure_revision(nb_id, "extract_code_blocks")
                 await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
             await _mark_outline_dirty(nb_id, reason="extract_code_blocks")
             return ""
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/collapse")
-async def post(nb_id: str, cid: str, collapsed: str):
+@serialized_notebook_mutation
+async def post(
+    nb_id: str, cid: str, collapsed: str,
+    expected_revision: int = -1, operation_id: str = "",
+):
     nb = get_notebook(nb_id)
     cell = None
     for c in nb.cells:
         if c.id == cid:
             cell = c
-            c.collapsed = collapsed.lower() == "true"
+            next_collapsed = collapsed.lower() == "true"
+            if c.collapsed != next_collapsed:
+                c.collapsed = next_collapsed
+                nb.modified = True
+                _touch_notebook_revision(nb_id, "cell_collapse")
             break
 
     # Broadcast collapse state via targeted header OOB + class update
@@ -2851,13 +3829,18 @@ async def post(nb_id: str, cid: str, collapsed: str):
     return ""
 
 @rt("/dialeng/{nb_id}/cell/{cid}/collapse-section")
-async def post(nb_id: str, cid: str, section: str, level: int):
+@serialized_notebook_mutation
+async def post(
+    nb_id: str, cid: str, section: str, level: int,
+    expected_revision: int = -1, operation_id: str = "",
+):
     """Update collapse level for input or output section"""
     nb = get_notebook(nb_id)
     cell = None
     for c in nb.cells:
         if c.id == cid:
             cell = c
+            previous = (c.input_collapse, c.output_collapse)
             if section == "input":
                 c.input_collapse = level
             elif section == "output":
@@ -2865,6 +3848,9 @@ async def post(nb_id: str, cid: str, section: str, level: int):
             elif section == "both":
                 c.input_collapse = level
                 c.output_collapse = level
+            if previous != (c.input_collapse, c.output_collapse):
+                nb.modified = True
+                _touch_notebook_revision(nb_id, "cell_collapse_section")
             break
 
     # FOUST fix: broadcast collapse via JSON instead of CellViewOOB.
@@ -2881,6 +3867,39 @@ async def post(nb_id: str, cid: str, section: str, level: int):
 
     return ""
 
+
+@rt("/dialeng/{nb_id}/cell/{cid}/context")
+def get(nb_id: str, cid: str):
+    """Inspect the normalized notebook context used for this prompt cell."""
+    nb = get_notebook(nb_id)
+    cell = nb.get_cell(cid)
+    if cell is None or str(cell.cell_type) != "prompt":
+        return JSONResponse({"error": "Prompt cell not found."}, status_code=404)
+    report = get_context_inspection(nb_id, cid)
+    if report is None:
+        build_context_messages(nb, cid)
+        report = get_context_inspection(nb_id, cid) or {}
+    from dialeng.services.prompt_parser import parse_prompt
+    expressions = []
+    tool_targets = []
+    current_idx = nb.get_cell_index(cid)
+    for context_cell in nb.cells[:current_idx + 1]:
+        cell_expressions, cell_tools = parse_prompt(context_cell.source or "")
+        expressions.extend(cell_expressions)
+        tool_targets.extend(cell_tools)
+    report.update({
+        "provider": nb.llm_provider,
+        "model": nb.model,
+        "current_prompt_chars": len(cell.source or ""),
+        "dynamic_expressions": list(dict.fromkeys(expressions)),
+        "declared_tools": list(dict.fromkeys(tool_targets)),
+        "built_in_tools_enabled": DIALENG_CONFIG.tool_builtin_enabled,
+        "skills_enabled": bool(
+            nb.llm_provider == "openai_codex" and DIALENG_CONFIG.skills_enabled
+        ),
+    })
+    return report
+
 @rt("/dialeng/{nb_id}/cell/{cid}/run")
 async def post(nb_id: str, cid: str, source: str = None, expected_version: int = -1):
     # Guard: require explicit kernel selection before any cell execution
@@ -2891,65 +3910,68 @@ async def post(nb_id: str, cid: str, source: str = None, expected_version: int =
         })
         return resp
 
-    nb = get_notebook(nb_id)
-    cell_index = None
-    target_cell = None
+    # Shift+Enter dispatches the run and next-cell requests together. Source
+    # persistence must use the same lock as structural mutations so notebook
+    # revision events are emitted in commit order instead of creating false gaps.
+    async with runtime_registry.mutation(nb_id):
+        nb = get_notebook(nb_id)
+        cell_index = None
+        target_cell = None
 
-    for i, c in enumerate(nb.cells):
-        if c.id == cid:
-            cell_index = i
-            target_cell = c
-            break
+        for i, candidate in enumerate(nb.cells):
+            if candidate.id == cid:
+                cell_index = i
+                target_cell = candidate
+                break
 
-    if target_cell is None:
-        return ""
-
-    c = target_cell
-    run_op_id = log_operation(
-        logger,
-        "cell_run_requested",
-        notebook=nb_id,
-        cell=cid,
-        cell_type=str(getattr(c, "cell_type", "")),
-        expected_version=expected_version,
-        version=c.version,
-    )
-
-    # Running a cell from the editor can submit fresher source than the last blur
-    # commit. Persist that source first so every tab converges on the same input,
-    # but keep the previous output visible until queue/running state is confirmed.
-    if source is not None and source != c.source:
-        if _expected_version_conflicts(c, expected_version):
-            log_operation(
-                logger,
-                "cell_run_source_conflict",
-                level=logging.WARNING,
-                op_id=run_op_id,
-                notebook=nb_id,
-                cell=cid,
-                expected_version=expected_version,
-                actual_version=c.version,
-            )
-            logger.warning(
-                "Rejected stale cell source commit during run (notebook=%s, cell=%s, expected_version=%s, actual_version=%s)",
-                nb_id, cid, expected_version, c.version,
-            )
-            await _broadcast_cell_version_conflict(nb_id, c, expected_version)
+        if target_cell is None:
             return ""
 
-        _commit_cell_source(nb_id, nb, c, source, reason="cell_run_source_commit")
-        cell_type = str(getattr(c, "cell_type", ""))
-        logger.info(
-            "Cell source committed during run (notebook=%s, cell=%s, cell_type=%s, version=%s)",
-            nb_id,
-            cid,
-            cell_type,
-            c.version,
+        c = target_cell
+        run_op_id = log_operation(
+            logger,
+            "cell_run_requested",
+            notebook=nb_id,
+            cell=cid,
+            cell_type=str(getattr(c, "cell_type", "")),
+            expected_version=expected_version,
+            version=c.version,
         )
-        if cell_type in {"code", "shell"}:
-            await broadcast_json(nb_id, _cell_source_payload(nb_id, c))
-        else:
-            await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
+
+        # Running a cell from the editor can submit fresher source than the last
+        # blur commit. Keep old output visible until queue/running is confirmed.
+        if source is not None and source != c.source:
+            if _expected_version_conflicts(c, expected_version):
+                log_operation(
+                    logger,
+                    "cell_run_source_conflict",
+                    level=logging.WARNING,
+                    op_id=run_op_id,
+                    notebook=nb_id,
+                    cell=cid,
+                    expected_version=expected_version,
+                    actual_version=c.version,
+                )
+                logger.warning(
+                    "Rejected stale cell source commit during run (notebook=%s, cell=%s, expected_version=%s, actual_version=%s)",
+                    nb_id, cid, expected_version, c.version,
+                )
+                await _broadcast_cell_version_conflict(nb_id, c, expected_version)
+                return ""
+
+            _commit_cell_source(nb_id, nb, c, source, reason="cell_run_source_commit")
+            cell_type = str(getattr(c, "cell_type", ""))
+            logger.info(
+                "Cell source committed during run (notebook=%s, cell=%s, cell_type=%s, version=%s)",
+                nb_id,
+                cid,
+                cell_type,
+                c.version,
+            )
+            if cell_type in {"code", "shell"}:
+                await broadcast_json(nb_id, _cell_source_payload(nb_id, c))
+            else:
+                await broadcast_to_notebook(nb_id, CellViewOOB(c, nb_id))
 
     if c.cell_type == "code":
         queue = get_execution_queue(nb_id)
@@ -2974,6 +3996,28 @@ async def post(nb_id: str, cid: str, source: str = None, expected_version: int =
         log_operation(logger, "prompt_run_started", op_id=run_op_id, notebook=nb_id, cell=cid)
         # Remove from cancelled set if it was there
         cancelled_cells.discard(cid)
+        cancel_key = f"{nb_id}:{cid}"
+        cancel_event = asyncio.Event()
+        prompt_cancel_events[cancel_key] = cancel_event
+
+        if nb.dialog_mode != "mock":
+            selected_provider = CREDENTIAL_INVENTORY.get(nb.llm_provider)
+            if not selected_provider or not selected_provider.authenticated:
+                prompt_cancel_events.pop(cancel_key, None)
+                await broadcast_json(nb_id, {
+                    "type": "status_message",
+                    "message": "The selected LLM provider is unavailable. Connect it or choose another provider; existing output was preserved.",
+                    "tone": "error",
+                })
+                return ""
+            if DIALENG_CONFIG.validate_model(nb.llm_provider, nb.model) != nb.model:
+                prompt_cancel_events.pop(cancel_key, None)
+                await broadcast_json(nb_id, {
+                    "type": "status_message",
+                    "message": "The selected model is not available for this provider. Existing output was preserved.",
+                    "tone": "error",
+                })
+                return ""
 
         # Choose stream source based on dialog mode
         if nb.dialog_mode == "mock":
@@ -3002,19 +4046,25 @@ async def post(nb_id: str, cid: str, source: str = None, expected_version: int =
             config = get_config()
             max_steps = config.tool_max_steps
             include_builtins = config.tool_builtin_enabled
+            codex_skills_available = False
+            if nb.llm_provider == "openai_codex" and config.skills_enabled:
+                from dialeng.services.skill_service import get_skill_service
+                codex_skills_available = bool(get_skill_service().model_skills)
 
-            if has_special_syntax(c.source) or include_builtins:
+            if has_special_syntax(c.source) or include_builtins or codex_skills_available:
                 # Use tool-enabled streaming
                 kernel = kernel_service.get_kernel(nb_id)
                 stream_func = llm_service.stream_response_with_tools(
                     c.source, context_messages, nb.dialog_mode, nb.model, c.use_thinking,
                     kernel=kernel, notebook_id=nb_id, max_steps=max_steps,
-                    include_builtins=include_builtins
+                    include_builtins=include_builtins,
+                    provider_id=nb.llm_provider, cancel_event=cancel_event,
                 )
             else:
                 # Use regular streaming (no tools)
                 stream_func = llm_service.stream_response(
-                    c.source, context_messages, nb.dialog_mode, nb.model, c.use_thinking
+                    c.source, context_messages, nb.dialog_mode, nb.model, c.use_thinking,
+                    provider_id=nb.llm_provider, cancel_event=cancel_event,
                 )
 
         # Stream via WebSocket to all connected clients
@@ -3166,14 +4216,24 @@ async def post(nb_id: str, cid: str, source: str = None, expected_version: int =
                         "result": item.get("result", {}),
                         "status": item.get("status", "success")
                     })
+                elif item["type"] == "usage":
+                    await broadcast_json(nb_id, {
+                        "type": "llm_usage",
+                        "cell_id": cid,
+                        "provider": nb.llm_provider,
+                        "usage": item.get("usage", {}),
+                    })
                 else:  # chunk
                     await broadcast_json(nb_id, {"type": "stream_chunk", "cell_id": cid, "chunk": item["content"]})
+        except asyncio.CancelledError:
+            logger.info("Prompt generation cancelled (notebook=%s, cell=%s)", nb_id, cid)
         except Exception as e:
             # Catch any unexpected errors during streaming
             error_msg = f"\n\n**Error:** Streaming error: {str(e)}"
             post_tool_text.append(error_msg)
             await broadcast_json(nb_id, {"type": "stream_chunk", "cell_id": cid, "chunk": error_msg})
         finally:
+            prompt_cancel_events.pop(cancel_key, None)
             # Determine the final response text based on whether tools were used
             if had_any_tools:
                 # Tools were used: post_tool_text is the final response to user
@@ -3192,64 +4252,44 @@ async def post(nb_id: str, cid: str, source: str = None, expected_version: int =
 
             # Prepend LLM steps to response if any
             final_output = tool_steps_md + response_text if tool_steps_md else response_text
-            _commit_cell_output(nb_id, nb, c, final_output, reason="prompt_output_commit")
-            c.time_run = datetime.now().strftime("%H:%M:%S")
-            nb.modified = True
+            async with runtime_registry.mutation(nb_id):
+                current_cell = nb.get_cell(cid)
+                if current_cell is not None:
+                    c = current_cell
+                    _commit_cell_output(nb_id, nb, c, final_output, reason="prompt_output_commit")
+                    c.time_run = datetime.now().strftime("%H:%M:%S")
+                    nb.modified = True
 
-            await broadcast_json(nb_id, _prompt_output_payload(nb_id, c))
-            log_operation(
-                logger,
-                "prompt_run_completed",
-                op_id=run_op_id,
-                notebook=nb_id,
-                cell=cid,
-                version=c.version,
-                notebook_revision=_get_notebook_revision(nb_id),
-            )
+                    await broadcast_json(nb_id, _prompt_output_payload(nb_id, c))
+                    log_operation(
+                        logger,
+                        "prompt_run_completed",
+                        op_id=run_op_id,
+                        notebook=nb_id,
+                        cell=cid,
+                        version=c.version,
+                        notebook_revision=_get_notebook_revision(nb_id),
+                    )
 
-            # Send end signal to all clients
-            await broadcast_json(nb_id, {"type": "stream_end", "cell_id": cid})
+                # End the browser stream even if the cell was removed meanwhile.
+                await broadcast_json(nb_id, {"type": "stream_end", "cell_id": cid})
 
         # FOUST fix: use targeted updates instead of CellViewOOB for prompt completion.
         # The output was already streamed to the client via stream_chunk/stream_end,
         # so only the header (execution count, time) and cell classes (state badges)
         # need updating. No full cell replacement, no DOM churn.
-        await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
-        await broadcast_json(nb_id, {"type": "cell_class_update", "cell_id": c.id, "cls": get_cell_state_classes(c)})
+        if nb.get_cell(cid) is not None:
+            await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
+            await broadcast_json(nb_id, {"type": "cell_class_update", "cell_id": c.id, "cls": get_cell_state_classes(c)})
 
-    # Determine next cell ID for auto-focus
-    next_cell_id = None
-    is_last_cell = cell_index == len(nb.cells) - 1
-
-    if is_last_cell:
-        # Add a new code cell via the structural WebSocket path.
-        new_cell = Cell(cell_type="code")
-        nb.cells.append(new_cell)
-        next_cell_id = new_cell.id
-
-        # Keep structural changes single-sourced: the initiating tab and every
-        # collaborator receive the same cell_add payload and reconcile from the
-        # backend-authoritative notebook order.
-        await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
-
-        # Return the updated run cell plus a focus handoff. The new cell itself
-        # arrives via WebSocket structure reconciliation.
-        return (
-            CellView(c, nb.id),  # Main response - replaces the run cell
-            # Script to focus the next cell after DOM settles
-            Script(f"setTimeout(() => focusNextCell('{next_cell_id}'), 50);")
-        )
-    else:
-        # Get the next cell's ID
-        next_cell_id = nb.cells[cell_index + 1].id
-
-    # Return updated cell + script to focus next cell
-    return (
-        CellView(c, nb.id),
-        Script(f"setTimeout(() => focusNextCell('{next_cell_id}'), 50);")
-    )
+    # Selection and scroll position belong to the initiating browser. Prompt
+    # output/header updates already arrive through granular WebSocket events, so
+    # returning a full CellView here would replace the run cell after focus has
+    # moved and can pull the viewport back to the top.
+    return ""
 
 @rt("/dialeng/{nb_id}/kernel/restart")
+@serialized_notebook_mutation
 async def post(nb_id: str):
     """Restart the kernel for a specific notebook."""
     await broadcast_kernel_status(nb_id, "restarting")
@@ -3292,6 +4332,7 @@ async def post(nb_id: str):
         return Div("No kernel to interrupt", cls="status warning")
 
 @rt("/dialeng/{nb_id}/queue/cancel_all")
+@serialized_notebook_mutation
 async def post(nb_id: str):
     """Cancel running cell AND clear entire queue."""
     logger.info("Cancel-all requested for notebook %s", nb_id)
@@ -3411,6 +4452,7 @@ def post(dlg_name: str, n: int = 0, relative: bool = True, id_: str = "",
                     current_idx=current_idx, view_range=view_range, nums=nums)
 
 @rt("/add_relative_")
+@serialized_notebook_mutation
 async def post(dlg_name: str, content: str, placement: str = "add_after", id_: str = "",
          msg_type: str = "code", output: str = "", time_run: str = "",
          is_exported: str = "", skipped: str = "",
@@ -3456,7 +4498,7 @@ async def post(dlg_name: str, content: str, placement: str = "add_after", id_: s
 
     nb.cells.insert(insert_idx, new_cell)
     nb.modified = True
-    _touch_notebook_revision(dlg_name, "dialoghelper_add_relative")
+    _touch_structure_revision(dlg_name, "dialoghelper_add_relative")
 
     # FOUST fix: broadcast granular cell_add JSON instead of AllCellsOOB.
     # This is the dialoghelper version of the add route — same pattern as /cell/add.
@@ -3492,6 +4534,7 @@ async def post(dlg_name: str, content: str, placement: str = "add_after", id_: s
     return {"id": new_cell.id}
 
 @rt("/rm_msg_")
+@serialized_notebook_mutation
 async def post(dlg_name: str, msid: str, log_changed: str = ""):
     """Remove message by ID. Optionally logs the deleted content."""
     nb = get_notebook(dlg_name)
@@ -3506,7 +4549,7 @@ async def post(dlg_name: str, msid: str, log_changed: str = ""):
             })
         nb.cells.pop(idx)
         # FOUST fix: granular cell_delete instead of AllCellsOOB (dialoghelper route)
-        _touch_notebook_revision(dlg_name, "dialoghelper_rm_msg")
+        _touch_structure_revision(dlg_name, "dialoghelper_rm_msg")
         await broadcast_json(dlg_name, _cell_delete_payload(nb, dlg_name, msid))
     return {"status": "ok", "id": msid}
 
@@ -3518,6 +4561,7 @@ def _str_to_bool(val: str) -> bool:
 
 
 @rt("/update_msg_")
+@serialized_notebook_mutation
 async def post(dlg_name: str, id_: str,
                content: str = None, msg_type: str = None, output: str = None,
                time_run: str = None, is_exported: str = None, skipped: str = None,
@@ -3624,6 +4668,7 @@ async def post(dlg_name: str, ids: str, api: str = ""):
     return {"status": "ok", "cell_id": cell.id}
 
 @rt("/msg_insert_line_")
+@serialized_notebook_mutation
 async def post(dlg_name: str, id_: str, insert_line: int, new_str: str):
     """Insert line at position in message."""
     nb = get_notebook(dlg_name)
@@ -3638,6 +4683,7 @@ async def post(dlg_name: str, id_: str, insert_line: int, new_str: str):
     return {"status": "ok"}
 
 @rt("/msg_str_replace_")
+@serialized_notebook_mutation
 async def post(dlg_name: str, id_: str, old_str: str, new_str: str,
          start_line: int = 0, end_line: int = 0,
          n_matches: int = 1, re_filter: str = "", invert_filter: str = ""):
@@ -3691,6 +4737,7 @@ async def post(dlg_name: str, id_: str, old_str: str, new_str: str,
     return {"status": "ok"}
 
 @rt("/msg_strs_replace_")
+@serialized_notebook_mutation
 async def post(dlg_name: str, id_: str, old_strs: str, new_strs: str):
     """Replace multiple strings (JSON arrays)."""
     nb = get_notebook(dlg_name)
@@ -3708,6 +4755,7 @@ async def post(dlg_name: str, id_: str, old_strs: str, new_strs: str):
     return {"status": "ok"}
 
 @rt("/msg_replace_lines_")
+@serialized_notebook_mutation
 async def post(dlg_name: str, id_: str, start_line: int, end_line: int, new_content: str):
     """Replace line range in message."""
     nb = get_notebook(dlg_name)
@@ -3722,6 +4770,7 @@ async def post(dlg_name: str, id_: str, start_line: int, end_line: int, new_cont
     return {"status": "ok"}
 
 @rt("/msg_del_lines_")
+@serialized_notebook_mutation
 async def post(dlg_name: str, id_: str, start_line: int, end_line: int,
          re_filter: str = "", invert_filter: str = ""):
     """Delete line range in message, optionally filtered by regex."""
@@ -3755,6 +4804,7 @@ async def post(dlg_name: str, id_: str, start_line: int, end_line: int,
     return {"status": "ok"}
 
 @rt("/msg_pyrun_")
+@serialized_notebook_mutation
 async def post(dlg_name: str, id_: str, code: str):
     """Execute Python code against message text.
 
@@ -3783,6 +4833,7 @@ async def post(dlg_name: str, id_: str, code: str):
 # ============================================================================
 
 @rt("/msg_clipboard_")
+@serialized_notebook_mutation
 async def post(dlg_name: str, ids: str = "", id_: str = "", cmd: str = "copy"):
     """Copy or cut messages to clipboard."""
     nb = get_notebook(dlg_name)
@@ -3797,7 +4848,7 @@ async def post(dlg_name: str, ids: str = "", id_: str = "", cmd: str = "copy"):
     result = clipboard_copy(nb, dlg_name, cell_ids, cut=(cmd == "cut"))
 
     if cmd == "cut":
-        _touch_notebook_revision(dlg_name, "dialoghelper_clipboard_cut")
+        _touch_structure_revision(dlg_name, "dialoghelper_clipboard_cut")
         # FOUST fix: granular cell_delete per cell instead of AllCellsOOB
         for cid in cell_ids:
             await broadcast_json(dlg_name, _cell_delete_payload(nb, dlg_name, cid))
@@ -3805,13 +4856,14 @@ async def post(dlg_name: str, ids: str = "", id_: str = "", cmd: str = "copy"):
     return result
 
 @rt("/msg_paste_")
+@serialized_notebook_mutation
 async def post(dlg_name: str, id_: str = "", after: str = "True"):
     """Paste messages from clipboard."""
     nb = get_notebook(dlg_name)
     new_ids = clipboard_paste(nb, dlg_name, ref_id=id_, after=_str_to_bool(after))
 
     if new_ids:
-        _touch_notebook_revision(dlg_name, "dialoghelper_clipboard_paste")
+        _touch_structure_revision(dlg_name, "dialoghelper_clipboard_paste")
         # FOUST fix: granular cell_add per pasted cell instead of AllCellsOOB
         for new_id in new_ids:
             for idx, c in enumerate(nb.cells):
@@ -3826,6 +4878,7 @@ async def post(dlg_name: str, id_: str = "", after: str = "True"):
 # ============================================================================
 
 @rt("/toggle_header_collapse_")
+@serialized_notebook_mutation
 async def post(dlg_name: str, id_: str):
     """Toggle heading_collapsed state on a cell."""
     nb = get_notebook(dlg_name)
@@ -3842,6 +4895,7 @@ async def post(dlg_name: str, id_: str):
     return {"status": "ok", "heading_collapsed": cell.heading_collapsed}
 
 @rt("/dialeng/{nb_id}/cell/{cell_id}/toggle/{prop}")
+@serialized_notebook_mutation
 async def post(nb_id: str, cell_id: str, prop: str):
     """Toggle a boolean cell property (skipped, pinned, is_exported)."""
     allowed = {'skipped', 'pinned', 'is_exported'}
@@ -3864,6 +4918,7 @@ async def post(nb_id: str, cell_id: str, prop: str):
     return {"status": "ok", prop: getattr(cell, prop)}
 
 @rt("/bookmark_")
+@serialized_notebook_mutation
 async def post(dlg_name: str, id_: str, n: int):
     """Toggle numbered bookmark (1-9) on a cell."""
     nb = get_notebook(dlg_name)
@@ -3889,6 +4944,7 @@ async def post(dlg_name: str, id_: str, n: int):
     return {"status": "ok", "bookmark": cell.bookmark}
 
 @rt("/toggle_comment_")
+@serialized_notebook_mutation
 async def post(dlg_name: str, ids: str = "", id_: str = ""):
     """Toggle line comments on code cells."""
     nb = get_notebook(dlg_name)
@@ -3952,12 +5008,13 @@ async def post(name: str):
     try:
         if name in execution_queues:
             queue = execution_queues[name]
-            queue.cancel_all()
+            queue.cancel_all(name)
         return {"status": "ok", "name": name}
     except Exception as e:
         return {"error": str(e)}
 
 @rt("/rm_dialog_")
+@serialized_notebook_mutation
 async def post(name: str):
     """Delete a dialog/notebook from memory and optionally disk."""
     try:
@@ -4015,56 +5072,30 @@ async def post(text: str):
 # WebSocket for Streaming
 # ============================================================================
 
-# Use FastHTML's ws decorator with a simpler pattern
-# The key insight: we register on connect, not on first message
+async def _cancel_prompt_cell(notebook_id: str, cell_id: str) -> None:
+    cancelled_cells.add(cell_id)
+    cancel_event = prompt_cancel_events.get(f"{notebook_id}:{cell_id}")
+    if cancel_event:
+        cancel_event.set()
+    logger.info(
+        "WebSocket cancel received (notebook=%s, cell=%s)",
+        notebook_id,
+        cell_id,
+    )
 
-async def ws_on_connect(send, scope):
-    """Called when WebSocket connection is established."""
-    # Extract notebook ID from scope path
-    path = scope.get('path', '')
-    # Path is like /ws/notebook_id
-    parts = path.strip('/').split('/')
-    nb_id = parts[1] if len(parts) > 1 else 'default'
 
-    client_count = broadcast_manager.add_connection(nb_id, send)
-    kernel_service.set_client_count(nb_id, client_count)
-    logger.info("WebSocket client connected (notebook=%s, connections=%s)", nb_id, client_count)
-    try:
-        await send_kernel_snapshot(nb_id, send)
-    except Exception:
-        logger.exception("Failed to send initial kernel snapshot on WebSocket connect (notebook=%s)", nb_id)
-
-async def ws_on_disconnect(send, scope):
-    """Called when WebSocket connection is closed."""
-    path = scope.get('path', '')
-    parts = path.strip('/').split('/')
-    nb_id = parts[1] if len(parts) > 1 else 'default'
-
-    client_count = broadcast_manager.remove_connection(nb_id, send)
-    kernel_service.set_client_count(nb_id, client_count)
-    logger.info("WebSocket client disconnected (notebook=%s, connections=%s)", nb_id, client_count)
-
-@app.ws('/ws/{nb_id}', conn=ws_on_connect, disconn=ws_on_disconnect)
-async def ws(msg: str, send, nb_id: str):
-    """Handle incoming WebSocket messages."""
-    # FastHTML may pass _empty or None for empty/initial messages - ignore them
-    if msg is None or not isinstance(msg, str) or not msg:
-        return
-
-    logger.debug("WebSocket message received (notebook=%s, preview=%s)", nb_id, msg[:100])
-
-    try:
-        data = json.loads(msg)
-        if data.get("type") == "join":
-            await send_kernel_snapshot(nb_id, send)
-            return
-        if data.get("type") == "cancel":
-            cell_id = data.get("cell_id")
-            if cell_id:
-                cancelled_cells.add(cell_id)
-                logger.info("WebSocket cancel received (notebook=%s, cell=%s)", nb_id, cell_id)
-    except json.JSONDecodeError:
-        pass
+register_websocket_routes(
+    app,
+    broadcast_manager=broadcast_manager,
+    kernel_service=kernel_service,
+    notebook_unavailable=lambda notebook_id: (
+        notebook_id in deleting_notebooks or notebook_id in deleted_notebooks
+    ),
+    revision_snapshot=_get_revision_snapshot,
+    send_kernel_snapshot=send_kernel_snapshot,
+    cancel_cell=_cancel_prompt_cell,
+    logger=logger,
+)
 
 # ============================================================================
 # Run
@@ -4073,13 +5104,18 @@ async def ws(msg: str, send, nb_id: str):
 def main(root_dir: Path = None, port: int = 8000):
     """CLI entry point for dialeng."""
     if root_dir is not None:
-        set_root_dir(root_dir)
+        resolved_root = Path(root_dir).resolve()
+        # Uvicorn's reload worker imports dialeng.app in a new process. Persist
+        # the chosen project root so that worker does not fall back to ./notebooks.
+        os.environ["DIALENG_NOTEBOOKS_DIR"] = str(resolved_root)
+        set_root_dir(resolved_root)
     print(f"🚀 Dialeng starting at http://localhost:{port}")
     print(f"   Root directory: {NOTEBOOKS_DIR.resolve()}")
     print("   Format: Solveit-compatible .ipynb")
     print("")
     # Print credential status
     print_credential_status(CREDENTIAL_STATUS)
+    print_credential_inventory(CREDENTIAL_INVENTORY)
     print("")
     # Print config status (pass detected backend to show active default)
     print_config_status(DIALENG_CONFIG, CREDENTIAL_STATUS.backend)

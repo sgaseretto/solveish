@@ -1,5 +1,11 @@
 # LLM Integration
 
+> Provider discovery, OpenAI Codex OAuth/transport, provider-qualified notebook
+> metadata, and the current selector flow are documented in
+> [20_multi_provider_llm_and_codex.md](20_multi_provider_llm_and_codex.md). The
+> single-provider detection examples below are retained for historical context;
+> current code uses `CredentialInventory` and resolves a provider per request.
+
 This document explains how Dialeng integrates with LLMs for real AI responses in prompt cells.
 
 Prompt execution remains stateless and notebook-authored:
@@ -227,7 +233,58 @@ def cell_to_messages(cell):
 
 ### Context Freshness and Cell Editing
 
-When a cell's source is edited, the outputs are automatically cleared to prevent stale context contamination. This ensures the LLM only sees the current state of the notebook.
+Prompt cells model an editable user/assistant pair. Editing the prompt source
+does not clear the assistant response, and editing the response does not alter
+the prompt source. Both values are notebook-authored context and are included in
+the next LLM request exactly as they currently appear.
+
+Executable code and shell cells use a different rule: changing their source
+clears runtime output and execution metadata because that output no longer
+corresponds to the executable program. This distinction is enforced by
+`Cell.update_source()`, so HTTP routes, dialoghelper mutations, and other backend
+callers all use the same semantics.
+
+### Editable Response Synchronization
+
+Prompt responses have two distinct client-side values while editing:
+
+- the last response accepted by the backend;
+- the user's current local draft.
+
+Double-clicking the response starts an edit session from the backend value. A
+delegated `input` listener tracks the draft, and `focusout` or Escape sends one
+explicit output mutation with the cell version captured by the browser. The
+textarea therefore does not depend on HTMX's `blur changed` bookkeeping, which
+can be ambiguous across repeated edits and empty values.
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant B as Browser draft
+    participant S as Dialeng backend
+    participant W as WebSocket
+
+    U->>B: Double-click response
+    B->>B: Preserve backend value and open draft
+    U->>B: Edit and leave textarea
+    B->>S: POST output + expected cell version
+    alt Version accepted
+        S->>S: Commit output and advance version
+        S-->>W: prompt_output_update
+        W-->>B: Confirm authoritative value
+    else Cell changed concurrently
+        S-->>W: cell_conflict with authoritative output
+        W-->>B: Restore backend response
+    end
+```
+
+While the textarea is active, a different `prompt_output_update` is deferred
+instead of replacing the draft. Its newer version is also withheld locally, so
+the eventual stale save is rejected rather than silently overwriting another
+tab's response. An unchanged response update may still advance the version.
+Intentional empty edits remain valid because an actual input event distinguishes
+them from an unexpectedly empty textarea. Async markdown renders carry a local
+render generation so delayed responses cannot repaint stale content.
 
 ### Prompt Special Syntax
 
@@ -248,123 +305,72 @@ and during execution.
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant B as Browser (HTMX)
-    participant S as Server (app.py)
-    participant C as Cell Object
-    participant L as LLM Service
+    participant B as Browser
+    participant S as Dialeng backend
+    participant C as Cell model
+    participant L as LLM service
 
-    U->>B: Edits prompt cell text
-    Note over B: oninput syncs to hidden input
-    U->>B: Clicks away (blur)
-    B->>S: POST /cell/{cid}/source<br/>with hx-include=#source-{cid}
-    Note over S: Receives source parameter<br/>from hidden input
-    S->>C: Compare old_source vs new source
-    alt Source changed
-        C->>C: clear_outputs()
-        C->>C: version++
-        Note over C: Stale output removed
-    end
-    S-->>B: Response (empty)
-
-    U->>B: Runs next prompt cell
-    B->>S: POST /run/{cid}
-    S->>S: build_context_messages()
-    Note over S: Only fresh data included<br/>(edited source, no stale output)
-    S->>L: stream_response(context)
-    L-->>B: Fresh response based on "Mark"
+    U->>B: Edit prompt input
+    B->>S: POST source + expected version
+    S->>C: update_source(new source)
+    C->>C: Advance version and preserve response
+    S-->>B: cell_source_update with source and response
+    U->>B: Edit assistant response
+    B->>S: POST output + expected version
+    S->>C: update_output(new response)
+    S-->>B: prompt_output_update
+    U->>B: Run a later prompt
+    B->>S: POST run
+    S->>S: Build current notebook transcript
+    S->>L: Current user/assistant pairs only
 ```
 
-#### Why This Matters (John → Mark Scenario)
+#### Editable Context Scenario (John → Mark)
 
-1. User types "Hello! My name is John" → Claude responds "Hello John!"
-2. User **edits** cell to "Hello! My name is Mark"
-3. **Without clearing**: Context includes both "Mark" (source) AND "Hello John!" (stale output)
-4. **With clearing**: Context only includes "Mark" (source), output is empty
+1. User types "Hello! My name is John" and the model responds "Hello John!"
+2. User edits the source to "Hello! My name is Mark"
+3. Dialeng preserves "Hello John!" because it remains visible, editable context
+4. The user can also edit that response to "Hello Mark!"
+5. The next prompt receives the notebook's current pair: the edited source and
+   edited response. Dialeng does not retain a hidden copy of either old value or
+   a provider conversation session.
 
-#### The HTMX Mechanism
+#### Server-Side Prompt Preservation
 
-Prompt cells use a two-textarea pattern:
-
-```html
-<!-- Hidden input with name="source" (sent to server) -->
-<input type="hidden" id="source-{cell.id}" name="source" value="...">
-
-<!-- Visible textarea with name="prompt_source" (for editing) -->
-<textarea name="prompt_source" id="prompt-{cell.id}"
-          hx-post="/dialeng/{nb_id}/cell/{cid}/source"
-          hx-include="#source-{cell.id}"
-          hx-trigger="blur changed"
-          oninput="document.getElementById('source-{cell.id}').value = this.value">
-```
-
-Key elements:
-1. **`oninput`**: Syncs textarea value to hidden input as user types
-2. **`hx-include`**: Includes the hidden input when posting (ensures `source` parameter is sent)
-3. **`hx-trigger="blur changed"`**: Posts only when textarea loses focus AND value changed
-
-Without `hx-include`, HTMX would only send `prompt_source` (the textarea's name), but the endpoint expects `source`. The hidden input has `name="source"`, and `hx-include` ensures it's included in the POST.
-
-#### Server-Side Output Clearing
-
-The Cell class tracks modifications:
+The cell model owns the distinction between prompt context and runtime output:
 
 ```python
-@dataclass
-class Cell:
-    version: int = 0  # Incremented on each source change
-    last_modified: Optional[datetime] = None
-
-    def update_source(self, new_source: str) -> bool:
-        if self.source != new_source:
-            self.source = new_source
-            self.version += 1
-            self.last_modified = datetime.now()
-            self.clear_outputs()  # CRITICAL: Prevents stale context
-            return True
-        return False
+def update_source(self, new_source: str) -> bool:
+    if self.source != new_source:
+        self.source = new_source
+        self.version += 1
+        self.last_modified = datetime.now()
+        if str(self.cell_type) != CellType.PROMPT.value:
+            self.clear_outputs()
+        return True
+    return False
 ```
 
-The `/cell/{cid}/source` endpoint enforces this:
+The `/cell/{cid}/source` route commits through this method and broadcasts both
+the authoritative prompt source and response. A source edit therefore cannot
+erase the response in the initiating tab or another connected tab.
 
-```python
-@rt("/dialeng/{nb_id}/cell/{cid}/source")
-def post(nb_id: str, cid: str, source: str):
-    for c in nb.cells:
-        if c.id == cid:
-            old_source = c.source
-            c.source = source
-            if old_source != source:
-                c.clear_outputs()  # Clear stale output
-                logger.info(f"Cell {cid}: Source changed, cleared outputs")
-            break
-```
-
-#### Context Building with Fresh Data
-
-When `build_context_messages()` runs, it converts each cell to messages:
+When context is built, the current values become one user/assistant pair:
 
 ```python
 def cell_to_messages(cell):
     if cell.cell_type == "prompt":
-        msgs = [{"role": "user", "content": cell.source}]
-        if cell.output:  # Only if output exists
-            msgs.append({"role": "assistant", "content": cell.output})
-        return msgs
+        messages = [{"role": "user", "content": cell.source}]
+        if cell.output:
+            messages.append({"role": "assistant", "content": cell.output})
+        return messages
 ```
 
-After editing and clearing:
-- `cell.source` = "Hello! My name is Mark" (new)
-- `cell.output` = "" (cleared)
+After editing both sides, context contains:
 
-So the context only contains:
-```
+```text
 User: Hello! My name is Mark
-```
-
-Not:
-```
-User: Hello! My name is Mark
-Assistant: Hello John! Nice to meet you!  ← This stale data is gone
+Assistant: Hello Mark!
 ```
 
 ## Image Handling in LLM Context

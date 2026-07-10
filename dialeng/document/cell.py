@@ -61,6 +61,15 @@ class CellOutput:
     display_id: Optional[str] = None
 
 
+def output_text(content: Any) -> str:
+    """Return the text/plain representation of an output payload."""
+    if isinstance(content, dict):
+        content = content.get('text/plain', '')
+    if isinstance(content, list):
+        return ''.join(str(part) for part in content)
+    return str(content) if content is not None else ''
+
+
 def is_benign_display_formatter_error(output: CellOutput) -> bool:
     """Return True for formatter-only IPython repr failures during display.
 
@@ -96,16 +105,20 @@ def normalize_cell_outputs(outputs: List[CellOutput]) -> List[CellOutput]:
     output list suitable for OOB rendering and persistence.
     """
     has_rich_display = any(
-        out.output_type in {'display_data', 'update_display_data'}
+        out.output_type in {'display_data', 'update_display_data'} or (
+            out.output_type == 'execute_result' and
+            isinstance(out.content, dict) and
+            any(mime != 'text/plain' for mime in out.content)
+        )
         for out in outputs
     )
     normalized: List[CellOutput] = []
-    display_index_by_id: dict[str, int] = {}
+    display_indices_by_id: dict[str, list[int]] = {}
     pending_clear = False
 
     def _reset_outputs():
         normalized.clear()
-        display_index_by_id.clear()
+        display_indices_by_id.clear()
 
     def _flush_pending_clear():
         nonlocal pending_clear
@@ -115,7 +128,8 @@ def normalize_cell_outputs(outputs: List[CellOutput]) -> List[CellOutput]:
 
     for out in outputs:
         if out.output_type == 'clear_output':
-            if out.content:
+            wait = out.content.get('wait', False) if isinstance(out.content, dict) else out.content
+            if wait:
                 pending_clear = True
             else:
                 _reset_outputs()
@@ -139,20 +153,18 @@ def normalize_cell_outputs(outputs: List[CellOutput]) -> List[CellOutput]:
 
         if out.output_type == 'update_display_data':
             merged = replace(out, output_type='display_data')
-            if out.display_id and out.display_id in display_index_by_id:
-                normalized[display_index_by_id[out.display_id]] = merged
+            if out.display_id and out.display_id in display_indices_by_id:
+                for index in display_indices_by_id[out.display_id]:
+                    normalized[index] = merged
             else:
                 normalized.append(merged)
                 if out.display_id:
-                    display_index_by_id[out.display_id] = len(normalized) - 1
+                    display_indices_by_id[out.display_id] = [len(normalized) - 1]
             continue
 
         if out.output_type == 'display_data' and out.display_id:
-            if out.display_id in display_index_by_id:
-                normalized[display_index_by_id[out.display_id]] = out
-            else:
-                normalized.append(out)
-                display_index_by_id[out.display_id] = len(normalized) - 1
+            normalized.append(out)
+            display_indices_by_id.setdefault(out.display_id, []).append(len(normalized) - 1)
             continue
 
         normalized.append(out)
@@ -225,7 +237,7 @@ class Cell:
             if out.output_type == 'stream':
                 parts.append(str(out.content))
             elif out.output_type == 'execute_result':
-                parts.append(str(out.content))
+                parts.append(output_text(out.content))
             elif out.output_type == 'error':
                 if out.traceback:
                     parts.extend(out.traceback)
@@ -257,13 +269,16 @@ class Cell:
         Update cell source with change tracking.
 
         Returns True if source was actually changed.
-        Increments version and clears outputs if source changed.
+        Increments version and invalidates execution output for non-prompt
+        cells. A prompt's source and assistant response are both editable
+        notebook context, so changing either side must preserve the other.
         """
         if self.source != new_source:
             self.source = new_source
             self.version += 1
             self.last_modified = datetime.now()
-            self.clear_outputs()  # Clear stale output that doesn't match new source
+            if str(self.cell_type) != CellType.PROMPT.value:
+                self.clear_outputs()
             return True
         return False
 
@@ -475,9 +490,14 @@ class Cell:
                     "text": text_lines if text_lines else [text]
                 })
             elif out.output_type == 'execute_result':
+                data = (
+                    out.content
+                    if isinstance(out.content, dict)
+                    else {"text/plain": [str(out.content)]}
+                )
                 jupyter_outputs.append({
                     "output_type": "execute_result",
-                    "data": {"text/plain": [str(out.content)]},
+                    "data": data,
                     "metadata": out.metadata or {},
                     "execution_count": self.execution_count
                 })

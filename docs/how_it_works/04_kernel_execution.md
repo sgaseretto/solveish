@@ -141,7 +141,17 @@ The browser no longer infers kernel readiness from queue emptiness or client-sid
 - notebook toolbar state (`mode`, `model`, `safe_mode`, selected kernel type, selected Colab runtime)
 - an outline revision number used to invalidate stale outline views without guessing from client-side events
 
-The frontend receives that snapshot over WebSocket and also polls it periodically so reconnects can restore the true kernel state. The same snapshot now drives floating toast notifications for attach/reconnect/setup phases, replacing the old inline status block under the toolbar.
+Code-run requests resolve the source twice: the run button has an inline live
+model fallback, and `htmx:configRequest` overwrites `source` and
+`expected_version` immediately before transport. This ensures a click directly
+after typing executes the current Monaco model rather than the previous hidden
+textarea value.
+
+The frontend receives that snapshot over WebSocket. It fetches authoritative
+state during initial hydration, explicit refresh, or revision-gap recovery
+rather than polling full snapshots while the socket is healthy. The same
+snapshot drives floating toast notifications for attach/reconnect/setup phases,
+replacing the old inline status block under the toolbar.
 
 The snapshot also became the shared control plane for notebook chrome:
 
@@ -236,6 +246,9 @@ The browser still gives immediate feedback when a run is requested, but it no lo
 - queue placement and running state come from backend `queue_update` / `kernel_snapshot` messages
 - previous cell output stays visible until the backend confirms the new execution state
 - "kernel required" or request-error paths clear the pending marker instead of wiping visible output optimistically
+- the initiating browser consumes one run intent when the request is accepted: normal Run and Shift+Enter focus the next cell, while Ctrl/Cmd+Enter and batch runs remain in place
+- prompt completion streams and persists output but never returns a whole-cell replacement or a backend focus command, so late provider responses cannot change the tab's scroll position
+- prompt and code controls share an idempotent run-state transition: starting disables/hides Run and exposes Cancel, while every terminal path re-enables/shows Run and clears the streaming class without depending on a later header replacement
 
 This avoids earlier drift where the UI could show a cell as finished or newly queued before the backend had actually confirmed the transition.
 
@@ -391,19 +404,21 @@ The final expression's value (like Jupyter's `Out[n]`):
 ```python
 CellOutput(
     output_type='execute_result',
-    content='42',  # repr() of result
+    content={'text/plain': '42'},
     metadata={}
 )
 ```
 
-#### Rich Result Promotion
+#### Lossless Rich Results
 
-When the result object has rich representations (`_repr_png_()` for PIL images, `_repr_html_()` for DataFrames, etc.), the kernel automatically promotes the result to `display_data` with a full MIME bundle. This ensures objects like PIL Images, pandas DataFrames, and other rich objects render inline rather than showing their text `repr()`.
+The local kernel uses IPython's formatter registry and keeps every generated MIME
+representation on the original `execute_result`. Binary images are converted to
+Jupyter-compatible base64 strings before crossing the subprocess queue.
 
 ```python
 # A cell ending with `img` (a PIL Image) produces:
 CellOutput(
-    output_type='display_data',  # promoted from execute_result
+    output_type='execute_result',
     content={
         'text/plain': '<PIL.PngImagePlugin.PngImageFile ...>',
         'image/png': 'base64...'
@@ -412,7 +427,9 @@ CellOutput(
 )
 ```
 
-The promotion check order is: `_repr_png_()` first, then `_repr_html_()`. If neither produces content, the result falls back to a plain `execute_result` with `text/plain` only.
+The renderer chooses a supported representation without deleting the other MIME
+entries. Serialization therefore round-trips the original output type, rich
+representations, metadata, and text fallback.
 
 ### Error
 
@@ -487,8 +504,10 @@ graph LR
     AD --> DOM
 ```
 
-- **Stream chunks** go through `appendCodeOutput()` which handles `\r` (carriage return) for progress bars like tqdm — each `\r` overwrites the current line
-- **Display data** (HTML, images) is appended as separate `<div class="display-data">` elements
+- **Stream chunks** go through `appendCodeOutput()` which preserves stdout/stderr segments and handles `\r` (carriage return) for progress bars like tqdm
+- **Display data and execute results** are appended at their emitted positions as separate output items, so later stream text does not jump above a plot/result
+- **Display updates** replace the matching `display_id`, including for the local subprocess kernel
+- **Deferred clears** honor `clear_output(wait=True)` and clear only when the next visible output arrives
 - **ANSI codes** are converted to HTML spans with colored styles via `ansiToHtml()` (JS)
 
 ### Final Rendering (Server-Side OOB Swap)
@@ -501,8 +520,8 @@ graph LR
     CO --> NORM["normalize_cell_outputs()"]
     NORM --> OOB["CellOutputOOB(cell)"]
     OOB --> RCO["_render_cell_outputs(cell)"]
-    RCO -->|"stream/execute_result"| PRE["Pre(ansi_to_html(text))"]
-    RCO -->|"display_data"| DIV["Div(render_mime_bundle(data))"]
+    RCO -->|"stream"| PRE["Pre(ansi_to_html(text))"]
+    RCO -->|"execute_result/display_data"| DIV["Div(render_mime_bundle(data))"]
     RCO -->|"error"| ERR["Pre(traceback)"]
 ```
 
@@ -514,21 +533,30 @@ Key design decisions:
 
 3. **ANSI conversion is shared** — `ansi_to_html()` lives in `dialeng/ui/mime.py` and is used by both `_render_cell_outputs()` (server-side) and the WebSocket streaming path.
 
-4. **stderr is not an error** — Many tools (tqdm, warnings, logging) write to stderr. The `error` CSS class is only applied when the cell actually has an error (`has_error` from `code_stream_end`), not when stderr output is received.
+4. **stderr is not an error** — Many tools (tqdm, warnings, logging) write to stderr. It keeps a distinct visual stream segment, while only an `error` output marks execution as failed.
 
-5. **Display updates are folded into the final rich output** — `normalize_cell_outputs()` applies Jupyter `update_display_data` semantics before OOB rendering and notebook save. This prevents transient placeholder HTML such as fastprogress `<progress value="0">` shells from replacing the final browser-visible output after execution completes.
+5. **Tracebacks are structured once** — The local worker temporarily suppresses
+   IPython's direct `showtraceback`/`showsyntaxerror` printing and emits the
+   execution exception as one structured Jupyter error. This prevents a stderr
+   traceback plus an identical error output.
 
-6. **`clear_output(wait=...)` is respected in static renders** — The same normalization pass applies deferred clearing, so server-side output re-renders match what the notebook actually showed at the end of execution.
+6. **Display updates are folded into the final rich output** — `normalize_cell_outputs()` applies Jupyter `update_display_data` semantics before OOB rendering and notebook save. This prevents transient placeholder HTML such as fastprogress `<progress value="0">` shells from replacing the final browser-visible output after execution completes.
 
-7. **Formatter-only display errors are suppressed when rich output succeeds** — If IPython raises a formatter-stack `TypeError: __repr__ returned non-string` while a cell still produces rich `display_data`, Dialeng keeps the rich output and does not mark the cell as failed. This prevents noisy duplicate tracebacks from libraries that provide a working HTML/image representation but a broken plain-text repr.
+7. **`clear_output(wait=...)` is respected in static renders** — The same normalization pass applies deferred clearing, so server-side output re-renders match what the notebook actually showed at the end of execution.
 
-8. **Scripts are re-executed after OOB swap** — When `processOOBSwap()` replaces an `output-*` element, any `<script>` tags in the new DOM are cloned into fresh `<script>` elements so the browser executes them. Without this, interactive widgets (YouTube embeds, custom JS visualizations) would only work on the first cell run — because `replaceWith()` / `innerHTML` does not execute `<script>` tags. On the first run, asynchronously-loaded scripts (e.g., the YouTube IFrame API) happen to fire after the OOB swap, finding the fresh DOM. On subsequent runs, the API is already loaded and creates the widget synchronously during streaming, but the OOB swap then destroys it. Re-executing scripts after the OOB swap ensures the widget is always recreated in the final DOM. This mirrors the same script clone-and-replace pattern used in `appendDisplayData()` during streaming.
+8. **Formatter-only display errors are suppressed when rich output succeeds** — If IPython raises a formatter-stack `TypeError: __repr__ returned non-string` while a cell still produces rich `display_data`, Dialeng keeps the rich output and does not mark the cell as failed. This prevents noisy duplicate tracebacks from libraries that provide a working HTML/image representation but a broken plain-text repr.
 
-9. **Non-SGR ANSI sequences are stripped** — `ansi_to_html()` (both Python and JS) strips cursor control (`\x1b[A`..`\x1b[H`, `\x1b[K`), erase (`\x1b[2K`), and private mode (`\x1b[?25h`, `\x1b[?25l`) sequences before processing SGR color codes. Without this, tqdm's cursor/erase codes pass through as visible `[2K` or `[?25h` text, corrupting the rendered output.
+9. **Scripts are re-executed after OOB swap** — When `processOOBSwap()` replaces an `output-*` element, any `<script>` tags in the new DOM are cloned into fresh `<script>` elements so the browser executes them. Without this, interactive widgets (YouTube embeds, custom JS visualizations) would only work on the first cell run — because `replaceWith()` / `innerHTML` does not execute `<script>` tags. On the first run, asynchronously-loaded scripts (e.g., the YouTube IFrame API) happen to fire after the OOB swap, finding the fresh DOM. On subsequent runs, the API is already loaded and creates the widget synchronously during streaming, but the OOB swap then destroys it. Re-executing scripts after the OOB swap ensures the widget is always recreated in the final DOM. This mirrors the same script clone-and-replace pattern used in `appendDisplayData()` during streaming.
+
+10. **Non-SGR ANSI sequences are stripped** — `ansi_to_html()` (both Python and JS) strips cursor control (`\x1b[A`..`\x1b[H`, `\x1b[K`), erase (`\x1b[2K`), and private mode (`\x1b[?25h`, `\x1b[?25l`) sequences before processing SGR color codes. Without this, tqdm's cursor/erase codes pass through as visible `[2K` or `[?25h` text, corrupting the rendered output.
 
 10. **Terminal emulation for progress bars** — `StreamingStdout` sets `encoding='utf-8'` so tqdm uses Unicode bar characters (`█`) instead of ASCII (`#`), and sets `COLUMNS=120` via `os.environ` so tqdm renders a reasonable bar width (tqdm falls back to `os.environ["COLUMNS"]` when `ioctl(TIOCGWINSZ)` fails on non-real file descriptors).
 
 11. **Mixed `\n`/`\r` chunks are handled correctly** — `appendCodeOutput()` splits `\r`-containing chunks and promotes embedded `\n` into separate lines. This ensures that programs like pip, which send newlines followed by `\r`-based progress bars in a single chunk, don't have their permanent output overwritten by the progress bar update.
+
+12. **MIME bundles remain lossless** — `execute_result` is not promoted or
+flattened. Local and Colab kernels retain the complete bundle through live
+transport, final OOB rendering, and notebook save/load.
 
 ### Shared Rendering Module (`dialeng/ui/mime.py`)
 
@@ -573,6 +601,38 @@ await kernel_service.ensure_project_path(nb_id, project_root)
 await kernel_service.sync_project_files(nb_id, exported_files)
 await kernel_service.shutdown_async(nb_id)
 ```
+
+Notebook file deletion is ordered as a small transaction: Dialeng first
+invalidates background setup work, cancels the notebook-scoped execution queue,
+shuts down the attached kernel, and clears ephemeral state. Only after that
+teardown succeeds does it unlink the `.ipynb` file. This prevents a cleanup
+failure from leaving the UI with a deleted file that is later recreated as an
+empty notebook.
+
+```mermaid
+flowchart LR
+    D["Delete notebook request"] --> I["Invalidate setup and sync work"]
+    I --> Q["cancel_all(notebook_id)"]
+    Q --> K["Shutdown attached kernel"]
+    K --> S["Clear runtime state"]
+    S --> U["Unlink notebook file"]
+    U --> T["Record tombstone"]
+    T --> B["Broadcast notebook_deleted"]
+    B --> W["Tabs stop reconnect work and open workspace"]
+```
+
+The tombstone is intentionally backend-authoritative. Snapshot recovery and
+delayed mutations against the deleted notebook return `410 Gone`, while a
+WebSocket reconnect receives the same `notebook_deleted` terminal event. This
+prevents stale tabs from invoking the legacy load-or-create path. Tombstones
+are cleared only by explicit notebook creation, so recreating the same path is
+still supported without making ordinary reads destructive.
+
+Deletion notifications are broadcast after the file has been unlinked but
+before the notebook's connection registry is dropped. If runtime teardown or
+unlinking fails, Dialeng removes the transient `deleting` marker, keeps the
+file addressable, refreshes kernel state in connected tabs, and does not
+publish a tombstone.
 
 There is also an app-level shutdown path:
 

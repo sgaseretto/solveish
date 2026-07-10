@@ -49,11 +49,7 @@ def PromptCellView(cell, notebook_id: str):
                 Textarea(cell.output if cell.output else "",
                          cls="prompt-content", name="output", id=f"output-{cell.id}",
                          placeholder="Click Run to generate response...",
-                         hx_post=f"/dialeng/{notebook_id}/cell/{cell.id}/output",
-                         hx_include=f"#version-{cell.id}",
-                         hx_trigger="blur changed", hx_swap="none",
-                         style="display: none; min-height: 80px;",
-                         onblur=f"switchToPreview('{cell.id}', 'output')"),
+                         style="display: none; min-height: 80px;"),
                 Div(cls="ai-preview", data_cell_id=cell.id, data_field="output"),
                 cls=f"prompt-output {output_collapse_cls}".strip(),
                 data_collapse_section="output"

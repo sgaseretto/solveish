@@ -24,3 +24,8 @@
         - docs: https://nbdev.fast.ai/getting_started.html
     - ContextKit:
         - repo: https://github.com/AnswerDotAI/ContextKit
+    - OpenAI Codex integration references:
+        - official docs: https://developers.openai.com/codex/
+        - Golm protocol/lifecycle reference: https://github.com/sgaseretto/golm/tree/main/packages/golm-ai
+        - Golm skills reference: https://github.com/sgaseretto/golm/tree/main/packages/golm-agent
+        - Dialeng must own its implementation; do not add Golm packages as runtime dependencies.

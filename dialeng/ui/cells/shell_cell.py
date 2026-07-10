@@ -139,7 +139,7 @@ def ShellCellView(cell, notebook_id: str, safe_mode: bool = False):
         # Monaco Editor container - with collapse support
         # Uses shell mode for shell syntax highlighting
         Div(
-            Div(id=f"monaco-{cell.id}", cls="monaco-container"),
+            Div(Pre(cell.source, cls="monaco-placeholder"), id=f"monaco-{cell.id}", cls="monaco-container"),
             cls=f"cell-input {input_collapse_cls}".strip(),
             data_collapse_section="input"
         ),

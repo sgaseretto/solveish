@@ -11,13 +11,16 @@ Based on cred_probe.py logic but integrated as a service module.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import subprocess
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import Any, Dict, Optional, Tuple, List
+from dialeng.services.performance_service import performance_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,75 @@ class CredentialStatus:
 
 
 @dataclass
+class ProviderStatus:
+    """Availability and capabilities for one selectable LLM backend."""
+    id: str
+    provider: str
+    backend: str
+    label: str
+    authenticated: bool
+    source: str
+    details: str
+    models: List[Dict[str, Any]]
+    capabilities: List[str]
+    validation_state: str = "ready"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "provider": self.provider,
+            "backend": self.backend,
+            "label": self.label,
+            "authenticated": self.authenticated,
+            "source": self.source,
+            "details": self.details,
+            "models": self.models,
+            "capabilities": self.capabilities,
+            "validation_state": self.validation_state,
+        }
+
+
+@dataclass
+class CredentialInventory:
+    """All independently detected LLM providers for the running server."""
+    providers: Dict[str, ProviderStatus]
+
+    @property
+    def available(self) -> bool:
+        return any(p.authenticated and p.id != "mock_only" for p in self.providers.values())
+
+    def authenticated(self) -> List[ProviderStatus]:
+        return [p for p in self.providers.values() if p.authenticated]
+
+    def get(self, provider_id: Optional[str]) -> Optional[ProviderStatus]:
+        return self.providers.get(provider_id or "")
+
+    def default_provider(self) -> str:
+        provider_order = (
+            "claudette:anthropic_api",
+            "claudette:bedrock",
+            "claude_agent_sdk",
+            "openai_codex",
+        )
+        for provider_id in provider_order:
+            status = self.providers.get(provider_id)
+            if status and status.authenticated:
+                return provider_id
+        for provider_id in provider_order:
+            status = self.providers.get(provider_id)
+            if status and status.validation_state == "validating":
+                return provider_id
+        return "mock_only"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "available": self.available,
+            "default_provider": self.default_provider(),
+            "providers": [p.to_dict() for p in self.providers.values()],
+        }
+
+
+@dataclass
 class AWSCreds:
     """AWS credentials for Bedrock."""
     access_key: str
@@ -45,6 +117,27 @@ class AWSCreds:
 
 # Module-level cached credential status
 _credential_status: Optional[CredentialStatus] = None
+_credential_inventory: Optional[CredentialInventory] = None
+
+
+def credential_status_from_inventory(inventory: CredentialInventory) -> CredentialStatus:
+    """Adapt the provider inventory to the legacy single-provider status."""
+    selected = inventory.get(inventory.default_provider())
+    if selected and selected.id != "mock_only" and selected.authenticated:
+        return CredentialStatus(
+            available=True,
+            provider=selected.provider,
+            backend=selected.backend,
+            source=selected.source,
+            details=selected.details,
+        )
+    return CredentialStatus(
+        available=False,
+        provider="mock_only",
+        backend="none",
+        source="none",
+        details="No authenticated Anthropic, Bedrock, Claude Code, or OpenAI Codex provider found.",
+    )
 
 
 def _load_dotenv_if_present(dotenv_path: Path) -> Tuple[bool, str]:
@@ -323,6 +416,323 @@ def _check_claude_agent_sdk_credentials() -> Tuple[bool, str]:
         return False, f"claude_agent_sdk: probe failed: {e}"
 
 
+def _provider_models(provider_id: str) -> List[Dict[str, Any]]:
+    from dialeng.services.dialeng_config import load_config
+
+    return [
+        {
+            "id": model.id,
+            "name": model.name,
+            "capabilities": list(model.capabilities),
+        }
+        for model in load_config(create_if_missing=False).get_models_for_provider(provider_id)
+    ]
+
+
+def build_initial_credential_inventory(
+    dotenv_path: Optional[Path] = None,
+) -> CredentialInventory:
+    """Build a local-only inventory without network or subprocess probes."""
+    if dotenv_path is None:
+        dotenv_path = Path.cwd() / ".env"
+
+    has_claudette = _check_claudette_available()
+    api_key, key_source = _find_anthropic_api_key(dotenv_path)
+    anthropic_pending = bool(api_key and has_claudette)
+
+    aws_pending = bool(
+        os.environ.get("AWS_ACCESS_KEY_ID")
+        or os.environ.get("AWS_PROFILE")
+        or (Path.home() / ".aws" / "credentials").exists()
+    ) and has_claudette
+
+    claude_cli_path, claude_cli_source = _find_claude_cli_path()
+    claude_pending = bool(claude_cli_path)
+
+    from dialeng.services.dialeng_config import get_config
+    from dialeng.services.openai_codex_auth import get_openai_codex_auth_service
+
+    codex_status = get_openai_codex_auth_service().status()
+    codex_enabled = get_config().openai_codex_enabled
+    codex_authenticated = bool(codex_enabled and codex_status["authenticated"])
+
+    providers = {
+        "claudette:anthropic_api": ProviderStatus(
+            id="claudette:anthropic_api",
+            provider="claudette",
+            backend="anthropic_api",
+            label="Anthropic API",
+            authenticated=False,
+            source=key_source,
+            details=("Validating configured Anthropic credentials"
+                     if anthropic_pending else "ANTHROPIC_API_KEY not found"),
+            models=_provider_models("claudette:anthropic_api"),
+            capabilities=["tools", "images", "thinking", "usage"],
+            validation_state="validating" if anthropic_pending else "unavailable",
+        ),
+        "claudette:bedrock": ProviderStatus(
+            id="claudette:bedrock",
+            provider="claudette",
+            backend="bedrock",
+            label="AWS Bedrock",
+            authenticated=False,
+            source="local_configuration" if aws_pending else "none",
+            details=("Validating configured AWS credentials"
+                     if aws_pending else "AWS credentials not found"),
+            models=_provider_models("claudette:bedrock"),
+            capabilities=["tools", "images", "thinking", "usage"],
+            validation_state="validating" if aws_pending else "unavailable",
+        ),
+        "claude_agent_sdk": ProviderStatus(
+            id="claude_agent_sdk",
+            provider="claude_agent_sdk",
+            backend="claude_code_subscription",
+            label="Claude Code",
+            authenticated=False,
+            source=claude_cli_source if claude_pending else "none",
+            details=("Validating Claude Code credentials"
+                     if claude_pending else "Claude Code CLI not found"),
+            models=_provider_models("claude_agent_sdk"),
+            capabilities=["tools", "images", "thinking", "usage"],
+            validation_state="validating" if claude_pending else "unavailable",
+        ),
+        "openai_codex": ProviderStatus(
+            id="openai_codex",
+            provider="openai_codex",
+            backend="openai_codex",
+            label="OpenAI Codex",
+            authenticated=codex_authenticated,
+            source=str(codex_status.get("source") or "none"),
+            details=("OpenAI Codex subscription authenticated"
+                     if codex_authenticated else str(codex_status.get("error") or "Not connected")),
+            models=_provider_models("openai_codex"),
+            capabilities=["tools", "images", "thinking", "skills", "usage"],
+            validation_state="ready" if codex_authenticated else "unavailable",
+        ),
+        "mock_only": ProviderStatus(
+            id="mock_only",
+            provider="mock_only",
+            backend="none",
+            label="Mock",
+            authenticated=True,
+            source="built_in",
+            details="No external credentials required",
+            models=[],
+            capabilities=[],
+            validation_state="ready",
+        ),
+    }
+    performance_monitor.increment("provider_inventory.initial_builds")
+    return CredentialInventory(providers)
+
+
+def _probe_anthropic_provider(dotenv_path: Path) -> ProviderStatus:
+    def probe() -> ProviderStatus:
+        has_claudette = _check_claudette_available()
+        api_key, key_source = _find_anthropic_api_key(dotenv_path)
+        authenticated, details = (False, "ANTHROPIC_API_KEY not found")
+        if api_key:
+            authenticated, details = _check_anthropic_sdk_with_api_key(api_key)
+        authenticated = bool(authenticated and has_claudette)
+        return ProviderStatus(
+            id="claudette:anthropic_api",
+            provider="claudette",
+            backend="anthropic_api",
+            label="Anthropic API",
+            authenticated=authenticated,
+            source=key_source,
+            details=details if has_claudette else "claudette is not installed",
+            models=_provider_models("claudette:anthropic_api"),
+            capabilities=["tools", "images", "thinking", "usage"],
+            validation_state="ready" if authenticated else "unavailable",
+        )
+
+    started_at = time.perf_counter()
+    try:
+        status = probe()
+        return status
+    finally:
+        performance_monitor.observe_duration(
+            "provider.probe",
+            (time.perf_counter() - started_at) * 1000,
+            labels={"provider": "claudette:anthropic_api"},
+            authenticated=bool(locals().get("status") and status.authenticated),
+        )
+
+
+def _probe_bedrock_provider(_dotenv_path: Path) -> ProviderStatus:
+    started_at = time.perf_counter()
+    try:
+        has_claudette = _check_claudette_available()
+        aws = _resolve_aws_credentials()
+        authenticated, details = (False, "AWS credentials not found")
+        if aws:
+            authenticated, details = _check_anthropic_sdk_with_bedrock(aws)
+        authenticated = bool(authenticated and has_claudette)
+        status = ProviderStatus(
+            id="claudette:bedrock",
+            provider="claudette",
+            backend="bedrock",
+            label="AWS Bedrock",
+            authenticated=authenticated,
+            source=aws.source if aws else "none",
+            details=details if has_claudette else "claudette is not installed",
+            models=_provider_models("claudette:bedrock"),
+            capabilities=["tools", "images", "thinking", "usage"],
+            validation_state="ready" if authenticated else "unavailable",
+        )
+        return status
+    finally:
+        performance_monitor.observe_duration(
+            "provider.probe",
+            (time.perf_counter() - started_at) * 1000,
+            labels={"provider": "claudette:bedrock"},
+            authenticated=bool(locals().get("status") and status.authenticated),
+        )
+
+
+def _probe_claude_agent_provider(_dotenv_path: Path) -> ProviderStatus:
+    started_at = time.perf_counter()
+    try:
+        authenticated, details = _check_claude_agent_sdk_credentials()
+        source = "claude_agent_sdk"
+        if not authenticated:
+            cli_path, cli_source = _find_claude_cli_path()
+            if cli_path:
+                authenticated, details = _check_claude_code_credentials(cli_path)
+                source = cli_source
+        status = ProviderStatus(
+            id="claude_agent_sdk",
+            provider="claude_agent_sdk",
+            backend="claude_code_subscription",
+            label="Claude Code",
+            authenticated=authenticated,
+            source=source if authenticated else "none",
+            details=details,
+            models=_provider_models("claude_agent_sdk"),
+            capabilities=["tools", "images", "thinking", "usage"],
+            validation_state="ready" if authenticated else "unavailable",
+        )
+        return status
+    finally:
+        performance_monitor.observe_duration(
+            "provider.probe",
+            (time.perf_counter() - started_at) * 1000,
+            labels={"provider": "claude_agent_sdk"},
+            authenticated=bool(locals().get("status") and status.authenticated),
+        )
+
+
+def _probe_openai_codex_provider(_dotenv_path: Path) -> ProviderStatus:
+    from dialeng.services.dialeng_config import get_config
+    from dialeng.services.openai_codex_auth import get_openai_codex_auth_service
+
+    started_at = time.perf_counter()
+    try:
+        config = get_config()
+        codex_status = get_openai_codex_auth_service().status()
+        authenticated = bool(config.openai_codex_enabled and codex_status["authenticated"])
+        status = ProviderStatus(
+            id="openai_codex",
+            provider="openai_codex",
+            backend="openai_codex",
+            label="OpenAI Codex",
+            authenticated=authenticated,
+            source=str(codex_status.get("source") or "none"),
+            details=("OpenAI Codex subscription authenticated" if authenticated
+                     else str(codex_status.get("error") or "Not connected")),
+            models=_provider_models("openai_codex"),
+            capabilities=["tools", "images", "thinking", "skills", "usage"],
+            validation_state="ready" if authenticated else "unavailable",
+        )
+        return status
+    finally:
+        performance_monitor.observe_duration(
+            "provider.probe",
+            (time.perf_counter() - started_at) * 1000,
+            labels={"provider": "openai_codex"},
+            authenticated=bool(locals().get("status") and status.authenticated),
+        )
+
+
+def detect_credential_inventory(
+    dotenv_path: Optional[Path] = None,
+    *,
+    force: bool = False,
+) -> CredentialInventory:
+    """Detect every usable provider without allowing one failure to hide another."""
+    global _credential_inventory
+
+    if _credential_inventory is not None and not force:
+        performance_monitor.increment("provider_inventory.cache_hits")
+        return _credential_inventory
+    if dotenv_path is None:
+        dotenv_path = Path.cwd() / ".env"
+
+    providers = {
+        status.id: status
+        for status in (
+            _probe_anthropic_provider(dotenv_path),
+            _probe_bedrock_provider(dotenv_path),
+            _probe_claude_agent_provider(dotenv_path),
+            _probe_openai_codex_provider(dotenv_path),
+        )
+    }
+    providers["mock_only"] = build_initial_credential_inventory(dotenv_path).providers["mock_only"]
+
+    _credential_inventory = CredentialInventory(providers)
+    return _credential_inventory
+
+
+async def refresh_credential_inventory_async(
+    dotenv_path: Optional[Path] = None,
+) -> CredentialInventory:
+    """Refresh provider probes concurrently without blocking the event loop."""
+    global _credential_inventory
+
+    if dotenv_path is None:
+        dotenv_path = Path.cwd() / ".env"
+    _load_dotenv_if_present(dotenv_path)
+
+    probe_functions = (
+        _probe_anthropic_provider,
+        _probe_bedrock_provider,
+        _probe_claude_agent_provider,
+        _probe_openai_codex_provider,
+    )
+    results = await asyncio.gather(
+        *(asyncio.to_thread(probe, dotenv_path) for probe in probe_functions),
+        return_exceptions=True,
+    )
+
+    initial = build_initial_credential_inventory(dotenv_path)
+    providers: Dict[str, ProviderStatus] = {}
+    for provider_id, result in zip(
+        (
+            "claudette:anthropic_api",
+            "claudette:bedrock",
+            "claude_agent_sdk",
+            "openai_codex",
+        ),
+        results,
+    ):
+        if isinstance(result, BaseException):
+            logger.exception(
+                "Provider probe failed (%s)",
+                provider_id,
+                exc_info=(type(result), result, result.__traceback__),
+            )
+            fallback = initial.providers[provider_id]
+            fallback.validation_state = "unavailable"
+            fallback.details = f"Provider validation failed: {type(result).__name__}"
+            providers[provider_id] = fallback
+        else:
+            providers[provider_id] = result
+    providers["mock_only"] = initial.providers["mock_only"]
+    _credential_inventory = CredentialInventory(providers)
+    return _credential_inventory
+
+
 def detect_credentials(dotenv_path: Optional[Path] = None) -> CredentialStatus:
     """
     Detect available LLM credentials.
@@ -337,65 +747,23 @@ def detect_credentials(dotenv_path: Optional[Path] = None) -> CredentialStatus:
     if _credential_status is not None:
         return _credential_status
 
-    if dotenv_path is None:
-        dotenv_path = Path.cwd() / ".env"
-
-    has_claudette = _check_claudette_available()
-
-    # Step 1: Check Anthropic API key
-    api_key, key_src = _find_anthropic_api_key(dotenv_path)
-    if api_key:
-        ok, msg = _check_anthropic_sdk_with_api_key(api_key)
-        if ok and has_claudette:
-            _credential_status = CredentialStatus(
-                available=True, provider="claudette", backend="anthropic_api",
-                source=key_src, details=msg
-            )
-            return _credential_status
-        elif ok:
-            # Has API key but no claudette - fall through to check if claude-agent-sdk works
-            logger.warning("Anthropic API key found but claudette not installed, checking Claude Code...")
-
-    # Step 2: Check AWS Bedrock
-    aws = _resolve_aws_credentials()
-    if aws:
-        ok, msg = _check_anthropic_sdk_with_bedrock(aws)
-        if ok and has_claudette:
-            _credential_status = CredentialStatus(
-                available=True, provider="claudette", backend="bedrock",
-                source=aws.source, details=f"{aws.details}; {msg}"
-            )
-            return _credential_status
-
-    # Step 3: Check Claude Code subscription via SDK probe
-    ok, msg = _check_claude_agent_sdk_credentials()
-    if ok:
-        _credential_status = CredentialStatus(
-            available=True, provider="claude_agent_sdk", backend="claude_code_subscription",
-            source="claude_agent_sdk", details=msg
-        )
-        return _credential_status
-    else:
-        logger.info(f"claude_agent_sdk probe: {msg}")
-
-    # Fallback: try CLI-based detection
-    cli_path, cli_src = _find_claude_cli_path()
-    if cli_path:
-        ok, msg = _check_claude_code_credentials(cli_path)
-        if ok:
-            _credential_status = CredentialStatus(
-                available=True, provider="claude_agent_sdk", backend="claude_code_subscription",
-                source=cli_src, details=msg
-            )
-            return _credential_status
-
-    # No credentials found
-    _credential_status = CredentialStatus(
-        available=False, provider="mock_only", backend="none",
-        source="none",
-        details="No ANTHROPIC_API_KEY, no AWS Bedrock creds, and no Claude Code CLI found."
-    )
+    # Preserve the legacy single-provider API on top of the new inventory.
+    inventory = detect_credential_inventory(dotenv_path)
+    _credential_status = credential_status_from_inventory(inventory)
     return _credential_status
+
+
+def reset_credential_cache() -> None:
+    """Invalidate both the compatibility result and the provider inventory."""
+    global _credential_status, _credential_inventory
+    _credential_status = None
+    _credential_inventory = None
+
+
+def refresh_credential_inventory(dotenv_path: Optional[Path] = None) -> CredentialInventory:
+    """Re-run all provider checks after an authentication/configuration change."""
+    reset_credential_cache()
+    return detect_credential_inventory(dotenv_path, force=True)
 
 
 def get_available_modes(cred_status: CredentialStatus) -> List[Tuple[str, str]]:
@@ -429,7 +797,13 @@ def print_credential_status(cred_status: CredentialStatus) -> None:
         print(f"      Details: {cred_status.details}")
 
 
-def reset_credential_cache() -> None:
-    """Reset cached credential status (useful for testing)."""
-    global _credential_status
-    _credential_status = None
+def print_credential_inventory(inventory: CredentialInventory) -> None:
+    """Print all selectable providers rather than only the legacy default."""
+    available = [p for p in inventory.authenticated() if p.id != "mock_only"]
+    if not available:
+        print("   No authenticated LLM providers found; Mock mode is available.")
+        return
+    print(f"   LLM providers available ({len(available)}):")
+    for provider in available:
+        marker = " (default)" if provider.id == inventory.default_provider() else ""
+        print(f"      {provider.label}: authenticated via {provider.source}{marker}")

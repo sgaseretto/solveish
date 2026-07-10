@@ -200,9 +200,6 @@ def SettingsSidebar(config: DialengConfig):
     Returns:
         Aside element containing the complete settings panel
     """
-    # Get model choices for dropdowns
-    model_choices = [(m.id, m.name) for m in config.available_models]
-
     # AWS region options
     aws_regions = [
         ("us-east-1", "US East (N. Virginia)"),
@@ -230,6 +227,12 @@ def SettingsSidebar(config: DialengConfig):
         ("gpu", "GPU"),
         ("tpu", "TPU"),
     ]
+    from dialeng.services.openai_codex_auth import get_openai_codex_auth_service
+    codex_auth = get_openai_codex_auth_service().status()
+    codex_label = (
+        f"Connected ({codex_auth.get('account_id', '')[:12]}...)"
+        if codex_auth.get("authenticated") else "Not connected"
+    )
 
     return Aside(
         # Header with close button
@@ -274,14 +277,56 @@ def SettingsSidebar(config: DialengConfig):
                 SettingsGroup(
                     "Model Defaults",
                     SettingSelect("Bedrock Model", "models.defaults.bedrock",
-                                  model_choices, config.default_models.get("bedrock", "claude-haiku-4-5"),
+                                  config.get_model_choices("claudette:bedrock"),
+                                  config.default_models.get("bedrock", "claude-haiku-4-5"),
                                   "Default model when using AWS Bedrock"),
                     SettingSelect("Claude Code Model", "models.defaults.claude_code_subscription",
-                                  model_choices, config.default_models.get("claude_code_subscription", "claude-sonnet-4-5"),
+                                  config.get_model_choices("claude_agent_sdk"),
+                                  config.default_models.get("claude_code_subscription", "claude-sonnet-4-5"),
                                   "Default model when using Claude Code subscription"),
+                    SettingSelect("OpenAI Codex Model", "models.defaults.openai_codex",
+                                  config.get_model_choices("openai_codex"),
+                                  config.default_models.get("openai_codex", "gpt-5.4"),
+                                  "Default model for an OpenAI Codex subscription"),
                     SettingSelect("Default Dialog Mode", "modes.default", mode_options, config.default_mode,
                                   "Default mode when opening a notebook"),
                     open=True
+                ),
+
+                SettingsGroup(
+                    "OpenAI Codex",
+                    SettingToggle("Enable OpenAI Codex", "llm.openai_codex_enabled",
+                                  config.openai_codex_enabled,
+                                  help_text="Expose the Codex subscription provider in notebook controls."),
+                    SettingSelect("Streaming transport", "llm.openai_codex_transport",
+                                  [("auto", "WebSocket with SSE fallback"),
+                                   ("websocket", "WebSocket only"),
+                                   ("sse", "SSE only")],
+                                  config.openai_codex_transport,
+                                  "Auto falls back only before response output begins."),
+                    Div(
+                        Span(codex_label, id="openai-codex-auth-state", cls="setting-help"),
+                        Div(
+                            Button("Connect OpenAI", type="button", cls="btn btn-sm",
+                                   onclick="startOpenAICodexLogin()",
+                                   style="display:none;" if codex_auth.get("authenticated") else "",
+                                   id="openai-codex-login"),
+                            Button("Disconnect", type="button", cls="btn btn-sm",
+                                   onclick="logoutOpenAICodex()",
+                                   style="" if codex_auth.get("authenticated") else "display:none;",
+                                   id="openai-codex-logout"),
+                            cls="setting-actions",
+                        ),
+                        Small(
+                            "Uses a Codex subscription OAuth session, not an OpenAI Platform API key.",
+                            cls="setting-help",
+                        ),
+                        cls="setting-row",
+                    ),
+                    SettingToggle("Enable project skills", "skills.enabled",
+                                  config.skills_enabled,
+                                  help_text="Discover OpenAI Codex skills from .dialeng/skills."),
+                    open=True,
                 ),
 
                 # Tool Settings

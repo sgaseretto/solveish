@@ -62,6 +62,7 @@ class SubprocessKernel(BaseKernel):
         except Empty:
             pass
 
+        self.shutdown()
         raise RuntimeError("Kernel subprocess failed to start")
 
     @property
@@ -162,31 +163,20 @@ class SubprocessKernel(BaseKernel):
                         stream_name=msg.get('name', 'stdout')
                     )
 
-                elif msg_type == 'display_data':
+                elif msg_type in {'display_data', 'update_display_data'}:
                     yield CellOutput(
-                        output_type='display_data',
+                        output_type=msg_type,
                         content=msg.get('data', {}),
-                        metadata=msg.get('metadata')
+                        metadata=msg.get('metadata'),
+                        display_id=msg.get('display_id'),
                     )
 
                 elif msg_type == 'execute_result':
-                    data = msg.get('data', {})
-                    # If result has rich MIME types (HTML, images, etc.),
-                    # emit as display_data to preserve the full bundle.
-                    # Otherwise keep as plain text execute_result.
-                    rich_types = {'text/html', 'image/png', 'image/jpeg', 'image/svg+xml', 'image/gif'}
-                    if rich_types & set(data.keys()):
-                        yield CellOutput(
-                            output_type='display_data',
-                            content=data,
-                            metadata=msg.get('metadata')
-                        )
-                    else:
-                        yield CellOutput(
-                            output_type='execute_result',
-                            content=data.get('text/plain', ''),
-                            metadata=msg.get('metadata')
-                        )
+                    yield CellOutput(
+                        output_type='execute_result',
+                        content=msg.get('data', {}),
+                        metadata=msg.get('metadata'),
+                    )
 
                 elif msg_type == 'error':
                     yield CellOutput(
@@ -204,7 +194,7 @@ class SubprocessKernel(BaseKernel):
                     # Clear output signal - could be used by frontend
                     yield CellOutput(
                         output_type='clear_output',
-                        content={'wait': msg.get('wait', False)}
+                        content=msg.get('wait', False)
                     )
 
         finally:
@@ -268,25 +258,53 @@ class SubprocessKernel(BaseKernel):
 
     def shutdown(self):
         """Shutdown the kernel subprocess cleanly."""
-        if self.process is None:
-            return
+        process = self.process
+        input_queue = self.input_queue
+        output_queue = self.output_queue
 
         # Try graceful shutdown first
-        if self.input_queue:
+        if process is not None and input_queue is not None:
             try:
-                self.input_queue.put({'type': 'shutdown'})
-                self.process.join(timeout=2)
+                input_queue.put({'type': 'shutdown'})
+                process.join(timeout=2)
             except Exception:
                 pass
 
         # Force terminate if still alive
-        if self.process.is_alive():
-            self.process.terminate()
-            self.process.join(timeout=1)
+        try:
+            if process is not None and process.is_alive():
+                process.terminate()
+                process.join(timeout=1)
+        except Exception:
+            pass
 
         # Last resort: kill
-        if self.process.is_alive():
-            self.process.kill()
+        try:
+            if process is not None and process.is_alive():
+                process.kill()
+                process.join(timeout=1)
+        except Exception:
+            pass
+
+        # Queue feeder threads and process handles own OS resources. Dropping
+        # references without closing them leaks semaphores during server reloads.
+        for queue in (input_queue, output_queue):
+            if queue is None:
+                continue
+            try:
+                queue.close()
+            except Exception:
+                pass
+            try:
+                queue.join_thread()
+            except Exception:
+                pass
+
+        if process is not None:
+            try:
+                process.close()
+            except Exception:
+                pass
 
         self.process = None
         self.input_queue = None

@@ -489,9 +489,11 @@ def test_app_shutdown_runtime_cleans_up_background_state(monkeypatch):
     class _Queue:
         def __init__(self):
             self.cancelled = False
+            self.notebook_id = None
 
-        def cancel_all(self):
+        def cancel_all(self, notebook_id):
             self.cancelled = True
+            self.notebook_id = notebook_id
 
     async def _run():
         original_shutdown_started = appmod.server_shutdown_started
@@ -531,6 +533,7 @@ def test_app_shutdown_runtime_cleans_up_background_state(monkeypatch):
             await appmod._shutdown_server_runtime("test")
 
             assert queue.cancelled is True
+            assert queue.notebook_id == "nb"
             assert fake_kernel_service.shutdown_calls == 1
             assert appmod.kernel_setup_tasks == {}
             assert appmod.kernel_sync_tasks == {}

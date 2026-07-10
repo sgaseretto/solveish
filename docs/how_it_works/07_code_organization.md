@@ -1,27 +1,35 @@
 # Code Organization
 
-This document explains the modular architecture of the Dialeng codebase, including where to find things, how components are organized, and how to extend or modify the system.
+This document explains Dialeng's current composition root, route modules,
+runtime services, browser controllers, UI components, and extension points.
 
 ## Overview
 
-Dialeng follows a **layered architecture** with clear separation of concerns:
+Dialeng uses a layered architecture with one FastHTML composition root. Stateful
+behavior belongs in services, rendering belongs in `ui/`, protocol parsing and
+selected routes are independently testable, and `app.py` wires those pieces to
+the remaining compatibility endpoints.
 
 ```mermaid
 flowchart TB
-    subgraph APP["app.py"]
-        ENTRY["Entry point, routes, app config"]
+    subgraph APP["Composition"]
+        ENTRY["app.py: dependency wiring and compatibility routes"]
+        ROUTES["routes/: diagnostics and WebSocket registration"]
     end
 
-    subgraph ASSETS["static/"]
-        CSS["CSS/JS assets"]
+    subgraph ASSETS["Browser"]
+        COORD["app.js coordinator"]
+        CLIENT["revision, event, structure, batching, notifications"]
     end
 
     subgraph UI["ui/"]
         COMP["Components"]
     end
 
-    subgraph SVC["services/"]
-        FEAT["Features"]
+    subgraph SVC["Runtime services"]
+        REG["runtime registry and persistence"]
+        TRANSPORT["broadcast and WebSocket protocol"]
+        FEAT["kernel, LLM, files, caches, diagnostics"]
     end
 
     subgraph CORE["core/"]
@@ -36,13 +44,17 @@ flowchart TB
         MODELS["Cell, Notebook models"]
     end
 
-    APP --> ASSETS
-    APP --> UI
-    APP --> SVC
+    ENTRY --> ROUTES
+    ENTRY --> UI
+    ENTRY --> REG
+    ENTRY --> TRANSPORT
+    ENTRY --> FEAT
+    ROUTES --> TRANSPORT
+    COORD --> CLIENT
     UI --> CORE
     UI --> EXT
-    SVC --> CORE
-    SVC --> EXT
+    FEAT --> CORE
+    FEAT --> EXT
     CORE --> DOC
     EXT --> DOC
 ```
@@ -51,8 +63,10 @@ flowchart TB
 
 ```
 dialeng/
-├── app.py                    # Main application (~1,500 lines)
-├── state.py                  # Global state documentation
+├── app.py                    # Composition root and compatibility routes
+├── routes/
+│   ├── diagnostics.py        # Content-free diagnostics endpoints
+│   └── websocket.py          # Socket connect/disconnect/control lifecycle
 ├── static/                   # Frontend assets
 │   ├── css/
 │   │   ├── themes.css        # Theme color variables (dark/light)
@@ -60,7 +74,13 @@ dialeng/
 │   │   ├── components.css    # Cells, buttons, badges, markdown
 │   │   └── editor.css        # Monaco editor styles
 │   └── js/
-│       └── app.js            # All client-side logic (~1,700 lines)
+│       ├── app.js            # Browser coordinator and legacy handlers
+│       ├── event_dispatcher.js
+│       ├── notebook_client.js # Revision and duplicate/gap tracking
+│       ├── structure_controller.js
+│       ├── execution_ui.js   # Frame-batched stream primitive
+│       ├── notifications.js
+│       └── browser_diagnostics.js
 ├── ui/                       # FastHTML UI components
 │   ├── __init__.py           # Public exports
 │   ├── base.py               # Shared utilities
@@ -73,21 +93,29 @@ dialeng/
 │       ├── code_cell.py      # CodeCellView (Monaco editor + output)
 │       ├── note_cell.py      # NoteCellView
 │       └── prompt_cell.py    # PromptCellView
-├── core/                     # Extension infrastructure (NEW)
+├── core/                     # Extension infrastructure
 │   ├── __init__.py           # Public exports
 │   ├── dispatch.py           # Type dispatch (render_cell, cell_to_llm_messages)
 │   ├── callbacks.py          # 2-way callback system (ExecutionContext, Callback)
 │   ├── registry.py           # Extension registry (register_callback, etc.)
 │   └── extensions.py         # Extension loading from extensions/
-├── extensions/               # User extensions (NEW)
+├── extensions/               # User extensions
 │   ├── __init__.py
 │   └── example_callbacks.py  # Example: ExecutionTimingCallback
-├── services/                 # Feature implementations
+├── services/                 # Runtime and feature implementations
+│   ├── runtime_registry.py   # Notebook ownership, lifecycle, revisions, locks
+│   ├── persistence_service.py # Atomic saves and opt-in autosave/recovery
+│   ├── broadcast_service.py  # Per-client bounded outbound queues
+│   ├── websocket_protocol.py # Framework-light control protocol
+│   ├── notebook_mutation_service.py # Canonical structural operations
+│   ├── performance_service.py
+│   ├── file_listing_cache.py
+│   ├── outline_cache.py
 │   ├── kernel/               # Python code execution
 │   │   ├── kernel_service.py
 │   │   ├── execution_queue.py
 │   │   └── subprocess_kernel.py
-│   ├── llm_service.py        # LLM provider abstraction
+│   ├── llm/                  # Provider manager and provider adapters
 │   ├── dialoghelper_service.py  # Remote notebook API
 │   ├── credential_service.py
 │   └── dialeng_config.py
@@ -137,37 +165,33 @@ CSS is split into logical files that are loaded in order:
 }
 ```
 
-### JavaScript (`static/js/app.js`)
+### JavaScript (`static/js/`)
 
-Single file with clear section headers:
+`app.js` remains the public browser coordinator while stateful primitives are
+extracted incrementally. Scripts load before `app.js`, expose a deliberately
+small global API, and have Node-based unit tests.
 
 ```javascript
-// ==================== Global State ====================
-const monacoEditors = {};
-let focusedCellId = null;
+const revisions = new DialengRevisionTracker(['notebook', 'kernel', 'output']);
+const structure = new DialengStructureController();
+const chunks = new DialengFrameBatcher({onFlush: renderPromptChunk});
 
-// ==================== Monaco Editor Management ====================
-function initMonacoEditor(cellId, mode) { ... }
-function syncMonacoToTextarea(cellId) { ... }
-
-// ==================== Cell Focus & Selection ====================
-function setFocusedCell(cellId) { ... }
-
-// ==================== Keyboard Shortcuts ====================
-document.addEventListener('keydown', e => { ... });
-
-// ==================== Preview/Edit Toggle (Event Delegation) ====================
-// Uses event delegation for reliable double-click editing
-document.addEventListener('dblclick', function(e) { ... });
-
-// ==================== WebSocket & Streaming ====================
-function connectWebSocket(notebookId) { ... }
-
-// ==================== Initialization ====================
-document.addEventListener('DOMContentLoaded', () => { ... });
+dialengEvents.register('kernel_snapshot', applyKernelSnapshot);
+dialengEvents.register('notebook_deleted', handleNotebookDeleted);
 ```
 
-**Key Pattern - Event Delegation:**
+Key boundaries:
+
+- `notebook_client.js` rejects duplicate events and detects revision gaps.
+- `event_dispatcher.js` lets handlers be registered and tested by event type.
+- `structure_controller.js` validates backend-authored cell order before DOM
+  reconciliation.
+- `execution_ui.js` coalesces prompt chunks to one frame or byte threshold.
+- `notifications.js` owns toast timing and bounded status history.
+- `browser_diagnostics.js` reports only content-free health counters.
+
+Event delegation remains the preferred DOM pattern because it survives
+granular WebSocket changes and HTMX swaps:
 
 The double-click editing uses event delegation to work reliably even after OOB swaps:
 
@@ -281,52 +305,27 @@ def CellView(cell, notebook_id: str):
 ### Structure
 
 ```python
-# Imports
-from fasthtml.common import *
-from dialeng.ui import CellView, NotebookPage, ...
-from dialeng.services import ...
-
-# Constants
-SOLVEIT_VER = 2
-DIALENG_CONFIG = load_config()
-AVAILABLE_DIALOG_MODES = ...
-
-# Data Models
-class CellType(str, Enum): ...
-class Cell: ...
-class Notebook: ...
-
-# Kernel Service
+# Local configuration and service composition
+runtime_registry = NotebookRuntimeRegistry()
+performance_monitor = PerformanceMonitor()
+autosave_manager = AutosaveManager(...)
+notebook_mutation_service = NotebookMutationService()
 kernel_service = KernelService()
-execution_queues: Dict[str, ExecutionQueue] = {}
-
-# Storage
-notebooks: Dict[str, Notebook] = {}
-ws_connections: Dict[str, List[Any]] = {}
-
-# Helper Functions
-def get_notebook(nb_id): ...
-def save_notebook(nb_id): ...
-async def broadcast_to_notebook(nb_id, content): ...
+connections = BroadcastManager()
 
 # FastHTML App
 app, rt = fast_app(hdrs=(...))
 
-# Static File Serving
-@rt("/static/{path:path}")
+# Dependency-injected route modules
+register_diagnostics_routes(rt, ...)
+register_websocket_routes(app, ...)
 
-# Routes
-@rt("/")
-@rt("/dialeng/{nb_id}")
+# Compatibility and feature routes remain registered in the composition root
 @rt("/dialeng/{nb_id}/cell/{cid}/run")
-# ... many more routes
+async def post(...): ...
 
-# WebSocket Handler
-@app.ws("/dialeng/{nb_id}/ws")
-
-# Server
-if __name__ == "__main__":
-    serve()
+# ASGI lifespan owns startup probes, watchers, autosave flush, and shutdown
+app.router.lifespan_context = _app_lifespan
 ```
 
 ### Key Patterns
@@ -336,29 +335,31 @@ if __name__ == "__main__":
 @rt("/dialeng/{nb_id}/cell/{cid}/run")
 async def post(nb_id: str, cid: str, source: str = None):
     nb = get_notebook(nb_id)
-    cell = next((c for c in nb.cells if c.id == cid), None)
-    # ... execution logic
-    return CellView(cell, nb_id)
+    queue = get_execution_queue(nb_id)
+    queue.queue_cell(nb_id, nb.get_cell(cid))
+    return ""
 ```
 
 **2. WebSocket Broadcasting:**
 ```python
 async def broadcast_to_notebook(nb_id: str, content):
-    """Broadcast HTML to all WebSocket connections for a notebook."""
-    if nb_id in ws_connections and ws_connections[nb_id]:
-        msg = to_xml(content) if hasattr(content, '__ft__') else str(content)
-        for send in list(ws_connections[nb_id]):
-            try:
-                await send(msg)
-            except:
-                pass
+    await broadcast_manager.broadcast_text(nb_id, to_xml(content))
 ```
 
-**3. OOB Updates (Multi-Tab Collaboration):**
+`BroadcastManager` owns one bounded queue and writer task per browser. A slow
+tab cannot delay another tab, coalescible snapshots replace stale queued values,
+and non-droppable overflow disconnects the client so it can recover cleanly.
+
+**3. Backend-authoritative structural updates:**
 ```python
-# When a cell changes, broadcast to all connected clients
-await broadcast_to_notebook(nb_id, AllCellsOOB(nb))
+result = notebook_mutation_service.move(nb, cell_id, direction=-1)
+if result:
+    _touch_notebook_revision(nb_id, "cell_move")
+    await broadcast_json(nb_id, _cell_move_payload(nb, nb_id, cell_id))
 ```
+
+The browser reorders existing cell DOM nodes from `ordered_cell_ids`; it does
+not replace `#cells` or recreate unrelated Monaco editors.
 
 ---
 
@@ -411,7 +412,7 @@ User clicks Run → Button onclick → startStreaming()
               appendToResponse(chunk)      finishStreaming()
 ```
 
-### OOB Update (Multi-Tab Collaboration)
+### Revisioned Update (Multi-Tab Collaboration)
 
 ```
 Tab 1: User edits cell
@@ -425,12 +426,15 @@ Route handler saves + broadcasts
       ┌─────┴─────┐
       ▼           ▼
    Tab 1       Tab 2
-(response)  (WebSocket OOB)
+(response)  (revisioned WebSocket event)
       │           │
       ▼           ▼
-  (no swap)   hx-swap-oob=true
-              replaces #cells
+  (no swap)   update source/model in place
 ```
+
+Structural events include canonical cell order, cell versions, a stream
+revision, and an event ID. Duplicate events are ignored; revision gaps trigger
+one authoritative recovery fetch.
 
 ---
 

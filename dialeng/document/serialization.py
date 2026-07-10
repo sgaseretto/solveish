@@ -136,13 +136,9 @@ def _jupyter_to_cell(jcell: dict, index: int = 0) -> Cell:
                 ))
 
             elif out_type == 'execute_result':
-                data = jout.get('data', {})
-                text = data.get('text/plain', '')
-                if isinstance(text, list):
-                    text = ''.join(text)
                 outputs.append(CellOutput(
                     output_type='execute_result',
-                    content=text,
+                    content=jout.get('data', {}),
                     metadata=jout.get('metadata')
                 ))
 
@@ -216,18 +212,22 @@ def load_notebook(path: Path) -> Notebook:
     # Extract metadata
     metadata = nb_data.metadata or {}
 
-    return Notebook(
+    notebook = Notebook(
         id=path.stem,
         title=metadata.get('title', path.stem),
         cells=cells,
         path=path,
         dialog_mode=metadata.get('solveit_dialog_mode', 'learning'),
-        model=metadata.get('dialeng_model', None),
+        model=metadata.get('dialeng_model') or metadata.get('solveit_model'),
+        llm_provider=metadata.get('dialeng_provider') or None,
         solveit_ver=metadata.get('solveit_ver', 2),
         safe_mode=metadata.get('dialeng_safe_mode', False),
         kernel_type=metadata.get('dialeng_kernel_type', 'local'),
         colab_runtime_type=metadata.get('dialeng_colab_runtime_type', 'cpu')
     )
+    from dialeng.services.persistence_service import file_signature
+    notebook.disk_signature = file_signature(path)
+    return notebook
 
 
 def save_notebook(notebook: Notebook, path: Optional[Path] = None):
@@ -249,6 +249,8 @@ def save_notebook(notebook: Notebook, path: Optional[Path] = None):
             'title': notebook.title,
             'solveit_dialog_mode': notebook.dialog_mode,
             'dialeng_model': notebook.model,
+            'solveit_model': notebook.model,
+            'dialeng_provider': notebook.llm_provider,
             'solveit_ver': notebook.solveit_ver,
             'dialeng_safe_mode': notebook.safe_mode,
             'dialeng_kernel_type': notebook.kernel_type,
@@ -267,13 +269,22 @@ def save_notebook(notebook: Notebook, path: Optional[Path] = None):
         'nbformat_minor': 5
     }
 
-    # Write to file
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(nb_dict, f, indent=1, ensure_ascii=False)
+    # Write a complete temporary file beside the target, then atomically replace it.
+    from dialeng.services.persistence_service import (
+        ExternalFileChangedError,
+        atomic_write_json,
+        file_signature,
+    )
+    current_signature = file_signature(path)
+    if notebook.disk_signature is not None and current_signature != notebook.disk_signature:
+        raise ExternalFileChangedError(
+            f"{path.name} changed on disk after Dialeng loaded it."
+        )
+    signature = atomic_write_json(path, nb_dict)
 
     # Update notebook path and modified flag
     notebook.path = path
+    notebook.disk_signature = signature
     notebook.modified = False
 
 

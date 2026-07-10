@@ -1,92 +1,95 @@
-"""LLM Service coordinator - Routes requests to the appropriate provider.
+"""Provider-neutral LLM coordinator for stateless prompt-cell execution."""
+from __future__ import annotations
 
-This is the slim coordinator that keeps the same public API as the original
-monolithic LLMService. It owns:
-- Provider selection (credential detection)
-- Mode -> system prompt mapping
-- Model name mapping via config.get_api_model_name()
-- Prompt parsing (parse_prompt, substitute_variables) and tool registry interaction
-- Error wrapping around provider streaming
-- last_usage / last_cost properties delegating to provider.last_result
-"""
-from typing import AsyncIterator, List, Dict, Any, Optional
+import asyncio
 import logging
+from typing import Any, AsyncIterator, Dict, List, Optional
 
-from .constants import SYSTEM_PROMPTS
 from .base_provider import BaseLLMProvider
+from .constants import SYSTEM_PROMPTS
 
 logger = logging.getLogger(__name__)
 
 
 class LLMService:
-    """Service for streaming LLM responses.
+    """Resolve and cache an authenticated provider for each prompt request."""
 
-    Supports two providers:
-    - claudette: Direct Anthropic API or AWS Bedrock (requires credentials)
-    - claude_agent_sdk: Claude Code subscription via SDK directly (most isolated)
+    def __init__(self) -> None:
+        self._providers: Dict[str, BaseLLMProvider] = {}
+        self._provider_locks: Dict[str, asyncio.Lock] = {}
+        self._last_provider_key: Optional[str] = None
 
-    Usage:
-        service = LLMService()
-        async for item in service.stream_response(prompt, context, "standard"):
-            if item["type"] == "chunk":
-                print(item["content"], end="")
-            elif item["type"] == "error":
-                print(f"Error: {item['content']}")
-    """
-
-    def __init__(self):
-        self._initialized = False
-        self._provider_name: Optional[str] = None
-        self._backend: Optional[str] = None  # "anthropic_api" or "bedrock"
-        self._provider: Optional[BaseLLMProvider] = None
-
-    def _detect_credentials(self):
-        """Detect credentials and store provider/backend info."""
-        from dialeng.services.credential_service import detect_credentials
-        cred_status = detect_credentials()
-        self._provider_name = cred_status.provider
-        self._backend = cred_status.backend
-        return cred_status
-
-    async def _ensure_initialized(self):
-        """Lazy initialization - detect provider and create appropriate instance."""
-        if self._initialized:
-            return
-
-        cred_status = self._detect_credentials()
-        logger.info(f"LLM Service initializing with provider: {self._provider_name}, backend: {self._backend}")
-
-        from dialeng.core.registry import registry as ext_registry
-
-        # Try registry-based lookup
-        reg = ext_registry.providers.get(self._provider_name)
-        if reg:
-            # Construct provider — pass backend kwarg for claudette
-            if self._provider_name == "claudette":
-                self._provider = reg.factory(backend=self._backend or "anthropic_api")
-            else:
-                self._provider = reg.factory()
-            await self._provider.initialize()
-            self._initialized = True
-            logger.info(f"Initialized with {type(self._provider).__name__} via registry")
-        elif self._provider_name and self._provider_name != "mock_only":
-            logger.warning(f"Provider '{self._provider_name}' not found in registry, falling back to mock")
-            self._initialized = True
+    def invalidate_providers(self, provider_id: Optional[str] = None) -> None:
+        """Discard initialized providers after auth or configuration changes."""
+        if provider_id:
+            self._providers.pop(provider_id, None)
+            self._provider_locks.pop(provider_id, None)
         else:
-            self._initialized = True
-            logger.warning("LLM Service initialized in mock-only mode (no credentials)")
+            self._providers.clear()
+            self._provider_locks.clear()
+        if provider_id is None or self._last_provider_key == provider_id:
+            self._last_provider_key = None
 
-    def _resolve_model_and_prompt(self, mode: str, model: str):
-        """Resolve system prompt from mode and API model name from config.
+    @staticmethod
+    def _inventory():
+        from dialeng.services.credential_service import detect_credential_inventory
+        return detect_credential_inventory()
 
-        Returns:
-            (system_prompt, api_model) tuple
-        """
+    def resolve_provider_id(self, provider_id: Optional[str]) -> str:
+        return provider_id or self._inventory().default_provider()
+
+    async def _get_provider(self, provider_id: Optional[str]) -> tuple[str, BaseLLMProvider]:
+        provider_id = self.resolve_provider_id(provider_id)
+        status = self._inventory().get(provider_id)
+        if not status or provider_id == "mock_only":
+            raise RuntimeError("No authenticated LLM provider is selected")
+        if not status.authenticated:
+            raise RuntimeError(f"{status.label} is not authenticated")
+        if provider_id in self._providers:
+            self._last_provider_key = provider_id
+            return provider_id, self._providers[provider_id]
+
+        lock = self._provider_locks.setdefault(provider_id, asyncio.Lock())
+        async with lock:
+            if provider_id in self._providers:
+                self._last_provider_key = provider_id
+                return provider_id, self._providers[provider_id]
+
+            from dialeng.core.registry import registry as extension_registry
+
+            registration = extension_registry.providers.get(status.provider)
+            if not registration:
+                raise RuntimeError(f"LLM provider '{status.provider}' is not registered")
+            if status.provider == "claudette":
+                provider = registration.factory(backend=status.backend)
+            else:
+                provider = registration.factory()
+            await provider.initialize()
+            self._providers[provider_id] = provider
+            self._last_provider_key = provider_id
+            logger.info(
+                "Initialized LLM provider (selection=%s, provider=%s, backend=%s)",
+                provider_id,
+                status.provider,
+                status.backend,
+            )
+            return provider_id, provider
+
+    @staticmethod
+    def _resolve_model_and_prompt(mode: str, model: str, provider_id: str):
         from dialeng.services.dialeng_config import get_config
-        config = get_config()
 
+        config = get_config()
+        valid_model = config.validate_model(provider_id, model)
+        if model != valid_model:
+            raise ValueError(f"Model '{model}' is not available for provider '{provider_id}'")
         system_prompt = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS["standard"])
-        api_model = config.get_api_model_name(model, self._backend)
+        api_model = config.get_api_model_name(valid_model, provider_id)
+
+        if provider_id == "openai_codex" and config.skills_enabled:
+            from dialeng.services.skill_service import get_skill_service
+            skill_service = get_skill_service()
+            system_prompt = skill_service.augment_system_prompt(system_prompt)
 
         return system_prompt, api_model, config
 
@@ -96,50 +99,27 @@ class LLMService:
         context_messages: List[Dict],
         mode: str,
         model: str = "claude-sonnet-4-5",
-        use_thinking: bool = False
+        use_thinking: bool = False,
+        *,
+        provider_id: Optional[str] = None,
+        cancel_event: Any = None,
     ) -> AsyncIterator[Dict]:
-        """Stream LLM response via the appropriate provider.
-
-        Args:
-            prompt: The user's prompt/question
-            context_messages: Previous conversation context as list of
-                             {"role": "user"/"assistant", "content": "..."} dicts
-            mode: One of "learning", "concise", "standard"
-            model: The Claude model to use (e.g., "claude-sonnet-4-5", "claude-haiku-4-5")
-            use_thinking: Whether to enable thinking mode (extended thinking)
-
-        Yields:
-            Dict with "type" key:
-            - {"type": "thinking_start"} - Start of thinking phase
-            - {"type": "thinking", "content": "..."} - Thinking content
-            - {"type": "thinking_end"} - End of thinking phase
-            - {"type": "chunk", "content": "..."} - Response chunk
-            - {"type": "error", "content": "..."} - Error occurred
-        """
         try:
-            await self._ensure_initialized()
-
-            if not self._provider:
-                yield {"type": "error", "content": "No LLM credentials available. Please use Mock mode."}
-                return
-
-            system_prompt, api_model, config = self._resolve_model_and_prompt(mode, model)
-
-            async for item in self._provider.stream(
+            provider_id, provider = await self._get_provider(provider_id)
+            system_prompt, api_model, config = self._resolve_model_and_prompt(mode, model, provider_id)
+            async for item in provider.stream(
                 prompt=prompt,
                 context_messages=context_messages,
                 system_prompt=system_prompt,
                 model=api_model,
                 use_thinking=use_thinking,
                 config=config,
+                cancel_event=cancel_event,
             ):
                 yield item
-
-        except ImportError as e:
-            yield {"type": "error", "content": str(e)}
-        except Exception as e:
-            logger.exception(f"LLM error: {e}")
-            yield {"type": "error", "content": f"LLM Error: {str(e)}"}
+        except Exception as exc:
+            logger.exception("LLM request failed (provider=%s): %s", provider_id, exc)
+            yield {"type": "error", "content": f"LLM Error: {exc}"}
 
     async def stream_response_with_tools(
         self,
@@ -151,128 +131,94 @@ class LLMService:
         kernel=None,
         notebook_id: str = "",
         max_steps: int = 5,
-        include_builtins: bool = True
+        include_builtins: bool = True,
+        *,
+        provider_id: Optional[str] = None,
+        cancel_event: Any = None,
     ) -> AsyncIterator[Dict]:
-        """Stream LLM response with tool calling support.
-
-        This method handles:
-        1. Parsing $`var` and &`func` syntax in prompt
-        2. Substituting variable values from kernel
-        3. Building tool schemas from functions
-        4. Running the tool loop (up to max_steps iterations)
-
-        Args:
-            prompt: User's prompt (may contain $`var` and &`func` syntax)
-            context_messages: Previous conversation context
-            mode: Dialog mode (learning, concise, standard)
-            model: Claude model to use
-            use_thinking: Enable extended thinking
-            kernel: SubprocessKernel instance for tool execution
-            notebook_id: Notebook identifier
-            max_steps: Maximum tool loop iterations (default 5)
-            include_builtins: Include built-in file tools
-
-        Yields:
-            Dicts with 'type' key:
-            - {"type": "var_substituted", "name": ..., "value": ...}
-            - {"type": "tool_available", "name": ..., "schema": ...}
-            - {"type": "thinking_start/thinking/thinking_end", ...}
-            - {"type": "chunk", "content": ...}
-            - {"type": "tool_call", "id": ..., "name": ..., "input": ...}
-            - {"type": "tool_result", "id": ..., "name": ..., "result": ...}
-            - {"type": "error", "content": ...}
-        """
         from dialeng.services.prompt_parser import parse_prompt, substitute_variables
         from dialeng.services.tool_registry import get_tool_registry
 
         try:
-            await self._ensure_initialized()
-
-            # Parse prompt for special syntax
+            provider_id, provider = await self._get_provider(provider_id)
             var_names, func_names = parse_prompt(prompt)
-
-            # Also parse context_messages for $`var` and &`func` syntax
-            for msg in context_messages:
-                content = msg.get('content', '')
-                # content may be a list of blocks (multimodal) — extract text only
+            for message in context_messages:
+                content = message.get("content", "")
                 if isinstance(content, list):
-                    content = ' '.join(
-                        b.get('text', '') for b in content
-                        if isinstance(b, dict) and b.get('type') == 'text'
+                    content = " ".join(
+                        block.get("text", "")
+                        for block in content
+                        if isinstance(block, dict) and block.get("type") == "text"
                     )
-                if content:
-                    ctx_vars, ctx_funcs = parse_prompt(content)
-                    for v in ctx_vars:
-                        if v not in var_names:
-                            var_names.append(v)
-                    for f in ctx_funcs:
-                        if f not in func_names:
-                            func_names.append(f)
+                if not content:
+                    continue
+                context_vars, context_funcs = parse_prompt(content)
+                var_names.extend(name for name in context_vars if name not in var_names)
+                func_names.extend(name for name in context_funcs if name not in func_names)
 
-            # If no special syntax and no builtins, fall back to regular streaming
-            if not var_names and not func_names and not include_builtins:
-                async for item in self.stream_response(prompt, context_messages, mode, model, use_thinking):
-                    yield item
-                return
-
-            # Substitute variables if kernel is available
             processed_prompt = prompt
             if var_names and kernel:
-                processed_prompt, var_info = await substitute_variables(prompt, kernel, notebook_id, var_names)
-                for name, info in var_info.items():
-                    if info.get('exists'):
+                processed_prompt, variable_info = await substitute_variables(
+                    prompt, kernel, notebook_id, var_names
+                )
+                for name, info in variable_info.items():
+                    if info.get("exists"):
                         yield {
                             "type": "var_substituted",
                             "name": name,
-                            "var_type": info.get('var_type'),
-                            "value": info.get('repr', '')[:100]
+                            "var_type": info.get("var_type"),
+                            "value": info.get("repr", "")[:100],
                         }
 
-            # Get tool registry and build tool list
             registry = get_tool_registry()
-
             tools = await registry.get_tools_for_prompt(
                 func_names,
                 kernel,
                 notebook_id,
-                include_builtins=include_builtins
+                include_builtins=include_builtins,
             )
 
-            # Notify about available tools
+            # Skills have a narrow reader even if general built-in tools are off.
+            if provider_id == "openai_codex":
+                from dialeng.services.dialeng_config import get_config
+                from dialeng.services.skill_service import get_skill_service
+
+                if get_config().skills_enabled and get_skill_service().model_skills:
+                    schema = registry.get_builtin_schema("read_skill")
+                    if schema and all(tool.get("name") != "read_skill" for tool in tools):
+                        tools.append(schema)
+
             for tool in tools:
-                if hasattr(registry, "resolve_tool_display_name"):
-                    display_name = registry.resolve_tool_display_name(notebook_id, tool['name'])
-                else:
-                    display_name = tool['name']
                 yield {
                     "type": "tool_available",
-                    "name": display_name,
-                    "description": tool.get('description', '')[:100]
+                    "name": registry.resolve_tool_display_name(notebook_id, tool["name"]),
+                    "description": tool.get("description", "")[:100],
                 }
 
-            # If no tools or provider doesn't need tool loop, fall back to regular streaming
             if not tools:
                 async for item in self.stream_response(
-                    processed_prompt, context_messages, mode, model, use_thinking
+                    processed_prompt,
+                    context_messages,
+                    mode,
+                    model,
+                    use_thinking,
+                    provider_id=provider_id,
+                    cancel_event=cancel_event,
                 ):
                     yield item
                 return
 
-            pyrun_token = None
-            if hasattr(registry, "push_pyrun_context"):
-                pyrun_token = registry.push_pyrun_context(
-                    notebook_id=notebook_id,
-                    kernel=kernel,
-                    func_names=func_names,
-                    include_builtins=include_builtins,
-                )
-
+            pyrun_token = registry.push_pyrun_context(
+                notebook_id=notebook_id,
+                kernel=kernel,
+                func_names=func_names,
+                include_builtins=include_builtins,
+            )
             try:
-                # Resolve model/prompt for tool calling
-                system_prompt, api_model, config = self._resolve_model_and_prompt(mode, model)
-
-                # Delegate to provider's stream_with_tools
-                async for item in self._provider.stream_with_tools(
+                system_prompt, api_model, config = self._resolve_model_and_prompt(
+                    mode, model, provider_id
+                )
+                async for item in provider.stream_with_tools(
                     prompt=processed_prompt,
                     context_messages=context_messages,
                     system_prompt=system_prompt,
@@ -284,36 +230,27 @@ class LLMService:
                     notebook_id=notebook_id,
                     registry=registry,
                     max_steps=max_steps,
+                    cancel_event=cancel_event,
                 ):
                     yield item
             finally:
-                if pyrun_token is not None and hasattr(registry, "reset_pyrun_context"):
-                    registry.reset_pyrun_context(pyrun_token)
-
-        except Exception as e:
-            logger.exception(f"Tool-enabled LLM error: {e}")
-            yield {"type": "error", "content": f"Tool LLM Error: {str(e)}"}
+                registry.reset_pyrun_context(pyrun_token)
+        except Exception as exc:
+            logger.exception("Tool-enabled LLM request failed (provider=%s): %s", provider_id, exc)
+            yield {"type": "error", "content": f"Tool LLM Error: {exc}"}
 
     def get_provider(self) -> str:
-        """Get the current provider name (for debugging/logging)."""
-        if self._provider_name is None:
-            self._detect_credentials()
-        return self._provider_name
+        return self._last_provider_key or self._inventory().default_provider()
 
     @property
     def last_usage(self) -> Optional[Any]:
-        """Get usage stats from the last API call."""
-        if self._provider:
-            return self._provider.last_result.usage
-        return None
+        provider = self._providers.get(self._last_provider_key or "")
+        return provider.last_result.usage if provider else None
 
     @property
     def last_cost(self) -> Optional[float]:
-        """Get cost from the last API call (in USD)."""
-        if self._provider:
-            return self._provider.last_result.cost
-        return None
+        provider = self._providers.get(self._last_provider_key or "")
+        return provider.last_result.cost if provider else None
 
 
-# Global instance for convenience
 llm_service = LLMService()

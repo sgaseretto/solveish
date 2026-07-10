@@ -9,9 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Cell Mutation And Jupyter Output Reliability
+- Prompt and code run controls now use one explicit running/terminal-state transition, so completion, cancellation, errors, and programmatic starts consistently restore an enabled Run button; prompt reruns no longer silently fail after switching from Mock to a real provider
+- Normal toolbar runs and Shift+Enter now advance exactly once to the next cell without jumping to the top of long notebooks; prompt completion no longer performs a late full-cell replacement or backend-directed focus change
+- Prompt input edits now preserve the assistant response and execution metadata, treating both sides as independently editable notebook context while code and shell edits continue to invalidate stale runtime output
+- Prompt-response editing now keeps separate backend and draft values, saves through one explicit idempotent request, defers conflicting WebSocket updates during active edits, and restores the authoritative response instead of silently displaying or persisting an empty answer
+- Delayed markdown-render responses are version-guarded so an older render cannot repaint a newer prompt response
+- Added a repeatable browser QA matrix covering editing, type transitions, structural operations, collaboration, queueing, prompt cells, Jupyter outputs, and repository smoke notebooks
+- Vendored the critical HTMX runtime and versioned first-party static assets so notebook mutations do not silently stop when public CDNs are unavailable or a browser caches stale JavaScript
+- Separated Jupyter `stdout`/`stderr` payload channels from the WebSocket `output` revision stream, eliminating false recovery on normal code execution after reload
+- Cell header clicks now deterministically enter command mode, Note/Prompt edits explicitly commit before leaving edit mode, and destructive shortcuts target the selected cell instead of stale Monaco focus
+- Implemented the advertised Code/Note/Prompt type shortcuts with guarded idempotent mutations, serialized rapid adds, and latest-source injection at HTMX request configuration time
+- Local kernel errors now render one structured traceback instead of duplicate stderr and error tracebacks
+- Structural mutations now use a dedicated `structure_revision`, so delayed source/output commits cannot reject the next-cell add dispatched by Shift+Enter
+- Notebook WebSocket event sequences are now independent from durable document revisions, preventing silent metadata changes and multiple UI events per mutation from producing false gaps or duplicates
+- Cell runs now serialize fresh-source persistence with structural mutations, preserving notebook event order and preventing false WebSocket revision-gap recovery during execution
+- Browser mutation tokens now advance from accepted WebSocket events instead of remaining pinned to the startup snapshot, and high-volume WebSocket logs are opt-in through `window.DIALENG_DEBUG_WEBSOCKET`
+- Cell type changes now submit the current source, expected cell version, and expected old type as one serialized mutation, then broadcast a revisioned `cell_type_change` event instead of unversioned OOB HTML
+- Note and prompt source saves now use granular revisioned updates, preventing a blur save from replacing an open type selector or leaving later add/delete operations on a stale notebook revision
+- Empty notebooks are now a valid structural state, so deleting the final cell removes it from the browser instead of leaving an undeletable ghost cell
+- `execute_result` retains its complete Jupyter MIME bundle and output type through local/Colab capture, live transport, rendering, and `.ipynb` round-tripping
+- Local kernels now preserve `display_id` and `update_display_data`; live rendering honors `clear_output(wait=True)`, output order, stdout/stderr identity, and display boundaries
+- MIME rendering now handles legacy line arrays, binary formatter images, nested image metadata, WebP, JSON strings, accessible image alt text, and explicit unsupported-widget feedback
+- Added protocol-level reproduction of code → note → prompt → add → delete, empty-structure controller coverage, output normalization/round-trip tests, and a real local-kernel display-update test
+
+#### Performance, Reliability, and UX Planning
+- Added a staged engineering roadmap covering instrumentation, non-blocking startup, WebSocket revision recovery and backpressure, runtime lifecycle consolidation, large-notebook rendering, prompt-context caching, diagnostics, and fault testing
+- Documented autosave and recovery as optional, disabled-by-default persistence features while preserving explicit save as the default workflow
+
+#### Performance, Reliability, and Recovery
+- Added bounded server/browser performance diagnostics, route instrumentation, event-loop lag monitoring, startup/provider/Colab timings, and reproducible performance benchmarks
+- Moved remote provider validation and Colab initialization behind application readiness and consolidated background ownership in the ASGI lifespan
+- Added independent bounded WebSocket client queues, send timeouts, event coalescing, adjacent output batching, stable connection identity, and slow-client isolation
+- Added per-stream revisions, initial page revision baselines, event IDs, reconnect negotiation, gap detection, and one-shot authoritative notebook recovery without healthy-state snapshot polling
+- Added `NotebookRuntimeRegistry` lifecycle ownership, serialized notebook mutations, expected revisions, bounded idempotency keys, and deterministic teardown
+- Added atomic explicit notebook saves, external-change conflict detection, visible save status, and disabled-by-default debounced autosave with bounded recovery snapshots
+- Added lazy Monaco loading and viewport activation, off-screen editor disposal with retained models/view state, lazy rich images, content visibility, and large-output collapsing
+- Added versioned prompt-context caching and inspection, targeted file-listing invalidation, heading/namespace outline caches, and project filesystem watching
+- Added kernel/runtime diagnostics, browser long-task reporting, status history, explicit recovery actions, and cancellation feedback that distinguishes LLM cancellation from kernel interruption
+- Extracted dependency-injected diagnostics and WebSocket route modules, canonical notebook mutation operations, and independently tested browser revision, structure, batching, notification, and event-dispatch controllers
+- Added generated mixed structural-mutation invariant tests and explicit local-kernel process/queue cleanup to prevent leaked multiprocessing semaphores across repeated server reloads
+- Added `docs/how_it_works/21_performance_reliability.md` covering the implemented runtime, transport, persistence, rendering, caching, and diagnostics architecture
+
+#### Multi-Provider LLMs And OpenAI Codex
+- Added an independent provider inventory for Anthropic API, AWS Bedrock, Claude Code, OpenAI Codex subscription OAuth, and Mock instead of selecting one global credential winner
+- Added provider-qualified notebook metadata, backend-authoritative provider/model selectors, cross-tab `llm_status` synchronization, and unavailable-provider preservation without output loss
+- Refactored `LLMService` into a per-request provider manager with per-provider initialization locks, cancellation propagation, normalized usage/capability metadata, and provider-compatible model validation
+- Added a Dialeng-owned OpenAI Codex provider with stateless full-notebook requests, text/image conversion, WebSocket-first streaming with SSE fallback, bounded pre-stream retries, sequential tool loops, reasoning summaries, usage normalization, and active-stream cancellation
+- Added server-global OpenAI Codex PKCE OAuth with loopback and manual completion, JWT account validation, atomic private storage in `~/.dialeng/auth.json`, refresh-token rotation, logout, and `DIALENG_OPENAI_CODEX_ACCESS_TOKEN` precedence
+- Added project-scoped OpenAI Codex skill discovery under `.dialeng/skills/`, constrained `read_skill`, live mtime refresh, path/symlink validation, diagnostics, and prompt metadata hashes
+- Added idempotent `dialeng init [path] [--name NAME]` project initialization while preserving `dialeng --init` compatibility
+- Added Codex auth/provider/skill/project-init tests plus an opt-in clean `uv` wheel-install smoke test
+
 #### Colab Kernel Snapshot & Auth Visibility
 - Added a backend-authoritative `kernel_snapshot` payload carrying kernel liveness, queue state, notebook setup phase, Colab auth state, runtime id, and account email
-- Browser now polls `/dialeng/{nb_id}/kernel/snapshot` and also receives the same snapshot over WebSocket to recover cleanly after reconnects
+- Browser receives kernel snapshots over WebSocket and uses `/dialeng/{nb_id}/kernel/snapshot` only for initial or explicit recovery paths
 - Kernel modal now shows the signed-in Colab account email when a persisted Google session is active
 - OAuth callback now validates single-use `state` tokens before exchanging the authorization code
 
@@ -88,6 +140,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added structured operation logs with correlation ids for cell source/output commits, cell runs, file saves, and kernel setup
 
 ### Fixed
+
+#### Revisioned WebSocket Recovery
+- FastHTML WebSocket control messages now use the required outer `msg` envelope, fixing join, heartbeat, cancellation, and confirmation payload validation
+- WebSocket disconnect cleanup now uses handshake identity and mutates the stored client collection, preventing stale writer queues and inflated tab counts after reconnects
+- Kernel snapshots no longer advance notebook revisions they do not represent, preventing structural events such as cell deletion from being rejected as duplicates
+- Reconnecting tabs now compare durable revisions with the server and request a full recovery when they missed all intervening mutations
+- Uvicorn reload workers now inherit the CLI-selected project root through `DIALENG_NOTEBOOKS_DIR`
+- Malformed autosave recovery snapshots are validated and rejected before canonical notebook files are replaced
+
+#### Notebook Deletion Teardown
+- Notebook deletion now passes the notebook id when cancelling its execution queue, matching the queue service contract and preventing `500` errors from the file explorer
+- Server shutdown and the memory-only stop endpoint now use the same notebook-scoped queue cancellation contract
+- Notebook files are now unlinked only after attached runtime teardown succeeds, preventing failed cleanup from deleting and then implicitly recreating an empty notebook
+- Open tabs now receive a terminal `notebook_deleted` event, stop snapshot polling and WebSocket reconnects, and transition to a dedicated workspace empty state
+- Deleted notebook IDs are tombstoned so stale browser requests return `410 Gone`; only explicit notebook creation clears the tombstone
+- Missing notebook URLs no longer create notebooks implicitly
 
 #### Colab Connection Robustness
 - Removed the global "cleanup all runtimes before attach" behavior that could tear down unrelated Colab sessions on the same Google account

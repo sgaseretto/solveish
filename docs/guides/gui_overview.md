@@ -85,7 +85,8 @@ The dot updates in real-time via WebSocket and is initialized server-side, so re
 | **Outline toggle** | Opens/closes the outline sidebar. Keyboard: `Ctrl+Shift+O` / `Cmd+Shift+O` |
 | **Theme toggle** (sun/moon icon) | Switches between dark and light themes. Preference is saved to your browser. |
 | **Dialog Mode** selector | Dropdown to choose the AI conversation mode: **Mock** (no LLM calls), **Learning**, **Concise**, **Standard**. |
-| **Model** selector | Dropdown to pick which Claude model to use. Hidden when mode is "Mock". |
+| **Provider** selector | Chooses an authenticated LLM backend. The selection is saved in the notebook and synchronized across tabs. |
+| **Model** selector | Shows models compatible with the selected provider. Provider and model controls are hidden in Mock mode. |
 | **Safe Mode** button | Shield icon toggle. When active (green), shell commands are validated against an allowlist before execution. Requires `shfmt`. |
 | **Kernel** button | Shows current kernel type. Click to open kernel selection modal. |
 | **Restart** button | Restarts the Python/Colab kernel. All variables in memory are lost. |
@@ -123,6 +124,12 @@ If a `TEMPLATE.ipynb` exists in the directory (or any parent), its cells are use
 ### Deleting Files
 
 Hover over a notebook to reveal a trash icon on the right. Click it to open a confirmation modal before deleting.
+
+Deleting a notebook also stops its kernel and pending execution/setup work. If
+the notebook is open in one or more browser tabs, every tab is notified, stops
+reconnecting to that notebook, and moves to the Dialeng workspace screen. The
+workspace keeps the file explorer available so you can open another notebook
+or explicitly create a new one, including one with the same name.
 
 ### Refreshing
 
@@ -300,7 +307,7 @@ Keyboard shortcuts for collapse:
 
 | Button | What it does |
 |--------|-------------|
-| **Type selector** (dropdown) | Change the cell type (code, note, prompt, shell). The cell is re-rendered as the new type. |
+| **Type selector** (dropdown) | Change the cell type (code, note, prompt, shell). Current editor text is committed atomically and the cell is re-rendered as the new type. |
 | **Run** (▶) | Execute the cell. For code/shell: runs in kernel. For prompt: sends to AI. |
 | **Cancel** (⏹) | Stop execution (code/shell) or cancel AI generation (prompt). Only visible while running. |
 | **Move Up** (↑) | Move the cell one position up in the notebook. Keyboard: `Alt+↑` |
@@ -395,7 +402,12 @@ Settings are organized in collapsible groups:
 ### Model Defaults
 - **Bedrock Model**: Default model for Bedrock-based calls.
 - **Claude Code Model**: Model used for code-related tasks.
+- **OpenAI Codex Model**: Default model for the OpenAI Codex subscription provider.
 - **Default Dialog Mode**: Which mode new notebooks start in (Mock, Learning, Concise, Standard).
+
+### OpenAI Codex
+- **Connect OpenAI / Disconnect**: Manage the server-global Codex subscription OAuth session.
+- **Enable project skills**: Discover Codex skills from `.dialeng/skills/`.
 
 ### Tool Settings
 - **Max Tool Steps**: Slider (1-10) controlling how many tool-use rounds the AI can perform per prompt.

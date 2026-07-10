@@ -15,6 +15,18 @@
     position: relative;
     transition: opacity 0.05s ease-in;
 }
+.monaco-placeholder {
+    color: var(--text-primary);
+    font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+    font-size: 0.875rem;
+    line-height: 1.45;
+    margin: 0;
+    max-height: 600px;
+    min-height: 60px;
+    overflow: auto;
+    padding: 10px 14px;
+    white-space: pre-wrap;
+}
 
 /* ==========================================================================
    Focused Cell Indicator

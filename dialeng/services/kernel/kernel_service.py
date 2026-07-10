@@ -209,7 +209,11 @@ class KernelService:
                     # Append to cell's outputs
                     cell.outputs.append(output)
 
-                    if output.output_type in {'display_data', 'update_display_data'}:
+                    if output.output_type in {'display_data', 'update_display_data'} or (
+                        output.output_type == 'execute_result' and
+                        isinstance(output.content, dict) and
+                        any(mime != 'text/plain' for mime in output.content)
+                    ):
                         saw_rich_display = True
 
                     # Track errors

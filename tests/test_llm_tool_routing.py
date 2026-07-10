@@ -34,20 +34,29 @@ class _FakeRegistry:
             return [{"name": "view", "description": "View files", "input_schema": {"type": "object"}}]
         return []
 
+    def resolve_tool_display_name(self, _notebook_id, name):
+        return name
+
+    def push_pyrun_context(self, **_kwargs):
+        return None
+
+    def reset_pyrun_context(self, _token):
+        return None
+
 
 async def _collect(async_iterable):
     return [item async for item in async_iterable]
 
 
 def test_builtin_tools_are_routed_consistently_for_all_providers(monkeypatch):
-    for provider_name in ("claudette", "claude_agent_sdk"):
+    for provider_name in ("claudette", "claude_agent_sdk", "openai_codex"):
         service = LLMService()
         provider = _FakeProvider()
         registry = _FakeRegistry()
 
-        service._initialized = True
-        service._provider_name = provider_name
-        service._provider = provider
+        async def get_provider(_provider_id, provider=provider, provider_name=provider_name):
+            return provider_name, provider
+        monkeypatch.setattr(service, "_get_provider", get_provider)
 
         monkeypatch.setattr(
             "dialeng.services.tool_registry.get_tool_registry",
@@ -56,7 +65,7 @@ def test_builtin_tools_are_routed_consistently_for_all_providers(monkeypatch):
         monkeypatch.setattr(
             service,
             "_resolve_model_and_prompt",
-            lambda mode, model: ("system prompt", model, SimpleNamespace()),
+            lambda mode, model, provider_id: ("system prompt", model, SimpleNamespace()),
         )
 
         items = asyncio.run(
@@ -67,7 +76,8 @@ def test_builtin_tools_are_routed_consistently_for_all_providers(monkeypatch):
                     mode="standard",
                     model="claude-sonnet-4-5",
                     include_builtins=True,
-                    notebook_id="demo",
+                        notebook_id="demo",
+                        provider_id=provider_name,
                 )
             )
         )

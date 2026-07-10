@@ -7,9 +7,12 @@ and notebook/file navigation. Replaces the old flat file list.
 
 from fasthtml.common import *
 from pathlib import Path
+import time
 from typing import List, Tuple, Optional
 from urllib.parse import quote
 from dialeng.notebook_id import nb_id_from_relpath
+from dialeng.services.performance_service import performance_monitor
+from dialeng.services.file_listing_cache import directory_listing_cache
 from .icons import sprites as icon_sprites
 
 
@@ -23,24 +26,51 @@ def list_directory(path: Path, root: Path) -> Tuple[List[str], List[str], List[s
     Returns:
         Tuple of (folder_names, notebook_names, other_file_names), sorted alphabetically
     """
+    start = time.perf_counter()
     # Prevent directory traversal
     if not path.resolve().is_relative_to(root.resolve()):
+        performance_monitor.observe_duration(
+            "file_explorer.scan",
+            (time.perf_counter() - start) * 1000,
+            labels={"outcome": "rejected"},
+            record_event=False,
+        )
         return [], [], []
     if not path.is_dir():
+        performance_monitor.observe_duration(
+            "file_explorer.scan",
+            (time.perf_counter() - start) * 1000,
+            labels={"outcome": "missing"},
+            record_event=False,
+        )
         return [], [], []
 
-    folders = sorted(
-        d.name for d in path.iterdir()
-        if d.is_dir() and not d.name.startswith('.')
-        and d.name not in ('__pycache__', '.ipynb_checkpoints')
+    def scan():
+        folders: list[str] = []
+        notebooks: list[str] = []
+        other_files: list[str] = []
+        for entry in path.iterdir():
+            if entry.name.startswith('.'):
+                continue
+            if entry.is_dir():
+                if entry.name not in ('__pycache__', '.ipynb_checkpoints'):
+                    folders.append(entry.name)
+            elif entry.is_file() and entry.suffix == '.ipynb':
+                notebooks.append(entry.stem)
+            elif entry.is_file():
+                other_files.append(entry.name)
+        return sorted(folders), sorted(notebooks), sorted(other_files)
+
+    (folders, notebooks, other_files), cache_hit = directory_listing_cache.get(path, root, scan)
+    performance_monitor.increment(
+        "file_explorer.cache_hit" if cache_hit else "file_explorer.cache_miss"
     )
-    notebooks = sorted(
-        f.stem for f in path.iterdir()
-        if f.suffix == '.ipynb' and not f.name.startswith('.')
-    )
-    other_files = sorted(
-        f.name for f in path.iterdir()
-        if f.is_file() and f.suffix != '.ipynb' and not f.name.startswith('.')
+    performance_monitor.observe_duration(
+        "file_explorer.scan",
+        (time.perf_counter() - start) * 1000,
+        labels={"outcome": "cache_hit" if cache_hit else "scanned"},
+        record_event=False,
+        entry_count=len(folders) + len(notebooks) + len(other_files),
     )
     return folders, notebooks, other_files
 
@@ -327,6 +357,12 @@ def DeleteConfirmModal():
             H3("Delete File"),
             P("Are you sure you want to delete ", Span(id="delete-file-display", style="font-weight: 600;"), "?",
               style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 16px;"),
+            P(
+                "Deleting an open notebook stops its kernel and closes it in every browser tab.",
+                id="delete-notebook-warning",
+                cls="delete-notebook-warning",
+                style="display: none;",
+            ),
             Input(type="hidden", id="delete-file-path"),
             Div(
                 Button("Cancel", cls="btn btn-sm", onclick="hideDeleteConfirm()"),

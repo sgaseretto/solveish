@@ -389,14 +389,17 @@ sequenceDiagram
 | `stream` | `stream` | Text from stdout/stderr |
 | `display_data` | `display_data` | MIME bundle dict (`{image/png: ..., text/plain: ...}`) |
 | `update_display_data` | `update_display_data` | Updated MIME bundle (tqdm, widgets) |
-| `execute_result` (text only) | `execute_result` | Plain text repr of result |
-| `execute_result` (rich) | `display_data` | Promoted to display_data for rendering |
+| `execute_result` | `execute_result` | Complete MIME bundle, including text fallback and rich alternatives |
 | `error` | `error` | Exception name, value, traceback |
 | `clear_output` | `clear_output` | Clear previous outputs |
 
-### Rich `execute_result` Promotion
+### Lossless `execute_result` Handling
 
-When `execute_result` contains rich MIME types (`image/png`, `image/jpeg`, `image/svg+xml`, `text/html`, `image/gif`), we promote it to `display_data` so the rendering pipeline handles it correctly. This is important because some libraries produce rich content as the cell's return value rather than via `display()`.
+Dialeng keeps `execute_result` distinct from `display_data` and retains its
+complete MIME bundle. The renderer selects the best supported representation,
+while `.ipynb` persistence keeps all alternatives and the original output type.
+This matches Jupyter's model and avoids flattening DataFrames, images, or custom
+representations to `text/plain`.
 
 ## Rich Output Handling
 
@@ -429,11 +432,12 @@ The MIME bundle is converted to HTML using this priority:
 2. `image/svg+xml` → inline SVG
 3. `image/png` → `<img src="data:image/png;base64,...">` (newlines stripped from base64)
 4. `image/jpeg` → `<img src="data:image/jpeg;base64,...">`
-5. `image/gif` → `<img src="data:image/gif;base64,...">`
-6. `text/markdown` → raw markdown wrapper
+5. `image/gif` / `image/webp` → lazy `<img>`
+6. `text/markdown` → rendered markdown
 7. `text/latex` → wrapper for MathJax/KaTeX
-8. `application/json` → pretty-printed JSON
-9. `text/plain` → escaped plain text fallback
+8. Jupyter widget MIME → explicit unsupported-widget message
+9. `application/json` → pretty-printed JSON
+10. `text/plain` → escaped plain text fallback
 
 ### Kernel Initialization
 

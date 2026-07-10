@@ -99,19 +99,70 @@ def test_base_kernel_sync_project_files_contract_is_binary_safe():
 
 def test_subprocess_kernel_sync_project_files_keeps_same_binary_safe_contract():
     kernel = SubprocessKernel()
-
-    result = asyncio.run(
-        kernel.sync_project_files(
-            [("pkg/mod.py", "x = 1\n"), ("pkg/data.bin", b"\x00\xff")],
-            notebook_id="nb",
-            remote_root=".",
+    try:
+        result = asyncio.run(
+            kernel.sync_project_files(
+                [("pkg/mod.py", "x = 1\n"), ("pkg/data.bin", b"\x00\xff")],
+                notebook_id="nb",
+                remote_root=".",
+            )
         )
-    )
 
-    assert result["status"] == "noop"
-    assert result["file_count"] == 2
-    assert result["total_bytes"] == len("x = 1\n".encode("utf-8")) + 2
-    assert kernel.last_activity_reason == "sync_project_files:noop"
+        assert result["status"] == "noop"
+        assert result["file_count"] == 2
+        assert result["total_bytes"] == len("x = 1\n".encode("utf-8")) + 2
+        assert kernel.last_activity_reason == "sync_project_files:noop"
+    finally:
+        kernel.shutdown()
+
+
+def test_subprocess_kernel_shutdown_closes_process_and_queue_resources():
+    class FakeQueue:
+        def __init__(self):
+            self.messages = []
+            self.closed = False
+            self.joined = False
+
+        def put(self, message):
+            self.messages.append(message)
+
+        def close(self):
+            self.closed = True
+
+        def join_thread(self):
+            self.joined = True
+
+    class FakeProcess:
+        def __init__(self):
+            self.joined = False
+            self.closed = False
+
+        def join(self, timeout=None):
+            self.joined = True
+
+        def is_alive(self):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    kernel = SubprocessKernel(start_immediately=False)
+    process = FakeProcess()
+    input_queue = FakeQueue()
+    output_queue = FakeQueue()
+    kernel.process = process
+    kernel.input_queue = input_queue
+    kernel.output_queue = output_queue
+
+    kernel.shutdown()
+
+    assert input_queue.messages == [{"type": "shutdown"}]
+    assert input_queue.closed and input_queue.joined
+    assert output_queue.closed and output_queue.joined
+    assert process.joined and process.closed
+    assert kernel.process is None
+    assert kernel.input_queue is None
+    assert kernel.output_queue is None
 
 
 def test_kernel_service_executes_conforming_kernel_instances():

@@ -43,7 +43,11 @@ def TypeSelect(cell_id: str, current: str, nb_id: str):
         cls="type-select",
         name="cell_type",
         hx_post=f"/dialeng/{nb_id}/cell/{cell_id}/type",
-        hx_swap="none"
+        hx_include=f"#source-{cell_id}, #version-{cell_id}",
+        hx_vals=f'{{"expected_cell_type":"{current}"}}',
+        hx_swap="none",
+        onpointerdown=f"syncAllContent('{cell_id}')",
+        onfocus=f"syncAllContent('{cell_id}')",
     )
 
 

@@ -48,6 +48,23 @@ document.addEventListener('mousedown', (e) => {
     const cell = e.target.closest('.cell');
     if (cell) {
         const cellId = cell.id.replace('cell-', '');
+        const clickedHeader = e.target.closest('.cell-header');
+        const clickedHeaderControl = e.target.closest(
+            '.cell-header button, .cell-header select, .cell-header input, .cell-header a',
+        );
+
+        // A blank area of the cell header is the notebook's command-mode
+        // affordance. Explicitly release Monaco/textarea focus so subsequent
+        // keys are interpreted as cell shortcuts instead of source text.
+        if (clickedHeader && !clickedHeaderControl) {
+            const activeElement = document.activeElement;
+            const activeCell = activeElement?.closest?.('.cell');
+            const activeCellId = activeCell?.id?.replace('cell-', '');
+            if (!finishTextCellEdit(activeElement)) activeElement?.blur?.();
+            if (activeCellId && monacoEditors[activeCellId]) {
+                monacoEditors[activeCellId].trigger('keyboard', 'blur', {});
+            }
+        }
         if (cellId && typeof selectCell === 'function') {
             if (e.shiftKey) {
                 selectCell(cellId, {extend: true});
@@ -62,17 +79,16 @@ document.addEventListener('mousedown', (e) => {
 
 // ==================== Monaco Editor Management ====================
 const monacoEditors = {};
+const monacoModels = {};
+const monacoViewStates = new Map();
 const standaloneMonacoEditors = {};
+const runIntentTracker = new window.DialengRunIntentTracker();
+const setCellRunControlState = window.DialengSetCellRunControlState;
 let monacoReady = false;
-const pendingEditorInits = [];
-const pendingStandaloneEditorInits = [];
+let monacoLoadPromise = null;
 
-// Monaco AMD loader initialization
-require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' }});
-require(['vs/editor/editor.main'], function() {
-    monacoReady = true;
-
-    // Register kernel-backed completion provider for Python
+function configureMonaco() {
+    // Register kernel-backed completion provider for Python once.
     let _completionTimer = null;
     monaco.languages.registerCompletionItemProvider('python', {
         triggerCharacters: ['.'],
@@ -119,13 +135,39 @@ require(['vs/editor/editor.main'], function() {
             });
         }
     });
+}
 
-    // Initialize any editors that were requested before Monaco loaded
-    pendingEditorInits.forEach(args => initMonacoEditor(...args));
-    pendingEditorInits.length = 0;
-    pendingStandaloneEditorInits.forEach(args => initStandaloneMonacoEditor(...args));
-    pendingStandaloneEditorInits.length = 0;
-});
+function loadMonaco() {
+    if (monacoReady) return Promise.resolve(window.monaco);
+    if (monacoLoadPromise) return monacoLoadPromise;
+    monacoLoadPromise = new Promise((resolve, reject) => {
+        const loadEditor = () => {
+            window.require.config({
+                paths: {vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs'}
+            });
+            window.require(['vs/editor/editor.main'], () => {
+                monacoReady = true;
+                configureMonaco();
+                resolve(window.monaco);
+            }, reject);
+        };
+        if (window.require?.config) {
+            loadEditor();
+            return;
+        }
+        const loader = document.createElement('script');
+        loader.src = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.min.js';
+        loader.async = true;
+        loader.onload = loadEditor;
+        loader.onerror = () => reject(new Error('Failed to load Monaco editor'));
+        document.head.appendChild(loader);
+    }).catch(error => {
+        monacoLoadPromise = null;
+        console.error('[Editor] Monaco failed to load:', error);
+        throw error;
+    });
+    return monacoLoadPromise;
+}
 
 // ---------------------------------------------------------------------------
 // Monaco Editor Initialization
@@ -169,7 +211,7 @@ require(['vs/editor/editor.main'], function() {
 // ---------------------------------------------------------------------------
 function initMonacoEditor(cellId, mode = 'python') {
     if (!monacoReady) {
-        pendingEditorInits.push([cellId, mode]);
+        loadMonaco().then(() => initMonacoEditor(cellId, mode));
         return null;
     }
 
@@ -184,6 +226,7 @@ function initMonacoEditor(cellId, mode = 'python') {
             return monacoEditors[cellId];
         }
         // Container was replaced (HTMX re-render) — destroy old editor
+        monacoViewStates.set(cellId, monacoEditors[cellId].saveViewState());
         monacoEditors[cellId].dispose();
         delete monacoEditors[cellId];
     }
@@ -200,10 +243,17 @@ function initMonacoEditor(cellId, mode = 'python') {
 
     const isDark = (document.documentElement.getAttribute('data-theme') || 'dark') !== 'light';
     const langMap = { 'python': 'python', 'sh': 'shell' };
+    const language = langMap[mode] || 'python';
+    let model = monacoModels[cellId];
+    if (!model || model.isDisposed()) {
+        const notebookId = encodeURIComponent(window.NOTEBOOK_ID || 'notebook');
+        const modelUri = monaco.Uri.parse(`inmemory://dialeng/${notebookId}/${cellId}.${language === 'shell' ? 'sh' : 'py'}`);
+        model = monaco.editor.createModel(initialContent, language, modelUri);
+        monacoModels[cellId] = model;
+    }
 
     const editor = monaco.editor.create(container, {
-        value: initialContent,
-        language: langMap[mode] || 'python',
+        model,
         theme: isDark ? 'vs-dark' : 'vs',
         fontSize: 14,
         fontFamily: "'SF Mono', 'Fira Code', 'Consolas', monospace",
@@ -276,11 +326,14 @@ function initMonacoEditor(cellId, mode = 'python') {
     if (textarea) {
         editor.onDidChangeModelContent(() => {
             textarea.value = editor.getValue();
+            setNotebookSaveState('modified');
         });
     }
 
     // Focus tracking
     editor.onDidFocusEditorText(() => setFocusedCell(cellId));
+    const savedViewState = monacoViewStates.get(cellId);
+    if (savedViewState) editor.restoreViewState(savedViewState);
 
     // Keyboard shortcuts (use addAction to properly override built-in Monaco keybindings)
     // Shift+Enter: run cell and move to next
@@ -292,9 +345,7 @@ function initMonacoEditor(cellId, mode = 'python') {
             syncMonacoToTextarea(cellId);
             const cell = container.closest('.cell');
             if (cell) {
-                const btn = cell.querySelector('.btn-run');
-                if (btn) btn.click();
-                moveToNextCell(cell);
+                clickCellRunButton(cell, {advance: true});
             }
         }
     });
@@ -308,8 +359,7 @@ function initMonacoEditor(cellId, mode = 'python') {
             syncMonacoToTextarea(cellId);
             const cell = container.closest('.cell');
             if (cell) {
-                const btn = cell.querySelector('.btn-run');
-                if (btn) btn.click();
+                clickCellRunButton(cell, {advance: false});
             }
         }
     });
@@ -323,13 +373,15 @@ function initMonacoEditor(cellId, mode = 'python') {
             syncMonacoToTextarea(cellId);
             const cell = container.closest('.cell');
             if (cell) {
-                const btn = cell.querySelector('.btn-run');
-                if (btn) btn.click();
+                clickCellRunButton(cell, {advance: false});
                 const cells = getOrderedCells();
                 const idx = cells.indexOf(cell);
                 const pos = idx >= 0 ? idx + 1 : cells.length;
+                const nextCellId = cells[idx + 1]?.id?.replace('cell-', '') || null;
                 _pendingScrollToNewCell = true;
-                requestCellAdd('code', pos);
+                requestCellAdd('code', pos, {
+                    positionResolver: () => resolveAddPositionBefore(nextCellId),
+                });
             }
         }
     });
@@ -350,15 +402,61 @@ function initMonacoEditor(cellId, mode = 'python') {
 
 function syncMonacoToTextarea(cellId) {
     const editor = monacoEditors[cellId];
+    const model = monacoModels[cellId];
     const textarea = document.getElementById(`source-${cellId}`);
-    if (editor && textarea) {
-        textarea.value = editor.getValue();
+    if (textarea && (editor || model)) {
+        textarea.value = (editor || model).getValue();
+    }
+}
+
+function getCellSourceForRequest(cellId) {
+    const editor = monacoEditors[cellId];
+    const model = monacoModels[cellId];
+    if (editor || model) return (editor || model).getValue();
+
+    const prompt = document.getElementById(`prompt-${cellId}`);
+    if (prompt?.tagName === 'TEXTAREA' && prompt.style.display !== 'none') {
+        return prompt.value;
+    }
+    return document.getElementById(`source-${cellId}`)?.value || '';
+}
+
+const pendingCellTypeChanges = new Set();
+
+async function requestCellTypeChange(cellId, cellType) {
+    const requestKey = `${cellId}:${cellType}`;
+    if (pendingCellTypeChanges.has(requestKey)) return;
+    const cell = document.getElementById(`cell-${cellId}`);
+    const select = cell?.querySelector('select[name="cell_type"]');
+    if (!cell || !select || select.value === cellType) return;
+    pendingCellTypeChanges.add(requestKey);
+    syncAllContent(cellId);
+    const body = new URLSearchParams({
+        cell_type: cellType,
+        source: getCellSourceForRequest(cellId),
+        expected_version: document.getElementById(`version-${cellId}`)?.value || '-1',
+        expected_cell_type: select.value,
+        expected_revision: String(getCurrentNotebookRevision()),
+    });
+    try {
+        const response = await fetch(`${nbApiPath()}/cell/${cellId}/type`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body,
+        });
+        if (!response.ok) {
+            showKernelStatusMessage('The cell changed before its type could be updated. Resynchronizing.', 'warning', 5000);
+            await recoverNotebookState(`cell type change failed with HTTP ${response.status}`);
+        }
+    } finally {
+        setTimeout(() => pendingCellTypeChanges.delete(requestKey), 500);
     }
 }
 
 function getMonacoContent(cellId) {
     const editor = monacoEditors[cellId];
-    return editor ? editor.getValue() : '';
+    const model = monacoModels[cellId];
+    return editor ? editor.getValue() : model ? model.getValue() : '';
 }
 
 function destroyMonacoEditor(cellId) {
@@ -366,11 +464,16 @@ function destroyMonacoEditor(cellId) {
         monacoEditors[cellId].dispose();
         delete monacoEditors[cellId];
     }
+    if (monacoModels[cellId]) {
+        monacoModels[cellId].dispose();
+        delete monacoModels[cellId];
+    }
+    monacoViewStates.delete(cellId);
 }
 
 function initStandaloneMonacoEditor(containerId, textareaId, mode = 'plaintext') {
     if (!monacoReady) {
-        pendingStandaloneEditorInits.push([containerId, textareaId, mode]);
+        loadMonaco().then(() => initStandaloneMonacoEditor(containerId, textareaId, mode));
         return null;
     }
 
@@ -584,7 +687,7 @@ function setFocusedCell(cellId) {
     selectCell(cellId);
 }
 
-function focusCellWithoutScroll(cellId, preserveY = window.scrollY) {
+async function focusCellWithoutScroll(cellId, preserveY = window.scrollY) {
     setFocusedCell(cellId);
     const cell = document.getElementById(`cell-${cellId}`);
     if (!cell) return;
@@ -594,20 +697,21 @@ function focusCellWithoutScroll(cellId, preserveY = window.scrollY) {
 
     // If it's a code or shell cell with Monaco editor, focus the editor
     if (cell.dataset.type === 'code' || cell.dataset.type === 'shell') {
-        const editor = monacoEditors[cellId];
-        if (editor) {
-            editor.focus();
-        }
+        const editor = monacoEditors[cellId] || await ensureMonacoEditor(
+            cellId,
+            cell.dataset.type === 'shell' ? 'sh' : 'python',
+        );
+        editor?.focus();
     } else if (cell.dataset.type === 'prompt') {
         // For prompt cells, focus the prompt textarea if visible
         const promptTextarea = cell.querySelector('.prompt-content[name="prompt_source"]');
         if (promptTextarea && promptTextarea.style.display !== 'none') {
-            promptTextarea.focus();
+            promptTextarea.focus({preventScroll: true});
         } else {
             // If prompt has been run (has preview), just select the cell
             // and move DOM focus out of any Monaco editor
             cell.tabIndex = -1;
-            cell.focus();
+            cell.focus({preventScroll: true});
         }
     } else {
         // Note cells and other types: move DOM focus to the cell element
@@ -617,20 +721,21 @@ function focusCellWithoutScroll(cellId, preserveY = window.scrollY) {
         cell.focus({ preventScroll: true });
     }
 
-    if (window.scrollY !== preserveY) {
-        window.scrollTo(0, preserveY);
-        requestAnimationFrame(() => window.scrollTo(0, preserveY));
-    }
+    window.scrollTo(0, preserveY);
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    window.scrollTo(0, preserveY);
 }
 
-function focusNextCell(cellId) {
-    // Focus a cell and optionally its editor
+async function focusNextCell(cellId) {
     const cell = document.getElementById(`cell-${cellId}`);
     if (!cell) return;
-
-    // Scroll cell into view - use 'center' so the focused cell is clearly visible
-    cell.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    focusCellWithoutScroll(cellId);
+    cell.scrollIntoView({behavior: 'auto', block: 'nearest'});
+    const revealedY = window.scrollY;
+    await focusCellWithoutScroll(cellId, revealedY);
+    document.getElementById(`cell-${cellId}`)?.scrollIntoView({
+        behavior: 'auto',
+        block: 'nearest',
+    });
 }
 
 function getFocusedCellId() {
@@ -639,9 +744,9 @@ function getFocusedCellId() {
         const cell = active.closest('.cell');
         if (cell) return cell.id.replace('cell-', '');
     }
-    for (const [cellId, editor] of Object.entries(monacoEditors)) {
-        if (editor.hasTextFocus()) return cellId;
-    }
+    // In command mode the explicit selection is authoritative. Monaco's
+    // hasTextFocus() can remain true briefly after a header click and used to
+    // route destructive shortcuts to the previously edited cell.
     return focusedCellId;
 }
 
@@ -662,6 +767,14 @@ function moveToNextCell(currentCell) {
     createNewCellAtEnd();
 }
 
+function clickCellRunButton(cell, {advance = true} = {}) {
+    const button = cell?.querySelector('.btn-run');
+    if (!button) return false;
+    runIntentTracker.mark(button, {advance});
+    button.click();
+    return true;
+}
+
 function createNewCellAtEnd() {
     // Count current cells to determine position
     const cells = document.querySelectorAll('#cells .cell');
@@ -675,7 +788,9 @@ function createNewCellAtEnd() {
     // container, destroying all Monaco editors and causing race conditions.
     // Instead, the server broadcasts a cell_add WS message, and the WS
     // handler inserts just the new cell (existing editors untouched).
-    requestCellAdd('code', position);
+    requestCellAdd('code', position, {
+        positionResolver: () => getOrderedCells().length,
+    });
     // The WS cell_add handler will insert the cell and scroll to it
     // when it sees _pendingScrollToNewCell is true.
 }
@@ -692,7 +807,14 @@ function addCellAtRow(btn, nbId, cellType) {
     const cells = getOrderedCells();
     const anchorCell = cells[Math.min(Math.max(pos - 1, 0), Math.max(cells.length - 1, 0))];
     const anchorCellId = anchorCell ? anchorCell.id.replace('cell-', '') : null;
-    requestCellAdd(cellType, pos, { anchorCellId });
+    const nextCell = addRow.nextElementSibling?.classList?.contains('cell')
+        ? addRow.nextElementSibling
+        : null;
+    const nextCellId = nextCell?.id?.replace('cell-', '') || null;
+    requestCellAdd(cellType, pos, {
+        anchorCellId,
+        positionResolver: () => resolveAddPositionBefore(nextCellId),
+    });
     // The WS cell_add handler will insert the cell into the DOM.
 }
 
@@ -714,6 +836,30 @@ function rememberStructureViewport(anchorCellId = null) {
     };
 }
 
+function resolveAddPositionBefore(nextCellId = null) {
+    const cells = getOrderedCells();
+    if (!nextCellId) return cells.length;
+    const index = cells.findIndex(cell => cell.id === `cell-${nextCellId}`);
+    return index >= 0 ? index : cells.length;
+}
+
+function waitForStructureRevision(minimumRevision, timeoutMs = 5000) {
+    if (!Number.isFinite(minimumRevision)) return Promise.resolve();
+    const deadline = Date.now() + timeoutMs;
+    return new Promise(resolve => {
+        const check = () => {
+            if (getCurrentStructureRevision() >= minimumRevision || Date.now() >= deadline) {
+                resolve();
+                return;
+            }
+            setTimeout(check, 20);
+        };
+        check();
+    });
+}
+
+let _cellAddRequestChain = Promise.resolve();
+
 function consumeStructureViewport() {
     const viewport = _pendingStructureViewport;
     _pendingStructureViewport = null;
@@ -721,16 +867,45 @@ function consumeStructureViewport() {
 }
 
 function requestCellAdd(cellType, pos = null, options = {}) {
-    const { anchorCellId = null } = options;
-    rememberStructureViewport(anchorCellId);
-    const params = new URLSearchParams({ type: cellType });
-    if (Number.isInteger(pos)) {
-        params.set('pos', String(pos));
-    }
-    return fetch(`${nbApiPath()}/cell/add?${params.toString()}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-    });
+    const { anchorCellId = null, positionResolver = null } = options;
+    const execute = async () => {
+        rememberStructureViewport(anchorCellId);
+        const resolvedPos = typeof positionResolver === 'function'
+            ? positionResolver()
+            : pos;
+        const params = new URLSearchParams({ type: cellType });
+        if (Number.isInteger(resolvedPos)) {
+            params.set('pos', String(resolvedPos));
+        }
+        const mutation = new URLSearchParams({
+            operation_id: crypto.randomUUID
+                ? crypto.randomUUID()
+                : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        });
+        const structureRevision = getCurrentStructureRevision();
+        if (Number.isFinite(structureRevision)) {
+            mutation.set('expected_structure_revision', String(structureRevision));
+        }
+        const response = await fetch(`${nbApiPath()}/cell/add?${params.toString()}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: mutation.toString(),
+        });
+        if (response.status === 409) {
+            recoverNotebookState('cell add revision conflict');
+            showKernelStatusMessage(
+                'The notebook changed before the cell was added. Resynchronizing…',
+                'warning',
+                5000,
+            );
+        } else if (response.ok && Number.isFinite(structureRevision)) {
+            await waitForStructureRevision(structureRevision + 1);
+        }
+        return response;
+    };
+    const pending = _cellAddRequestChain.then(execute, execute);
+    _cellAddRequestChain = pending.catch(() => {});
+    return pending;
 }
 
 function snapshotCellStructure(cellsRoot) {
@@ -774,7 +949,7 @@ function reconcileCellStructure({
     preserveViewportCellId = null,
     preserveScrollY = null,
 } = {}) {
-    if (!Array.isArray(orderedIds) || !orderedIds.length) {
+    if (!Array.isArray(orderedIds)) {
         return false;
     }
 
@@ -801,16 +976,28 @@ function reconcileCellStructure({
         }
     });
 
-    if (orderedIds.some(cellId => !cellUnits.has(cellId) || !cellUnits.get(cellId).addRowEl)) {
-        console.warn('[cells] Unable to reconcile notebook structure; refreshing notebook view');
+    const plan = window.dialengStructure.plan(orderedIds, cellId => cellUnits.get(cellId));
+    if (!plan.valid) {
+        const availableIds = Array.from(cellUnits.keys());
+        const missingIds = orderedIds.filter(cellId => !cellUnits.has(cellId));
+        console.warn(
+            `[cells] Unable to reconcile notebook structure; refreshing notebook view ` +
+            `(reason=${plan.reason}, missing=${missingIds.join(',') || 'none'}, ` +
+            `ordered=${orderedIds.join(',')}, available=${availableIds.join(',')})`,
+            {
+            reason: plan.reason,
+            orderedIds,
+            availableIds,
+            missingIds,
+            },
+        );
         window.location.reload();
         return false;
     }
 
     const fragment = document.createDocumentFragment();
     fragment.appendChild(leadingAddRow);
-    orderedIds.forEach(cellId => {
-        const unit = cellUnits.get(cellId);
+    plan.units.forEach(unit => {
         fragment.appendChild(unit.cellEl);
         fragment.appendChild(unit.addRowEl);
     });
@@ -845,6 +1032,48 @@ function reconcileCellStructure({
     return true;
 }
 
+function applyCellTypeChange(data) {
+    const cellId = data?.cell_id;
+    const target = cellId ? document.getElementById(`cell-${cellId}`) : null;
+    if (!target || !data.html) {
+        recoverNotebookState('missing cell during type change');
+        return;
+    }
+
+    const template = document.createElement('template');
+    template.innerHTML = data.html.trim();
+    const replacement = template.content.querySelector(`#cell-${cellId}`);
+    if (!replacement) {
+        recoverNotebookState('invalid cell type replacement');
+        return;
+    }
+
+    const viewportTop = target.getBoundingClientRect().top;
+    const wasFocused = focusedCellId === cellId;
+    destroyMonacoEditor(cellId);
+    target.replaceWith(replacement);
+    htmx.process(replacement);
+    initCell(cellId);
+    renderCellPreviews(cellId);
+    updateCellVersion(cellId, data.version);
+
+    if (replacement.dataset.type === 'code') {
+        setTimeout(() => observeMonacoCell(cellId), 0);
+    } else if (replacement.dataset.type === 'shell') {
+        setTimeout(() => observeMonacoCell(cellId, 'sh'), 0);
+    }
+    if (wasFocused) setFocusedCell(cellId);
+
+    // Replacing a tall editor with a compact note/prompt (or vice versa)
+    // should not make the user's current cell jump away from the viewport.
+    const restoreViewport = () => {
+        const liveCell = document.getElementById(`cell-${cellId}`);
+        if (liveCell) window.scrollBy(0, liveCell.getBoundingClientRect().top - viewportTop);
+    };
+    restoreViewport();
+    requestAnimationFrame(restoreViewport);
+}
+
 // ==================== Keyboard Shortcuts ====================
 document.addEventListener('keydown', e => {
     const target = e.target;
@@ -859,6 +1088,16 @@ document.addEventListener('keydown', e => {
 
     // ===== Escape to close sidebars/modals =====
     if (e.key === 'Escape') {
+        const diagnosticsOverlay = document.getElementById('kernel-diagnostics-overlay');
+        const contextOverlay = document.getElementById('context-inspector-overlay');
+        if (diagnosticsOverlay?.classList.contains('visible')) {
+            diagnosticsOverlay.classList.remove('visible');
+            return;
+        }
+        if (contextOverlay?.classList.contains('visible')) {
+            contextOverlay.classList.remove('visible');
+            return;
+        }
         const shortcutsModal = document.getElementById('shortcuts-modal-overlay');
         if (shortcutsModal && shortcutsModal.classList.contains('visible')) {
             shortcutsModal.classList.remove('visible');
@@ -951,6 +1190,9 @@ document.addEventListener('keydown', e => {
             if (type === 'code' || type === 'shell') {
                 const editor = monacoEditors[currentCellId];
                 if (editor) editor.focus();
+                else ensureMonacoEditor(currentCellId, type === 'shell' ? 'sh' : 'python').then(
+                    nextEditor => nextEditor?.focus()
+                );
             } else if (type === 'prompt') {
                 const textarea = cell.querySelector('.prompt-content[name="prompt_source"]');
                 if (textarea) {
@@ -1008,14 +1250,7 @@ document.addEventListener('keydown', e => {
                 syncMonacoToTextarea(cellId);
                 // Also sync prompt textarea
                 syncPromptContent(cellId);
-                const btn = cell.querySelector('.btn-run');
-                if (btn) {
-                    // Click run button first
-                    btn.click();
-                    // Move focus to next cell IMMEDIATELY (don't wait for server)
-                    // This is Jupyter behavior - Shift+Enter runs AND moves
-                    moveToNextCell(cell);
-                } else {
+                if (!clickCellRunButton(cell, {advance: true})) {
                     // Note cell - no run button, just move to next cell
                     moveToNextCell(cell);
                 }
@@ -1033,10 +1268,7 @@ document.addEventListener('keydown', e => {
             if (cell) {
                 syncMonacoToTextarea(cellId);
                 syncPromptContent(cellId);
-                const btn = cell.querySelector('.btn-run');
-                if (btn) {
-                    btn.click();
-                } else {
+                if (!clickCellRunButton(cell, {advance: false})) {
                     // Note cell - just move to next cell
                     moveToNextCell(cell);
                 }
@@ -1063,9 +1295,7 @@ document.addEventListener('keydown', e => {
             return;
         }
         // Single Escape - exit edit mode
-        if (document.activeElement) {
-            document.activeElement.blur();
-        }
+        if (!finishTextCellEdit(document.activeElement)) document.activeElement?.blur?.();
         Object.values(monacoEditors).forEach(ed => ed.trigger('keyboard', 'blur', {}));
         lastKey = 'Escape';
         lastKeyTime = now;
@@ -1168,6 +1398,19 @@ document.addEventListener('keydown', e => {
             e.preventDefault();
             requestCellAdd('prompt');
         }
+
+        const typeShortcuts = {J: 'code', K: 'note', L: 'prompt'};
+        const shortcutType = typeShortcuts[e.key.toUpperCase()];
+        if (mod && e.shiftKey && shortcutType && currentCellId) {
+            e.preventDefault();
+            syncAllContent(currentCellId);
+            const select = document.querySelector(
+                `#cell-${CSS.escape(currentCellId)} select[name="cell_type"]`,
+            );
+            if (select && select.value !== shortcutType) {
+                requestCellTypeChange(currentCellId, shortcutType);
+            }
+        }
     }
 
     // ===== Cell clipboard shortcuts (nav mode) =====
@@ -1269,8 +1512,7 @@ document.addEventListener('keydown', e => {
             e.preventDefault();
             getOrderedCells().forEach(c => {
                 if (c.dataset.type === 'code') {
-                    const runBtn = c.querySelector('.btn-run');
-                    if (runBtn) runBtn.click();
+                    clickCellRunButton(c, {advance: false});
                 }
             });
         }
@@ -1374,8 +1616,7 @@ document.addEventListener('keydown', e => {
             const idx = cells.findIndex(c => c.id === `cell-${currentCellId}`);
             cells.slice(0, idx).forEach(c => {
                 if (c.dataset.type === 'code') {
-                    const runBtn = c.querySelector('.btn-run');
-                    if (runBtn) runBtn.click();
+                    clickCellRunButton(c, {advance: false});
                 }
             });
         }
@@ -1386,8 +1627,7 @@ document.addEventListener('keydown', e => {
             const idx = cells.findIndex(c => c.id === `cell-${currentCellId}`);
             cells.slice(idx + 1).forEach(c => {
                 if (c.dataset.type === 'code') {
-                    const runBtn = c.querySelector('.btn-run');
-                    if (runBtn) runBtn.click();
+                    clickCellRunButton(c, {advance: false});
                 }
             });
         }
@@ -1410,15 +1650,17 @@ document.addEventListener('keydown', e => {
             // Run current cell
             const cell = document.getElementById(`cell-${currentCellId}`);
             if (cell) {
-                const runBtn = cell.querySelector('.btn-run');
-                if (runBtn) runBtn.click();
+                clickCellRunButton(cell, {advance: false});
             }
             // Create new cell below
             const cells = getOrderedCells();
             const idx = cells.findIndex(c => c.id === `cell-${currentCellId}`);
             const pos = idx >= 0 ? idx + 1 : cells.length;
+            const nextCellId = cells[idx + 1]?.id?.replace('cell-', '') || null;
             _pendingScrollToNewCell = true;
-            requestCellAdd('code', pos);
+            requestCellAdd('code', pos, {
+                positionResolver: () => resolveAddPositionBefore(nextCellId),
+            });
         }
     }
 });
@@ -1852,6 +2094,8 @@ function renderMarkdown(text) {
 // Server-side markdown rendering via mistlefoot for full-fidelity output
 // (subscript, superscript, emoji, highlighting, footnotes, task lists, etc.)
 async function renderMarkdownServer(text, targetEl) {
+    const renderVersion = String(Number(targetEl.dataset.renderVersion || '0') + 1);
+    targetEl.dataset.renderVersion = renderVersion;
     if (!text || !text.trim()) {
         targetEl.innerHTML = '<p style="color: var(--text-muted);">Click to edit...</p>';
         return;
@@ -1863,6 +2107,7 @@ async function renderMarkdownServer(text, targetEl) {
             body: 'text=' + encodeURIComponent(text)
         });
         const data = await resp.json();
+        if (!targetEl.isConnected || targetEl.dataset.renderVersion !== renderVersion) return;
         targetEl.innerHTML = data.html;
         // Add copy buttons and syntax highlighting to code blocks
         targetEl.querySelectorAll('pre').forEach(pre => {
@@ -1877,6 +2122,7 @@ async function renderMarkdownServer(text, targetEl) {
             if (code && typeof hljs !== 'undefined') hljs.highlightElement(code);
         });
     } catch (e) {
+        if (!targetEl.isConnected || targetEl.dataset.renderVersion !== renderVersion) return;
         // Fallback to client-side rendering
         targetEl.innerHTML = renderMarkdown(text);
     }
@@ -1897,6 +2143,17 @@ function copyCode(btn) {
 }
 
 // ==================== Preview/Edit Toggle ====================
+const promptResponseEditor = window.DialengPromptResponseEditor
+    ? new window.DialengPromptResponseEditor()
+    : null;
+
+function registerPromptResponseEditor(cellId) {
+    const textarea = document.getElementById(`output-${cellId}`);
+    if (textarea?.tagName === 'TEXTAREA') {
+        promptResponseEditor?.register(cellId, textarea.value);
+    }
+}
+
 // Event delegation for double-click editing - a single listener handles ALL preview elements
 // This is more robust than per-element listeners because:
 // 1. Works automatically for dynamically added elements (no re-attachment needed after OOB updates)
@@ -1919,6 +2176,18 @@ function copyCode(btn) {
     });
 })();
 
+document.addEventListener('input', function trackPromptResponseDraft(event) {
+    const textarea = event.target;
+    if (textarea?.tagName !== 'TEXTAREA' || !textarea.id.startsWith('output-')) return;
+    promptResponseEditor?.input(textarea.id.slice('output-'.length), textarea.value);
+});
+
+document.addEventListener('focusout', function finishBlurredPromptResponse(event) {
+    const textarea = event.target;
+    if (textarea?.tagName !== 'TEXTAREA' || !textarea.id.startsWith('output-')) return;
+    finishPromptResponseEdit(textarea.id.slice('output-'.length), textarea);
+}, true);
+
 // Keep setupPreviewEditing as a no-op for backward compatibility
 // Existing call sites (htmx:afterSettle, DOMContentLoaded) don't need modification
 function setupPreviewEditing() {
@@ -1929,6 +2198,15 @@ function switchToEdit(cellId, field) {
     const preview = document.querySelector(`[data-cell-id="${cellId}"][data-field="${field}"]`);
     const textarea = document.getElementById(`${field}-${cellId}`);
     if (preview && textarea) {
+        if (field === 'output') {
+            if (textarea.dataset.responseSaveStarted === 'true') {
+                showKernelStatusMessage('Saving the previous response edit…', 'info', 2000);
+                return;
+            }
+            const draft = promptResponseEditor?.begin(cellId, textarea.value);
+            if (typeof draft === 'string' && textarea.value !== draft) textarea.value = draft;
+            textarea.dataset.responseEditing = 'true';
+        }
         preview.style.display = 'none';
         textarea.style.display = 'block';
         textarea.focus();
@@ -1939,12 +2217,99 @@ function switchToPreview(cellId, field) {
     const preview = document.querySelector(`[data-cell-id="${cellId}"][data-field="${field}"]`);
     const textarea = document.getElementById(`${field}-${cellId}`);
     if (preview && textarea) {
+        if (field === 'output') {
+            promptResponseEditor?.finish(cellId, textarea.value);
+            delete textarea.dataset.responseEditing;
+        }
         // Show client-side preview immediately, then upgrade with server rendering
         preview.innerHTML = renderMarkdown(textarea.value);
         preview.style.display = 'block';
         textarea.style.display = 'none';
         renderMarkdownServer(textarea.value, preview);
     }
+}
+
+async function finishPromptResponseEdit(cellId, textarea) {
+    if (textarea.dataset.responseSaveStarted === 'true') {
+        switchToPreview(cellId, 'output');
+        return;
+    }
+    switchToPreview(cellId, 'output');
+    const draft = promptResponseEditor
+        ? promptResponseEditor.startSave(cellId)
+        : textarea.value;
+    if (draft === null) return;
+    textarea.dataset.responseSaveStarted = 'true';
+
+    const expectedVersion = document.getElementById(`version-${cellId}`)?.value || '-1';
+    const operationId = crypto.randomUUID
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const body = new URLSearchParams({
+        output: draft,
+        expected_version: expectedVersion,
+        operation_id: operationId,
+    });
+
+    try {
+        const response = await fetch(`${nbApiPath()}/cell/${cellId}/output`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: body.toString(),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const responseText = await response.text();
+        let result = {};
+        if (responseText.trim()) {
+            try { result = JSON.parse(responseText); } catch (_) {}
+        }
+        if (result.status === 'conflict') {
+            applyPromptOutputUpdate(cellId, result.output, {force: true});
+            updateCellVersion(cellId, result.version);
+            switchToPreview(cellId, 'output');
+            showKernelStatusMessage(
+                'That response changed in another tab. Dialeng kept the newer backend version.',
+                'warning',
+                7000,
+            );
+            return;
+        }
+        promptResponseEditor?.commit(cellId, draft);
+    } catch (error) {
+        promptResponseEditor?.saveFailed(cellId);
+        console.error('[Prompt] Failed to save edited response:', error);
+        showKernelStatusMessage(
+            'The response could not be saved. Your draft is still available; double-click it to retry.',
+            'error',
+            8000,
+        );
+    } finally {
+        delete textarea.dataset.responseSaveStarted;
+    }
+}
+
+function finishTextCellEdit(element = document.activeElement) {
+    if (!element || element.tagName !== 'TEXTAREA' || !element.closest('.cell')) return false;
+    if (getComputedStyle(element).display === 'none') return false;
+
+    const match = element.id.match(/^(source|prompt|output)-(.+)$/);
+    if (!match) return false;
+    const [, field, cellId] = match;
+
+    // Trigger HTMX before releasing focus. The `changed` modifier on the
+    // textarea suppresses the subsequent native blur request, while this
+    // explicit event makes command-mode transitions deterministic.
+    if (typeof htmx !== 'undefined' && element.hasAttribute('hx-post')) {
+        htmx.trigger(element, 'blur');
+    }
+    if (field === 'output') {
+        finishPromptResponseEdit(cellId, element);
+        element.blur();
+        return true;
+    }
+    switchToPreview(cellId, field);
+    element.blur();
+    return true;
 }
 
 // Update preview when content changes
@@ -1957,15 +2322,75 @@ function updatePreview(cellId, field) {
 }
 
 // ==================== Initialization ====================
+const editorDisposeTimers = new Map();
+let monacoIntersectionObserver = null;
+
+function ensureMonacoEditor(cellId, mode = 'python') {
+    const existing = monacoEditors[cellId];
+    if (existing) return Promise.resolve(existing);
+    return loadMonaco().then(() => initMonacoEditor(cellId, mode));
+}
+
+function disposeMonacoView(cellId) {
+    const editor = monacoEditors[cellId];
+    if (!editor) return;
+    syncMonacoToTextarea(cellId);
+    monacoViewStates.set(cellId, editor.saveViewState());
+    editor.dispose();
+    delete monacoEditors[cellId];
+    const container = document.getElementById(`monaco-${cellId}`);
+    const textarea = document.getElementById(`source-${cellId}`);
+    if (container && textarea) {
+        container.replaceChildren(Object.assign(document.createElement('pre'), {
+            className: 'monaco-placeholder',
+            textContent: textarea.value,
+        }));
+        container.style.opacity = '1';
+    }
+}
+
+function getMonacoIntersectionObserver() {
+    if (monacoIntersectionObserver || !('IntersectionObserver' in window)) {
+        return monacoIntersectionObserver;
+    }
+    monacoIntersectionObserver = new IntersectionObserver(entries => {
+        entries.forEach(entry => {
+            const cellId = entry.target.id.replace('monaco-', '');
+            const cell = entry.target.closest('.cell');
+            const mode = cell?.dataset.type === 'shell' ? 'sh' : 'python';
+            if (entry.isIntersecting) {
+                const timer = editorDisposeTimers.get(cellId);
+                if (timer) clearTimeout(timer);
+                editorDisposeTimers.delete(cellId);
+                ensureMonacoEditor(cellId, mode);
+            } else if (monacoEditors[cellId] && !editorDisposeTimers.has(cellId)) {
+                editorDisposeTimers.set(cellId, setTimeout(() => {
+                    editorDisposeTimers.delete(cellId);
+                    if (focusedCellId !== cellId) disposeMonacoView(cellId);
+                }, 15000));
+            }
+        });
+    }, {rootMargin: '900px 0px'});
+    return monacoIntersectionObserver;
+}
+
+function observeMonacoCell(cellId, mode = 'python') {
+    const container = document.getElementById(`monaco-${cellId}`);
+    if (!container) return;
+    const observer = getMonacoIntersectionObserver();
+    if (observer) observer.observe(container);
+    else ensureMonacoEditor(cellId, mode);
+}
+
 function initCell(cellId) {
     const cell = document.getElementById(`cell-${cellId}`);
     if (!cell) return;
     
     // Initialize Monaco editor for code and shell cells
     if (cell.dataset.type === 'code') {
-        initMonacoEditor(cellId);
+        observeMonacoCell(cellId);
     } else if (cell.dataset.type === 'shell') {
-        initMonacoEditor(cellId, 'sh');
+        observeMonacoCell(cellId, 'sh');
     }
     
     // Setup preview for note cells
@@ -1980,6 +2405,7 @@ function initCell(cellId) {
     const aiPreview = document.querySelector(`[data-cell-id="${cellId}"][data-field="output"]`);
     const aiTextarea = document.getElementById(`output-${cellId}`);
     if (aiPreview && aiTextarea) {
+        registerPromptResponseEditor(cellId);
         const content = aiTextarea.value;
         if (content && content.trim()) {
             aiPreview.innerHTML = renderMarkdown(content);
@@ -2013,6 +2439,7 @@ function initCell(cellId) {
         // This allows clicking anywhere on the cell to select it
         setFocusedCell(cellId);
     }, { signal });
+    setupLargeOutput(cellId);
 }
 
 // ---------------------------------------------------------------------------
@@ -2152,6 +2579,29 @@ function _restoreScrollPosition() {
     }
 }
 
+function setupLargeOutput(cellId) {
+    const output = document.getElementById(`output-${cellId}`);
+    if (!output || output.dataset.largeOutputReady === 'true' || !output.children.length) return;
+    const textLength = output.textContent?.length || 0;
+    const lineCount = (output.textContent?.match(/\n/g) || []).length + 1;
+    if (textLength < 50000 && lineCount < 300 && output.scrollHeight < 700) return;
+
+    output.dataset.largeOutputReady = 'true';
+    const content = document.createElement('div');
+    content.className = 'large-output-content collapsed';
+    while (output.firstChild) content.appendChild(output.firstChild);
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'btn btn-sm large-output-toggle';
+    toggle.textContent = 'Show full output';
+    toggle.onclick = () => {
+        const expanded = content.classList.toggle('expanded');
+        content.classList.toggle('collapsed', !expanded);
+        toggle.textContent = expanded ? 'Collapse output' : 'Show full output';
+    };
+    output.append(content, toggle);
+}
+
 // Handle HTMX errors - ensure streaming state is reset for both prompt and code cells
 function resetCellOnError(e, errorMsg) {
     // Check if this is a cell-related request
@@ -2190,7 +2640,51 @@ function resetCellOnError(e, errorMsg) {
 
 document.addEventListener('htmx:responseError', (e) => {
     console.error('[HTMX] Response error:', e.detail);
+    if (e.detail?.xhr?.status === 409) {
+        let conflict = {};
+        try { conflict = JSON.parse(e.detail.xhr.responseText || '{}'); } catch (_) {}
+        if (conflict.type === 'external_file_changed') {
+            setNotebookSaveState('failed');
+            showExternalSaveConflict(conflict);
+        } else {
+            recoverNotebookState('backend revision conflict');
+            showKernelStatusMessage('The notebook changed in another tab. Resynchronizing…', 'warning', 5000);
+        }
+        return;
+    }
     resetCellOnError(e, 'Request failed. Please try again.');
+});
+
+document.addEventListener('htmx:configRequest', (event) => {
+    const path = event.detail?.path || event.detail?.pathInfo?.requestPath || '';
+    const isCellMutation = /\/cell\/(?:add|[^/?]+(?:\/(?:type|move\/(?:up|down)|duplicate|clear-output|merge-below|extract-code-blocks|collapse(?:-section)?))?)(?:$|\?)/.test(path);
+    if (!isCellMutation) return;
+
+    const isStructureMutation = /\/cell\/(?:add|[^/?]+(?:\/(?:move\/(?:up|down)|duplicate|merge-below|extract-code-blocks))?)(?:$|\?)/.test(path);
+
+    // Type changes use cell version + expected old type because a textarea
+    // blur save can legitimately advance the notebook revision just before
+    // the select change reaches the server.
+    if (isStructureMutation) {
+        event.detail.parameters.expected_structure_revision = getCurrentStructureRevision();
+        delete event.detail.parameters.expected_revision;
+    } else if (!/\/cell\/[^/?]+\/type(?:$|\?)/.test(path)) {
+        event.detail.parameters.expected_revision = getCurrentNotebookRevision();
+    }
+    event.detail.parameters.operation_id = crypto.randomUUID
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+});
+
+document.addEventListener('htmx:beforeRequest', (event) => {
+    const path = event.detail?.pathInfo?.requestPath || event.detail?.requestConfig?.path || '';
+    if (/\/dialeng\/[^/]+\/save(?:\?|$)/.test(path)) setNotebookSaveState('saving');
+});
+
+document.addEventListener('htmx:afterRequest', (event) => {
+    const path = event.detail?.pathInfo?.requestPath || event.detail?.requestConfig?.path || '';
+    if (!/\/dialeng\/[^/]+\/save(?:\?|$)/.test(path)) return;
+    setNotebookSaveState(event.detail?.successful ? 'saved' : 'failed');
 });
 
 document.addEventListener('htmx:sendError', (e) => {
@@ -2211,17 +2705,20 @@ document.addEventListener('DOMContentLoaded', () => {
         initCell(cellId);
     });
     setupPreviewEditing();
+    if (window.AUTOSAVE_ENABLED) checkNotebookRecovery();
 });
 
 document.addEventListener('visibilitychange', () => {
     if (!document.hidden && window.NOTEBOOK_ID) {
-        fetchKernelSnapshot(window.NOTEBOOK_ID, 'visibility');
+        if (!isWebSocketHealthy()) fetchKernelSnapshot(window.NOTEBOOK_ID, 'visibility');
+        else sendWebSocketHeartbeat();
     }
 });
 
 window.addEventListener('online', () => {
     if (window.NOTEBOOK_ID) {
-        fetchKernelSnapshot(window.NOTEBOOK_ID, 'online');
+        if (!isWebSocketHealthy()) fetchKernelSnapshot(window.NOTEBOOK_ID, 'online');
+        else sendWebSocketHeartbeat();
     }
 });
 
@@ -2230,6 +2727,7 @@ document.addEventListener('input', e => {
     if (e.target.tagName === 'TEXTAREA') {
         e.target.style.height = 'auto';
         e.target.style.height = Math.max(60, e.target.scrollHeight) + 'px';
+        if (!isFilePage()) setNotebookSaveState('modified');
     }
 });
 
@@ -2267,10 +2765,123 @@ function loadTheme() {
 // ==================== Model Select Toggle ====================
 function toggleModelSelect(mode) {
     const modelSelect = document.getElementById('model-select');
+    const providerSelect = document.getElementById('provider-select');
     if (modelSelect) {
         // Show model dropdown only for non-mock modes
         modelSelect.style.display = mode === 'mock' ? 'none' : '';
     }
+    if (providerSelect) providerSelect.style.display = mode === 'mock' ? 'none' : '';
+}
+
+function syncLlmSelectors(llm, notebook) {
+    if (!llm || !notebook) return;
+    const providerSelect = document.getElementById('provider-select');
+    if (providerSelect) {
+        const selected = notebook.llm_provider || llm.selected_provider || '';
+        const signature = JSON.stringify((llm.providers || []).map(
+            p => [p.id, p.label, p.authenticated, p.validation_state]
+        ));
+        if (providerSelect.dataset.inventorySignature !== signature) {
+            providerSelect.replaceChildren(...(llm.providers || []).map(provider => {
+                const option = document.createElement('option');
+                option.value = provider.id;
+                option.textContent = provider.validation_state === 'validating'
+                    ? `${provider.label} (validating...)`
+                    : provider.authenticated ? provider.label : `${provider.label} (unavailable)`;
+                option.disabled = !provider.authenticated;
+                option.selected = provider.id === selected;
+                return option;
+            }));
+            providerSelect.dataset.inventorySignature = signature;
+        }
+        if (providerSelect.value !== selected) providerSelect.value = selected;
+    }
+
+    const selectedProvider = (llm.providers || []).find(p => p.id === notebook.llm_provider);
+    const modelSelect = document.getElementById('model-select');
+    if (modelSelect && selectedProvider) {
+        const models = selectedProvider.models || [];
+        const signature = JSON.stringify(models.map(model => [model.id, model.name]));
+        if (modelSelect.dataset.modelSignature !== signature) {
+            modelSelect.replaceChildren(...models.map(model => {
+                const option = document.createElement('option');
+                option.value = model.id;
+                option.textContent = model.name;
+                option.selected = model.id === notebook.model;
+                return option;
+            }));
+            modelSelect.dataset.modelSignature = signature;
+        }
+        if (modelSelect.value !== notebook.model) modelSelect.value = notebook.model || '';
+    }
+}
+
+let openAICodexPollId = null;
+
+function updateOpenAICodexAuthUi(status) {
+    const state = document.getElementById('openai-codex-auth-state');
+    if (state) {
+        state.textContent = status.authenticated
+            ? `Connected (${String(status.account_id || '').slice(0, 12)}...)`
+            : (status.error || (status.pending ? 'Waiting for OpenAI authorization...' : 'Not connected'));
+    }
+    const logout = document.getElementById('openai-codex-logout');
+    if (logout) logout.style.display = status.authenticated ? '' : 'none';
+    const login = document.getElementById('openai-codex-login');
+    if (login) login.style.display = status.authenticated ? 'none' : '';
+}
+
+async function pollOpenAICodexStatus() {
+    const response = await fetch('/auth/openai/status', { cache: 'no-store' });
+    const status = await response.json();
+    updateOpenAICodexAuthUi(status);
+    if (status.authenticated || (!status.pending && status.error)) {
+        if (openAICodexPollId) clearInterval(openAICodexPollId);
+        openAICodexPollId = null;
+        if (status.authenticated) showKernelStatusMessage('OpenAI Codex connected.', 'success', 3500);
+    }
+    return status;
+}
+
+async function completeOpenAICodexLogin(code) {
+    if (!code) return;
+    const response = await fetch('/auth/openai/complete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({code})
+    });
+    const status = await response.json();
+    updateOpenAICodexAuthUi(status);
+    if (!response.ok) throw new Error(status.error || 'OpenAI authorization failed');
+    showKernelStatusMessage('OpenAI Codex connected.', 'success', 3500);
+}
+
+async function startOpenAICodexLogin() {
+    try {
+        const response = await fetch('/auth/openai/start', { method: 'POST' });
+        const status = await response.json();
+        if (!response.ok) throw new Error(status.error || 'Could not start OpenAI login');
+        updateOpenAICodexAuthUi(status);
+        if (status.authorization_url) window.open(status.authorization_url, '_blank', 'noopener');
+        if (openAICodexPollId) clearInterval(openAICodexPollId);
+        openAICodexPollId = setInterval(pollOpenAICodexStatus, 1500);
+        if (!status.callback_available) {
+            const value = window.prompt('After authorizing OpenAI, paste the final redirect URL or code#state here:');
+            if (value) await completeOpenAICodexLogin(value);
+        }
+    } catch (error) {
+        showKernelStatusMessage(error.message, 'error', 7000);
+    }
+}
+
+async function logoutOpenAICodex() {
+    const response = await fetch('/auth/openai/logout', { method: 'POST' });
+    const status = await response.json();
+    updateOpenAICodexAuthUi(status);
+    const message = status.authenticated
+        ? 'Stored OpenAI credentials were removed; the environment token remains active.'
+        : 'OpenAI Codex disconnected.';
+    showKernelStatusMessage(message, status.authenticated ? 'warning' : 'success', 4000);
 }
 
 let kernelModalDismissed = false;
@@ -2304,8 +2915,9 @@ function refreshKernelChrome({ refreshModal = true } = {}) {
     }
 }
 
-function applyNotebookSnapshot(notebook, previousNotebook = null) {
+function applyNotebookSnapshot(notebook, previousNotebook = null, llm = null) {
     if (!notebook) return;
+    documentRevisionTracker.recordNotebook(notebook);
 
     applyCellVersions(notebook.cell_versions || {});
 
@@ -2314,6 +2926,7 @@ function applyNotebookSnapshot(notebook, previousNotebook = null) {
         modeSelect.value = notebook.dialog_mode;
     }
     toggleModelSelect(notebook.dialog_mode);
+    syncLlmSelectors(llm, notebook);
 
     const modelSelect = document.getElementById('model-select');
     if (modelSelect) {
@@ -2604,20 +3217,19 @@ function setCollapseLevel(cellId, section, level) {
 let cancelledCells = new Set();
 
 function cancelStreaming(cellId) {
+    flushPromptChunks(cellId);
     cancelledCells.add(cellId);
     const cell = document.getElementById(`cell-${cellId}`);
-    if (cell) {
-        cell.classList.remove('streaming');
-        // Hide cancel button, show run button
-        const cancelBtn = cell.querySelector('.btn-cancel');
-        const runBtn = cell.querySelector('.btn-run');
-        if (cancelBtn) cancelBtn.style.display = 'none';
-        if (runBtn) runBtn.style.display = '';
-    }
+    setCellRunControlState(cell, false);
     // Send cancel message via WebSocket
     if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({type: 'cancel', cell_id: cellId}));
+        sendWebSocketControl({type: 'cancel', cell_id: cellId});
     }
+    showKernelStatusMessage(
+        'LLM generation cancelled. The Python kernel was not interrupted.',
+        'warning',
+        4500,
+    );
     streamingCellId = null;
 }
 
@@ -2626,12 +3238,147 @@ let ws = null;
 let streamingCellId = null;
 let currentNotebookId = null;  // Global notebook ID for use in cancelAllExecution, etc.
 let kernelStateSyncIntervalId = null;
-let kernelStatusMessageTimeoutId = null;
+let wsHeartbeatIntervalId = null;
+let wsHeartbeatDeadlineId = null;
+let wsReconnectTimerId = null;
+const dialengStatusHistory = window.DialengNotifications.history;
+let wsRecoveryPromise = null;
+let wsLastHeartbeatAck = 0;
+const wsRevisionTracker = new window.DialengRevisionTracker([
+    'notebook', 'kernel', 'outline', 'llm', 'output', 'persistence',
+]);
+const wsRevisions = wsRevisionTracker.revisions;
+const documentRevisionTracker = new window.DialengDocumentRevisionTracker();
+const documentRevisions = documentRevisionTracker.revisions;
 
 let _wsReconnectDelay = 1000;
 
+function debugWebSocket(...args) {
+    if (window.DIALENG_DEBUG_WEBSOCKET === true) console.debug(...args);
+}
+
 function getKernelState() {
     return window.KERNEL_STATE || null;
+}
+
+function getCurrentNotebookRevision() {
+    const documentRevision = Number(getKernelState()?.notebook?.revision);
+    if (Number.isFinite(documentRevision)) return documentRevision;
+    return documentRevisions.notebook;
+}
+
+function getCurrentStructureRevision() {
+    const documentRevision = Number(getKernelState()?.notebook?.structure_revision);
+    if (Number.isFinite(documentRevision)) return documentRevision;
+    return documentRevisions.structure;
+}
+
+function recordNotebookMutationRevisions(data) {
+    if (!data) return;
+    documentRevisionTracker.recordEvent(data);
+    const notebook = getKernelState()?.notebook;
+    if (notebook) {
+        notebook.revision = documentRevisions.notebook;
+        notebook.structure_revision = documentRevisions.structure;
+    }
+}
+
+function isWebSocketHealthy() {
+    return !!ws && ws.readyState === WebSocket.OPEN;
+}
+
+function recordSnapshotRevisions(snapshot, streams = null) {
+    wsRevisionTracker.recordSnapshot(snapshot, streams);
+}
+
+function acceptRevisionedEvent(data) {
+    const result = wsRevisionTracker.accept(data);
+    if (result.gap) {
+        recoverNotebookState(
+            `revision gap in ${result.gap.stream}: ${result.gap.from} -> ${result.gap.to}`,
+        );
+        return false;
+    }
+    if (result.accepted) recordNotebookMutationRevisions(data);
+    if (result.accepted && data?.stream === 'notebook') setNotebookSaveState('modified');
+    return result.accepted;
+}
+
+async function recoverNotebookState(reason = 'reconnect') {
+    if (!window.NOTEBOOK_ID || wsRecoveryPromise) return wsRecoveryPromise;
+    wsRecoveryPromise = (async () => {
+        console.warn('[WS] Recovering authoritative notebook state:', reason);
+        const focusedBefore = focusedCellId;
+        const scrollBefore = window.scrollY;
+        const recoveryUrl = new URL(`/dialeng/${window.NOTEBOOK_ID}/recovery`, window.location.origin);
+        recoveryUrl.searchParams.set('reason', reason);
+        const response = await fetch(recoveryUrl, {cache: 'no-store'});
+        if (response.status === 410) {
+            handleNotebookDeleted(await response.json());
+            return;
+        }
+        if (!response.ok) throw new Error(`Recovery failed with HTTP ${response.status}`);
+        const recovery = await response.json();
+        const currentCells = document.getElementById('cells');
+        if (currentCells && recovery.cells_html) {
+            Object.keys(monacoModels).forEach(cellId => destroyMonacoEditor(cellId));
+            const template = document.createElement('template');
+            template.innerHTML = recovery.cells_html.trim();
+            const nextCells = template.content.firstElementChild;
+            if (nextCells) {
+                currentCells.replaceWith(nextCells);
+                nextCells.querySelectorAll('.cell').forEach(cell => {
+                    initCell(cell.id.replace('cell-', ''));
+                });
+            }
+        }
+        applyKernelSnapshot(recovery.snapshot, 'recovery');
+        requestAnimationFrame(() => {
+            if (focusedBefore && document.getElementById(`cell-${focusedBefore}`)) {
+                setFocusedCell(focusedBefore);
+            }
+            window.scrollTo({top: scrollBefore, behavior: 'auto'});
+        });
+    })().catch(error => {
+        console.error('[WS] Notebook recovery failed:', error);
+        showKernelStatusMessage('Could not fully resynchronize this notebook. Reconnecting…', 'error', 7000);
+        if (ws && ws.readyState === WebSocket.OPEN) ws.close(1012, 'Recovery failed');
+    }).finally(() => {
+        wsRecoveryPromise = null;
+    });
+    return wsRecoveryPromise;
+}
+
+function stopWebSocketHeartbeat() {
+    if (wsHeartbeatIntervalId) clearInterval(wsHeartbeatIntervalId);
+    if (wsHeartbeatDeadlineId) clearTimeout(wsHeartbeatDeadlineId);
+    wsHeartbeatIntervalId = null;
+    wsHeartbeatDeadlineId = null;
+}
+
+function sendWebSocketHeartbeat() {
+    if (!isWebSocketHealthy()) return;
+    sendWebSocketControl({type: 'heartbeat', timestamp: Date.now()});
+    if (wsHeartbeatDeadlineId) clearTimeout(wsHeartbeatDeadlineId);
+    wsHeartbeatDeadlineId = setTimeout(() => {
+        if (Date.now() - wsLastHeartbeatAck > 45000 && isWebSocketHealthy()) {
+            ws.close(1012, 'Heartbeat timeout');
+        }
+    }, 45000);
+}
+
+function sendWebSocketControl(payload) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    // FastHTML binds handler arguments from the outer JSON object. Keep the
+    // Dialeng protocol payload intact inside the handler's `msg` field.
+    ws.send(JSON.stringify({msg: JSON.stringify(payload)}));
+    return true;
+}
+
+function startWebSocketHeartbeat() {
+    stopWebSocketHeartbeat();
+    wsLastHeartbeatAck = Date.now();
+    wsHeartbeatIntervalId = setInterval(sendWebSocketHeartbeat, 20000);
 }
 
 function canRunCurrentKernel() {
@@ -2641,57 +3388,259 @@ function canRunCurrentKernel() {
 }
 
 function clearKernelStatusMessage() {
-    const statusEl = document.getElementById('status');
-    if (kernelStatusMessageTimeoutId) {
-        clearTimeout(kernelStatusMessageTimeoutId);
-        kernelStatusMessageTimeoutId = null;
-    }
-    if (statusEl) statusEl.innerHTML = '';
+    window.DialengNotifications.clear();
 }
 
 function getStatusPersistMs(statusNode) {
-    if (!statusNode) return 0;
-    const explicit = Number(statusNode.dataset.persistMs || 0);
-    if (Number.isFinite(explicit) && explicit > 0) return explicit;
-    if (statusNode.classList.contains('error')) return 8000;
-    if (statusNode.classList.contains('warning')) return 6000;
-    if (statusNode.classList.contains('success')) return 2800;
-    return 4000;
+    return window.DialengNotifications.persistMs(statusNode);
 }
 
 function scheduleKernelStatusDismiss(message, persistMs) {
-    if (kernelStatusMessageTimeoutId) clearTimeout(kernelStatusMessageTimeoutId);
-    if (persistMs > 0) {
-        kernelStatusMessageTimeoutId = setTimeout(() => {
-            const statusEl = document.getElementById('status');
-            if (statusEl && statusEl.textContent.trim() === message) clearKernelStatusMessage();
-        }, persistMs);
-    }
+    window.DialengNotifications.schedule(message, persistMs);
 }
 
 function armStatusToastDismiss(target) {
-    const statusEl = target?.id === 'status' ? target : document.getElementById('status');
-    if (!statusEl) return;
-    const toast = statusEl.querySelector('.status');
-    if (!toast) return;
-    const message = toast.textContent.trim();
-    if (!message) {
-        clearKernelStatusMessage();
-        return;
-    }
-    scheduleKernelStatusDismiss(message, getStatusPersistMs(toast));
+    window.DialengNotifications.arm(target);
 }
 
 function showKernelStatusMessage(message, tone = 'warning', persistMs = 5000) {
+    window.DialengNotifications.show(message, tone, persistMs);
+}
+
+function setNotebookSaveState(state) {
+    const stateEl = document.getElementById('notebook-save-state');
+    if (!stateEl) return;
+    const labels = {
+        modified: 'Modified',
+        saving: 'Saving…',
+        saved: 'Saved',
+        failed: 'Save failed',
+    };
+    stateEl.textContent = labels[state] || state;
+    stateEl.className = `notebook-save-state ${state}`;
+}
+
+function showExternalSaveConflict(conflict) {
     const statusEl = document.getElementById('status');
     if (!statusEl) return;
-    statusEl.innerHTML = `<div class="status ${tone}">${escapeHtml(message)}</div>`;
-    scheduleKernelStatusDismiss(message, persistMs);
+    const notice = document.createElement('div');
+    notice.className = 'status error recovery-notice';
+    const message = document.createElement('span');
+    message.textContent = conflict.message || 'This notebook changed on disk.';
+    const reload = document.createElement('button');
+    reload.className = 'btn btn-sm';
+    reload.textContent = 'Reload disk version';
+    reload.onclick = () => window.location.reload();
+    const overwrite = document.createElement('button');
+    overwrite.className = 'btn btn-sm btn-save';
+    overwrite.textContent = 'Overwrite disk file';
+    overwrite.onclick = () => htmx.ajax('POST', conflict.overwrite_url, {
+        target: '#status',
+        swap: 'innerHTML',
+    });
+    notice.append(message, reload, overwrite);
+    statusEl.replaceChildren(notice);
+}
+
+async function checkNotebookRecovery() {
+    if (!window.NOTEBOOK_ID) return;
+    try {
+        const response = await fetch(`/dialeng/${window.NOTEBOOK_ID}/recovery/status`, {cache: 'no-store'});
+        if (!response.ok) return;
+        const recovery = await response.json();
+        if (!recovery.available) return;
+        const statusEl = document.getElementById('status');
+        if (!statusEl) return;
+        const notice = document.createElement('div');
+        notice.className = 'status warning recovery-notice';
+        const message = document.createElement('span');
+        message.textContent = 'A newer autosave recovery snapshot is available.';
+        const inspect = document.createElement('button');
+        inspect.className = 'btn btn-sm';
+        inspect.textContent = 'Inspect';
+        inspect.onclick = () => window.open(recovery.inspect_url, '_blank', 'noopener');
+        const restore = document.createElement('button');
+        restore.className = 'btn btn-sm btn-save';
+        restore.textContent = 'Restore';
+        restore.onclick = () => applyNotebookRecovery('restore');
+        const discard = document.createElement('button');
+        discard.className = 'btn btn-sm';
+        discard.textContent = 'Discard';
+        discard.onclick = () => applyNotebookRecovery('discard');
+        notice.append(message, inspect, restore, discard);
+        statusEl.replaceChildren(notice);
+    } catch (error) {
+        console.warn('[Persistence] Recovery check failed:', error);
+    }
+}
+
+async function applyNotebookRecovery(action) {
+    const body = new URLSearchParams({action});
+    const response = await fetch(`/dialeng/${window.NOTEBOOK_ID}/recovery`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body,
+    });
+    if (!response.ok) {
+        showKernelStatusMessage('Recovery action failed. The canonical notebook was not changed.', 'error', 7000);
+        return;
+    }
+    if (action === 'restore') window.location.reload();
+    else showKernelStatusMessage('Recovery snapshot discarded.', 'success', 3000);
+}
+
+async function showContextInspector(cellId) {
+    let overlay = document.getElementById('context-inspector-overlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'context-inspector-overlay';
+        overlay.className = 'context-inspector-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
+        overlay.setAttribute('aria-label', 'Prompt context inspector');
+        overlay.addEventListener('click', event => {
+            if (event.target === overlay) overlay.classList.remove('visible');
+        });
+        document.body.appendChild(overlay);
+    }
+    overlay.classList.add('visible');
+    overlay.innerHTML = '<section class="context-inspector"><p>Preparing context inspection…</p></section>';
+    try {
+        const response = await fetch(`${nbApiPath()}/cell/${cellId}/context`, {cache: 'no-store'});
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const report = await response.json();
+        const panel = document.createElement('section');
+        panel.className = 'context-inspector';
+        const close = document.createElement('button');
+        close.className = 'btn btn-sm context-inspector-close';
+        close.textContent = 'Close';
+        close.onclick = () => overlay.classList.remove('visible');
+        const title = document.createElement('h2');
+        title.textContent = 'Prompt context';
+        const summary = document.createElement('p');
+        summary.textContent = `${report.provider || 'Provider'} · ${report.model || 'default model'} · approximately ${report.estimated_input_tokens || 0} input tokens`;
+        panel.append(close, title, summary);
+
+        const addSection = (heading, items, formatter) => {
+            const section = document.createElement('section');
+            const h3 = document.createElement('h3');
+            h3.textContent = `${heading} (${items.length})`;
+            const list = document.createElement('ul');
+            items.forEach(item => {
+                const li = document.createElement('li');
+                li.textContent = formatter(item);
+                list.appendChild(li);
+            });
+            section.append(h3, list);
+            panel.appendChild(section);
+        };
+        addSection('Included cells', report.included_cells || [], item =>
+            `#${item.index + 1} ${item.cell_type}${item.pinned ? ' · pinned' : ''} · ${item.message_count} message(s)`
+        );
+        addSection('Skipped cells', report.skipped_cells || [], item => `#${item.index + 1} · ${item.reason}`);
+        addSection('Truncated cells', report.truncated_cells || [], item => `#${item.index + 1} · ${item.reason}`);
+        addSection('Dynamic expressions', report.dynamic_expressions || [], item => `$\`${item}\` (evaluated fresh)`);
+        addSection('Declared tools', report.declared_tools || [], item => item);
+        const media = document.createElement('p');
+        media.textContent = `Images: ${report.image_count || 0} (${report.encoded_image_chars || 0} encoded characters). CRAFT messages: ${report.craft_message_count || 0}. Built-in tools: ${report.built_in_tools_enabled ? 'enabled' : 'disabled'}.`;
+        panel.appendChild(media);
+        overlay.replaceChildren(panel);
+    } catch (error) {
+        overlay.innerHTML = `<section class="context-inspector"><h2>Context inspection failed</h2><p>${escapeHtml(error.message)}</p></section>`;
+    }
+}
+
+async function showKernelDiagnostics() {
+    let overlay = document.getElementById('kernel-diagnostics-overlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'kernel-diagnostics-overlay';
+        overlay.className = 'context-inspector-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
+        overlay.setAttribute('aria-label', 'Kernel diagnostics');
+        overlay.addEventListener('click', event => {
+            if (event.target === overlay) overlay.classList.remove('visible');
+        });
+        document.body.appendChild(overlay);
+    }
+    overlay.classList.add('visible');
+    overlay.innerHTML = '<section class="context-inspector"><p>Loading diagnostics…</p></section>';
+    try {
+        const response = await fetch(`${nbApiPath()}/diagnostics`, {cache: 'no-store'});
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const diagnostics = await response.json();
+        const panel = document.createElement('section');
+        panel.className = 'context-inspector diagnostics-panel';
+        const close = document.createElement('button');
+        close.className = 'btn btn-sm context-inspector-close';
+        close.textContent = 'Close';
+        close.onclick = () => overlay.classList.remove('visible');
+        const title = document.createElement('h2');
+        title.textContent = 'Kernel diagnostics';
+        const grid = document.createElement('dl');
+        grid.className = 'diagnostics-grid';
+        const values = {
+            'Display state': diagnostics.kernel.display_state,
+            'Connection': diagnostics.kernel.connection_state,
+            'Kernel type': diagnostics.kernel.selected_type,
+            'Runtime ID': diagnostics.kernel.runtime_id || 'n/a',
+            'Kernel ID': diagnostics.kernel.kernel_id || 'n/a',
+            'Last activity': diagnostics.kernel.last_activity_at || 'n/a',
+            'Queue': diagnostics.queue.running_cell_id
+                ? `running ${diagnostics.queue.running_cell_id}`
+                : `${diagnostics.queue.queued_count || 0} queued`,
+            'Setup': diagnostics.setup.is_active
+                ? `${diagnostics.setup.phase || 'active'} · ${diagnostics.setup.detail || ''}`
+                : 'idle',
+            'Browser tabs': diagnostics.runtime.websocket_clients,
+            'Notebook revision': diagnostics.revisions.notebook,
+            'Kernel revision': diagnostics.revisions.kernel,
+            'Autosave': diagnostics.runtime.autosave_pending ? 'pending' : 'idle',
+        };
+        Object.entries(values).forEach(([label, value]) => {
+            const dt = document.createElement('dt');
+            dt.textContent = label;
+            const dd = document.createElement('dd');
+            dd.textContent = String(value);
+            grid.append(dt, dd);
+        });
+        const actions = document.createElement('div');
+        actions.className = 'diagnostics-actions';
+        const interrupt = document.createElement('button');
+        interrupt.className = 'btn btn-sm';
+        interrupt.textContent = 'Interrupt execution';
+        interrupt.onclick = () => htmx.ajax('POST', `${nbApiPath()}/kernel/interrupt`, '#status');
+        const restart = document.createElement('button');
+        restart.className = 'btn btn-sm';
+        restart.textContent = 'Restart kernel';
+        restart.onclick = () => htmx.ajax('POST', `${nbApiPath()}/kernel/restart`, '#status');
+        actions.append(interrupt, restart);
+        const historyTitle = document.createElement('h3');
+        historyTitle.textContent = 'Recent status history';
+        const history = document.createElement('ol');
+        history.className = 'diagnostics-history';
+        dialengStatusHistory.slice(-10).reverse().forEach(item => {
+            const li = document.createElement('li');
+            li.textContent = `${new Date(item.timestamp).toLocaleTimeString()} · ${item.message}`;
+            history.appendChild(li);
+        });
+        panel.append(close, title, grid, actions, historyTitle, history);
+        overlay.replaceChildren(panel);
+        close.focus();
+    } catch (error) {
+        overlay.innerHTML = `<section class="context-inspector"><h2>Diagnostics unavailable</h2><p>${escapeHtml(error.message)}</p></section>`;
+    }
 }
 
 async function fetchKernelSnapshot(notebookId, source = 'poll') {
     try {
         const resp = await fetch(`/dialeng/${notebookId}/kernel/snapshot`, { cache: 'no-store' });
+        if (resp.status === 410) {
+            const deletedState = await resp.json();
+            handleNotebookDeleted(deletedState);
+            return;
+        }
         if (!resp.ok) return;
         const snapshot = await resp.json();
         applyKernelSnapshot(snapshot, source);
@@ -2700,19 +3649,54 @@ async function fetchKernelSnapshot(notebookId, source = 'poll') {
     }
 }
 
+function handleNotebookDeleted(data = {}) {
+    if (window.NOTEBOOK_TERMINAL_STATE) return;
+    window.NOTEBOOK_TERMINAL_STATE = true;
+    stopWebSocketHeartbeat();
+
+    if (kernelStateSyncIntervalId) {
+        clearInterval(kernelStateSyncIntervalId);
+        kernelStateSyncIntervalId = null;
+    }
+    if (wsReconnectTimerId) {
+        clearTimeout(wsReconnectTimerId);
+        wsReconnectTimerId = null;
+    }
+    if (ws) {
+        const socket = ws;
+        ws = null;
+        socket.onclose = null;
+        if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+            socket.close(1000, 'Notebook deleted');
+        }
+    }
+
+    showKernelStatusMessage(
+        data.message || 'Notebook deleted. Its kernel and pending work were stopped.',
+        'success',
+        1800,
+    );
+    const workspaceUrl = data.workspace_url || '/dialeng/workspace?deleted=1';
+    setTimeout(() => window.location.replace(workspaceUrl), 450);
+}
+
 function startKernelStateSync(notebookId) {
     if (kernelStateSyncIntervalId) clearInterval(kernelStateSyncIntervalId);
-    fetchKernelSnapshot(notebookId, 'startup');
-    kernelStateSyncIntervalId = setInterval(() => fetchKernelSnapshot(notebookId, 'poll'), 5000);
+    if (!getKernelState()) fetchKernelSnapshot(notebookId, 'startup');
+    kernelStateSyncIntervalId = null;
 }
 
 function applyKernelSnapshot(snapshot, source = 'ws') {
     if (!snapshot || snapshot.type !== 'kernel_snapshot') return;
+    recordSnapshotRevisions(
+        snapshot,
+        source === 'recovery' ? null : [snapshot.stream || 'kernel'],
+    );
 
     const previous = getKernelState();
     window.KERNEL_STATE = snapshot;
     window.KERNEL_ALIVE = !!snapshot.kernel?.can_run;
-    applyNotebookSnapshot(snapshot.notebook, previous?.notebook || null);
+    applyNotebookSnapshot(snapshot.notebook, previous?.notebook || null, snapshot.llm || null);
     syncCurrentExplorerKernelState(snapshot);
 
     handleQueueUpdate({
@@ -2825,6 +3809,8 @@ function applyKernelSnapshot(snapshot, source = 'ws') {
 }
 
 function connectWebSocket(notebookId) {
+    if (window.NOTEBOOK_TERMINAL_STATE) return;
+    recordSnapshotRevisions({revisions: window.INITIAL_REVISIONS || {}});
     currentNotebookId = notebookId;  // Store globally for other functions to use
     startKernelStateSync(notebookId);
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -2834,19 +3820,23 @@ function connectWebSocket(notebookId) {
         console.log('[WS] Connected to notebook:', notebookId);
         _wsReconnectDelay = 1000;  // Reset backoff on successful connection
         // Send join message to register this connection with the notebook
-        ws.send(JSON.stringify({type: 'join', notebook_id: notebookId}));
+        sendWebSocketControl({type: 'join', notebook_id: notebookId, revisions: wsRevisions});
+        startWebSocketHeartbeat();
     };
 
     ws.onmessage = function(event) {
         const msg = event.data;
 
-        // Debug: Log every message received
-        console.log('[WS] RAW message received, length:', msg?.length, 'type:', typeof msg, 'starts:', msg?.substring?.(0, 50));
+        debugWebSocket(
+            '[WS] RAW message received, length:', msg?.length,
+            'type:', typeof msg,
+            'starts:', msg?.substring?.(0, 50),
+        );
 
         // Check if message is HTML (OOB swap from collaborator) or JSON (streaming)
         if (msg && typeof msg === 'string' && msg.startsWith('<')) {
             // HTML with hx-swap-oob - process as OOB swap
-            console.log('[WS] Received OOB HTML swap, length:', msg.length);
+            debugWebSocket('[WS] Received OOB HTML swap, length:', msg.length);
             processOOBSwap(msg);
             return;
         }
@@ -2859,10 +3849,39 @@ function connectWebSocket(notebookId) {
             console.error('[WS] Failed to parse JSON message:', msg?.substring?.(0, 100), e);
             return;
         }
-        console.log('[WS] Received message:', data.type, 'cell_id:', data.cell_id || 'none');
+        if (!acceptRevisionedEvent(data)) return;
+        debugWebSocket('[WS] Received message:', data.type, 'cell_id:', data.cell_id || 'none');
+        if (window.dialengEvents?.dispatch(data)) return;
 
-        if (data.type === 'kernel_snapshot') {
+        if (data.type === 'heartbeat_ack') {
+            wsLastHeartbeatAck = Date.now();
+            if (wsHeartbeatDeadlineId) clearTimeout(wsHeartbeatDeadlineId);
+            wsHeartbeatDeadlineId = null;
+        } else if (data.type === 'notebook_deleted') {
+            handleNotebookDeleted(data);
+        } else if (data.type === 'kernel_snapshot') {
             applyKernelSnapshot(data, 'ws');
+        } else if (data.type === 'llm_status') {
+            const notebook = getKernelState()?.notebook || {
+                llm_provider: data.selected_provider,
+                model: data.selected_model,
+            };
+            syncLlmSelectors(data, notebook);
+        } else if (data.type === 'notebook_saved') {
+            setNotebookSaveState('saved');
+        } else if (data.type === 'notebook_reloaded') {
+            window.location.reload();
+        } else if (data.type === 'file_explorer_changed') {
+            const sidebar = document.getElementById('file-explorer-sidebar');
+            const currentPath = document.getElementById('current-explorer-path')?.value || '';
+            if (
+                sidebar?.classList.contains('file-explorer-open')
+                && (data.paths || []).includes(currentPath)
+            ) {
+                refreshFileExplorer();
+            }
+        } else if (data.type === 'status_message') {
+            showKernelStatusMessage(data.message || 'Dialeng status changed.', data.tone || 'warning', data.persist_ms || 7000);
         } else if (data.type === 'stream_chunk') {
             // Skip if cancelled
             if (cancelledCells.has(data.cell_id)) return;
@@ -2875,8 +3894,8 @@ function connectWebSocket(notebookId) {
             finishStreaming(data.cell_id);
         } else if (data.type === 'prompt_output_update') {
             console.log('[WS] prompt_output_update received for cell:', data.cell_id, 'version:', data.version);
-            applyPromptOutputUpdate(data.cell_id, data.output);
-            updateCellVersion(data.cell_id, data.version);
+            const result = applyPromptOutputUpdate(data.cell_id, data.output);
+            if (result?.safeVersion !== false) updateCellVersion(data.cell_id, data.version);
         } else if (data.type === 'prompt_stream_start') {
             // Prompt cell LLM generation started (e.g., from _add_msg_unsafe with run_mode='run').
             // Shows "Generating..." indicator so the user knows the LLM is working.
@@ -2894,8 +3913,8 @@ function connectWebSocket(notebookId) {
             resetCodeStreamingTimeout(data.cell_id);
         } else if (data.type === 'code_stream_chunk') {
             // Append output chunk to code cell
-            console.log('[WS] code_stream_chunk received for cell:', data.cell_id, 'stream:', data.stream, 'length:', data.chunk?.length || 0);
-            appendCodeOutput(data.cell_id, data.chunk, data.stream);
+            debugWebSocket('[WS] code_stream_chunk received for cell:', data.cell_id, 'stream:', data.stream, 'length:', data.chunk?.length || 0);
+            appendCodeOutput(data.cell_id, data.chunk, data.output_stream || data.stream);
             resetCodeStreamingTimeout(data.cell_id);
         } else if (data.type === 'code_stream_end') {
             // Code cell execution finished
@@ -2909,7 +3928,7 @@ function connectWebSocket(notebookId) {
         } else if (data.type === 'code_display_data') {
             // Rich output (image, HTML, plot, etc.)
             console.log('[WS] code_display_data received for cell:', data.cell_id);
-            appendDisplayData(data.cell_id, data.html, data.display_id);
+            appendDisplayData(data.cell_id, data.html, data.display_id, data.output_kind);
             resetCodeStreamingTimeout(data.cell_id);
         } else if (data.type === 'code_update_display') {
             // Update existing display data (tqdm progress bars, widgets)
@@ -2919,7 +3938,7 @@ function connectWebSocket(notebookId) {
         } else if (data.type === 'code_clear_output') {
             // Clear cell output (used by widgets before updating)
             console.log('[WS] code_clear_output received for cell:', data.cell_id);
-            clearCellOutput(data.cell_id);
+            clearCellOutput(data.cell_id, Boolean(data.wait));
             resetCodeStreamingTimeout(data.cell_id);
         } else if (data.type === 'queue_update') {
             // Queue state update from server
@@ -2945,6 +3964,8 @@ function connectWebSocket(notebookId) {
             // Tool returned a result
             console.log('[WS] tool_result:', data.tool_name, 'status:', data.status);
             ToolUI.showToolResult(data.cell_id, data.tool_id, data.tool_name, data.result, data.status);
+        } else if (data.type === 'llm_usage') {
+            console.log('[WS] llm_usage:', data.provider, data.usage);
         } else if (data.type === 'tool_confirmation_request') {
             // Server requesting confirmation for file-modifying tool
             console.log('[WS] tool_confirmation_request:', data.tool_name);
@@ -2974,6 +3995,7 @@ function connectWebSocket(notebookId) {
             // In-place source update from dialoghelper — no editor destruction (no FOUST).
             // editor.setValue() preserves the Monaco DOM and re-tokenizes in-place.
             const editor = monacoEditors[data.cell_id];
+            const model = monacoModels[data.cell_id];
             if (editor) {
                 const currentValue = editor.getValue();
                 if (currentValue !== data.source) {
@@ -2981,15 +4003,41 @@ function connectWebSocket(notebookId) {
                     editor.setValue(data.source);
                     if (position) editor.setPosition(position);
                 }
+            } else if (model && model.getValue() !== data.source) {
+                model.setValue(data.source);
             }
             // Also update hidden textarea
             const textarea = document.getElementById(`source-${data.cell_id}`);
             if (textarea) textarea.value = data.source;
-            updateCellVersion(data.cell_id, data.version);
+            const promptTextarea = document.getElementById(`prompt-${data.cell_id}`);
+            if (promptTextarea && promptTextarea.value !== data.source) {
+                promptTextarea.value = data.source;
+            }
+            let outputVersionSafe = true;
+            if (data.cell_type === 'prompt' && typeof data.output === 'string') {
+                const result = applyPromptOutputUpdate(data.cell_id, data.output);
+                outputVersionSafe = result?.safeVersion !== false;
+            }
+            if (data.execution_count == null && data.time_run == null) {
+                document.querySelector(`#header-${data.cell_id} .cell-meta`)?.remove();
+            }
+            if (outputVersionSafe) updateCellVersion(data.cell_id, data.version);
+            renderCellPreviews(data.cell_id);
         } else if (data.type === 'cell_conflict') {
             console.warn('[WS] cell_conflict received:', data);
+            if (data.conflict_field === 'output') {
+                applyPromptOutputUpdate(data.cell_id, data.output, {force: true});
+                switchToPreview(data.cell_id, 'output');
+            } else {
+                const textarea = document.getElementById(`source-${data.cell_id}`);
+                if (textarea && typeof data.source === 'string') textarea.value = data.source;
+                const promptTextarea = document.getElementById(`prompt-${data.cell_id}`);
+                if (promptTextarea && typeof data.source === 'string') promptTextarea.value = data.source;
+            }
             updateCellVersion(data.cell_id, data.actual_version ?? data.version);
-            showKernelStatusMessage('That cell changed in another tab. Dialeng kept the newer backend version.', 'warning', 7000);
+            renderCellPreviews(data.cell_id);
+            const conflictLabel = data.conflict_field === 'output' ? 'response' : 'cell';
+            showKernelStatusMessage(`That ${conflictLabel} changed in another tab. Dialeng kept the newer backend version.`, 'warning', 7000);
         } else if (data.type === 'cell_class_update') {
             // Update cell wrapper CSS classes (skipped, pinned, etc) without DOM replacement
             const cellEl = document.getElementById(`cell-${data.cell_id}`);
@@ -3024,10 +4072,8 @@ function connectWebSocket(notebookId) {
                 }
             }
 
-            if (monacoEditors[data.cell_id]) {
-                monacoEditors[data.cell_id].dispose();
-                delete monacoEditors[data.cell_id];
-            }
+            destroyMonacoEditor(data.cell_id);
+            promptResponseEditor?.remove(data.cell_id);
             if (!reconcileCellStructure({ orderedIds: data.ordered_cell_ids || [] })) {
                 return;
             }
@@ -3093,10 +4139,15 @@ function connectWebSocket(notebookId) {
     };
 
     ws.onclose = function() {
+        if (window.NOTEBOOK_TERMINAL_STATE) return;
+        stopWebSocketHeartbeat();
         const delay = _wsReconnectDelay + Math.random() * _wsReconnectDelay * 0.2;
         console.log(`[WS] Disconnected, reconnecting in ${Math.round(delay)}ms...`);
         showKernelStatusMessage('Browser connection dropped. Reconnecting…', 'warning', Math.round(delay) + 1000);
-        setTimeout(() => connectWebSocket(notebookId), delay);
+        wsReconnectTimerId = setTimeout(() => {
+            wsReconnectTimerId = null;
+            connectWebSocket(notebookId);
+        }, delay);
         _wsReconnectDelay = Math.min(_wsReconnectDelay * 2, 30000);
     };
 
@@ -3105,7 +4156,54 @@ function connectWebSocket(notebookId) {
     };
 }
 
-function appendToResponse(cellId, chunk, isThinking) {
+if (window.dialengEvents) {
+    window.dialengEvents.register('heartbeat_ack', () => {
+        wsLastHeartbeatAck = Date.now();
+        if (wsHeartbeatDeadlineId) clearTimeout(wsHeartbeatDeadlineId);
+        wsHeartbeatDeadlineId = null;
+    });
+    window.dialengEvents.register('notebook_deleted', handleNotebookDeleted);
+    window.dialengEvents.register('resync_required', data => {
+        recoverNotebookState(
+            `server revision mismatch: ${(data.streams || []).join(', ') || 'unknown'}`,
+        );
+    });
+    window.dialengEvents.register('kernel_snapshot', data => applyKernelSnapshot(data, 'ws'));
+    window.dialengEvents.register('llm_status', data => {
+        const notebook = getKernelState()?.notebook || {
+            llm_provider: data.selected_provider,
+            model: data.selected_model,
+        };
+        syncLlmSelectors(data, notebook);
+    });
+    window.dialengEvents.register('status_message', data => {
+        showKernelStatusMessage(
+            data.message || 'Dialeng status changed.',
+            data.tone || 'warning',
+            data.persist_ms || 7000,
+        );
+    });
+    window.dialengEvents.register('notebook_saved', () => setNotebookSaveState('saved'));
+    window.dialengEvents.register('notebook_reloaded', () => window.location.reload());
+    window.dialengEvents.register('file_explorer_changed', data => {
+        const sidebar = document.getElementById('file-explorer-sidebar');
+        const currentPath = document.getElementById('current-explorer-path')?.value || '';
+        if (
+            sidebar?.classList.contains('file-explorer-open')
+            && (data.paths || []).includes(currentPath)
+        ) {
+            refreshFileExplorer();
+        }
+    });
+    window.dialengEvents.register('cell_type_change', applyCellTypeChange);
+    window.dialengEvents.register('cell_output_commit', data => {
+        updateCellVersion(data.cell_id, data.version);
+    });
+}
+
+function renderPromptChunk(cellId, chunk, {render = true} = {}) {
+    if (!chunk) return;
+
     const textarea = document.getElementById(`output-${cellId}`);
     const preview = document.querySelector(`[data-cell-id="${cellId}"][data-field="output"]`);
     if (textarea) {
@@ -3113,10 +4211,20 @@ function appendToResponse(cellId, chunk, isThinking) {
             textarea.value = '';
         }
         textarea.value += chunk;
-        if (preview) {
+        if (preview && render && !document.hidden) {
             preview.innerHTML = renderMarkdown(textarea.value);
         }
     }
+}
+
+const promptChunkBatcher = new window.DialengFrameBatcher({onFlush: renderPromptChunk});
+
+function flushPromptChunks(cellId, render = true) {
+    promptChunkBatcher.flush(cellId, {render});
+}
+
+function appendToResponse(cellId, chunk, isThinking) {
+    promptChunkBatcher.append(cellId, chunk);
 }
 
 function showThinkingIndicator(cellId) {
@@ -3143,15 +4251,9 @@ function hideThinkingIndicator(cellId) {
 }
 
 function finishStreaming(cellId) {
+    flushPromptChunks(cellId, false);
     const cell = document.getElementById(`cell-${cellId}`);
-    if (cell) {
-        cell.classList.remove('streaming');
-        // Hide cancel button, show run button
-        const cancelBtn = cell.querySelector('.btn-cancel');
-        const runBtn = cell.querySelector('.btn-run');
-        if (cancelBtn) cancelBtn.style.display = 'none';
-        if (runBtn) runBtn.style.display = '';
-    }
+    setCellRunControlState(cell, false);
     hideThinkingIndicator(cellId);
     streamingCellId = null;
     // Clear safety timeout
@@ -3170,35 +4272,44 @@ function finishStreaming(cellId) {
 let streamingTimeoutId = null;
 const STREAMING_TIMEOUT_MS = 120000; // 2 minutes safety timeout
 
-function applyPromptOutputUpdate(cellId, output) {
+function applyPromptOutputUpdate(cellId, output, {force = false} = {}) {
+    const normalizedOutput = String(output ?? '');
+    const result = force
+        ? {
+            apply: true,
+            safeVersion: true,
+            value: promptResponseEditor?.resolveConflict(cellId, normalizedOutput) ?? normalizedOutput,
+        }
+        : (promptResponseEditor?.receive(cellId, normalizedOutput) ?? {
+            apply: true,
+            safeVersion: true,
+            value: normalizedOutput,
+        });
+    if (!result.apply) return result;
+
     const textarea = document.getElementById(`output-${cellId}`);
     if (textarea) {
-        textarea.value = output || '';
+        textarea.value = result.value;
     }
 
     const preview = document.querySelector(`[data-cell-id="${cellId}"][data-field="output"]`);
     if (preview) {
-        if (output && output.trim()) {
-            preview.innerHTML = renderMarkdown(output);
-            renderMarkdownServer(output, preview);
+        if (result.value && result.value.trim()) {
+            preview.innerHTML = renderMarkdown(result.value);
+            renderMarkdownServer(result.value, preview);
         } else {
             preview.innerHTML = '<p style="color: var(--text-muted);">Click to edit...</p>';
         }
     }
 
     ToolUI.clear(cellId);
+    return result;
 }
 
 function startStreaming(cellId, useThinking) {
+    promptChunkBatcher.clear(cellId);
     const cell = document.getElementById(`cell-${cellId}`);
-    if (cell) {
-        cell.classList.add('streaming');
-        // Show cancel button, hide run button
-        const cancelBtn = cell.querySelector('.btn-cancel');
-        const runBtn = cell.querySelector('.btn-run');
-        if (cancelBtn) cancelBtn.style.display = '';
-        if (runBtn) runBtn.style.display = 'none';
-    }
+    setCellRunControlState(cell, true);
     streamingCellId = cellId;
     const textarea = document.getElementById(`output-${cellId}`);
     const preview = document.querySelector(`[data-cell-id="${cellId}"][data-field="output"]`);
@@ -3301,8 +4412,15 @@ function ansiToHtml(text) {
     return result;
 }
 
-// Track raw text content for carriage return handling
-const streamTextContent = new Map();
+// Per-cell live output state. Each stream segment retains its own stdout/stderr
+// identity and position relative to rich displays, matching Jupyter ordering.
+const streamRenderState = new Map();
+const pendingClearOutputs = new Set();
+
+function resetOutputRenderState(cellId) {
+    streamRenderState.set(cellId, {pending: [], active: null});
+    pendingClearOutputs.delete(cellId);
+}
 
 function startCodeStreaming(cellId) {
     console.log('[Code] startCodeStreaming called for cell:', cellId);
@@ -3320,19 +4438,14 @@ function startCodeStreaming(cellId) {
         console.error('[Code] Output element not found:', `output-${cellId}`);
     }
 
-    cell.classList.add('streaming');
-    const cancelBtn = cell.querySelector('.btn-cancel');
-    const runBtn = cell.querySelector('.btn-run');
-    if (cancelBtn) cancelBtn.style.display = '';
-    if (runBtn) runBtn.style.display = 'none';
+    setCellRunControlState(cell, true);
 
     if (outputEl) {
         outputEl.innerHTML = '';  // Clear for fresh output
         outputEl.classList.remove('error');
     }
 
-    // Reset text content tracker for this cell
-    streamTextContent.set(cellId, '');
+    resetOutputRenderState(cellId);
 
     console.log('[Code] Started streaming for cell:', cellId, 'cell found:', !!cell, 'output found:', !!outputEl);
 }
@@ -3342,20 +4455,28 @@ const _streamDirty = new Set();
 const _streamRafIds = new Map();
 
 function appendCodeOutput(cellId, chunk, streamName) {
+    applyPendingOutputClear(cellId);
     const outputEl = document.getElementById(`output-${cellId}`);
     if (!outputEl) return;
 
     // Note: stderr does NOT mean error — tools like tqdm write progress to stderr.
     // The 'error' class is only applied by finishCodeStreaming when has_error is true.
 
-    // Get current raw text and apply chunk
-    let currentText = streamTextContent.get(cellId) || '';
+    const state = streamRenderState.get(cellId) || {pending: [], active: null};
+    state.pending.push({chunk: String(chunk ?? ''), streamName: streamName === 'stderr' ? 'stderr' : 'stdout'});
+    streamRenderState.set(cellId, state);
 
-    // Handle carriage return for progress bars (tqdm, pip).
-    // pexpect can send chunks mixing \n and \r, e.g.:
-    //   "Collecting foo\n  Downloading bar\n\r[2K ━━ 4/20 MB"
-    // We split on \r first, then promote any \n within each part
-    // into separate lines so they survive the \r overwrite.
+    // Schedule a single render per animation frame (debounce)
+    if (!_streamDirty.has(cellId)) {
+        _streamDirty.add(cellId);
+        const rafId = requestAnimationFrame(() => _flushStreamRender(cellId));
+        _streamRafIds.set(cellId, rafId);
+    }
+}
+
+function applyCarriageReturn(currentText, chunk) {
+    // tqdm, pip, and terminal-style libraries use carriage returns to replace
+    // only the current logical line while preserving completed lines.
     if (chunk.includes('\r')) {
         const lines = currentText.split('\n');
         const parts = chunk.split('\r');
@@ -3376,81 +4497,105 @@ function appendCodeOutput(cellId, chunk, streamName) {
                 lines.push(...sub);
             }
         }
-        currentText = lines.join('\n');
-    } else {
-        currentText += chunk;
+        return lines.join('\n');
     }
-
-    // Store updated raw text
-    streamTextContent.set(cellId, currentText);
-
-    // Schedule a single render per animation frame (debounce)
-    if (!_streamDirty.has(cellId)) {
-        _streamDirty.add(cellId);
-        const rafId = requestAnimationFrame(() => _flushStreamRender(cellId));
-        _streamRafIds.set(cellId, rafId);
-    }
+    return currentText + chunk;
 }
 
 function _flushStreamRender(cellId) {
     _streamDirty.delete(cellId);
     _streamRafIds.delete(cellId);
 
-    // Don't render if streaming already finished (prevents overwriting OOB output)
-    if (!streamTextContent.has(cellId)) return;
+    const state = streamRenderState.get(cellId);
+    if (!state) return;
 
     const outputEl = document.getElementById(`output-${cellId}`);
     if (!outputEl) return;
 
-    let streamEl = outputEl.querySelector('.stream-output');
-    if (!streamEl) {
-        streamEl = document.createElement('pre');
-        streamEl.className = 'stream-output';
-        outputEl.appendChild(streamEl);
+    for (const event of state.pending) {
+        let active = state.active;
+        if (
+            !active || active.streamName !== event.streamName ||
+            !active.element?.isConnected || !outputEl.contains(active.element)
+        ) {
+            const element = document.createElement('pre');
+            element.className = `output-item stream-output ${event.streamName}`;
+            element.dataset.outputType = 'stream';
+            outputEl.appendChild(element);
+            active = {streamName: event.streamName, text: '', element};
+            state.active = active;
+        }
+
+        const nearBottom = (
+            active.element.scrollTop + active.element.clientHeight >=
+            active.element.scrollHeight - 30
+        );
+        active.text = applyCarriageReturn(active.text, event.chunk);
+        active.element.innerHTML = ansiToHtml(active.text);
+        if (nearBottom) active.element.scrollTop = active.element.scrollHeight;
     }
-
-    const text = streamTextContent.get(cellId) || '';
-    streamEl.innerHTML = ansiToHtml(text);
-
-    // Only auto-scroll if user is near the bottom
-    const nearBottom = streamEl.scrollTop + streamEl.clientHeight >= streamEl.scrollHeight - 30;
-    if (nearBottom) streamEl.scrollTop = streamEl.scrollHeight;
+    state.pending = [];
 }
 
-function appendDisplayData(cellId, html, displayId) {
+function flushPendingCodeOutput(cellId) {
+    if (!_streamRafIds.has(cellId)) return;
+    cancelAnimationFrame(_streamRafIds.get(cellId));
+    _streamRafIds.delete(cellId);
+    _flushStreamRender(cellId);
+}
+
+function activateOutputScripts(container) {
+    container.querySelectorAll('script').forEach(script => {
+        const replacement = document.createElement('script');
+        Array.from(script.attributes).forEach(attr => replacement.setAttribute(attr.name, attr.value));
+        replacement.textContent = script.textContent;
+        script.parentNode.replaceChild(replacement, script);
+    });
+}
+
+function applyPendingOutputClear(cellId) {
+    if (!pendingClearOutputs.has(cellId)) return;
+    pendingClearOutputs.delete(cellId);
+    clearCellOutput(cellId, false);
+}
+
+function appendDisplayData(cellId, html, displayId, outputKind = 'display_data') {
+    applyPendingOutputClear(cellId);
+    flushPendingCodeOutput(cellId);
     const outputEl = document.getElementById(`output-${cellId}`);
     if (!outputEl) return;
+
+    const state = streamRenderState.get(cellId);
+    if (state) state.active = null;
 
     // Create display data container
     const displayEl = document.createElement('div');
-    displayEl.className = 'display-data';
+    const kindClass = outputKind === 'execute_result' ? 'execute-result' : 'display-data';
+    displayEl.className = `output-item display-data ${kindClass}`;
+    displayEl.dataset.outputType = outputKind;
     if (displayId) {
         displayEl.setAttribute('data-display-id', displayId);
     }
     displayEl.innerHTML = html;
     outputEl.appendChild(displayEl);
 
-    // Execute any scripts in the HTML (for interactive widgets)
-    displayEl.querySelectorAll('script').forEach(script => {
-        const newScript = document.createElement('script');
-        newScript.textContent = script.textContent;
-        script.parentNode.replaceChild(newScript, script);
-    });
+    activateOutputScripts(displayEl);
 }
 
 function updateDisplayData(cellId, html, displayId) {
+    applyPendingOutputClear(cellId);
+    flushPendingCodeOutput(cellId);
     const outputEl = document.getElementById(`output-${cellId}`);
     if (!outputEl || !displayId) return;
 
-    // Find existing display element with matching display_id
-    const existing = outputEl.querySelector(`[data-display-id="${displayId}"]`);
-    if (existing) {
-        existing.innerHTML = html;
-        // Re-execute scripts
-        existing.querySelectorAll('script').forEach(script => {
-            const newScript = document.createElement('script');
-            newScript.textContent = script.textContent;
-            script.parentNode.replaceChild(newScript, script);
+    // Jupyter permits multiple outputs to share a display_id. An update must
+    // replace all matching views, not only the first one.
+    const existing = Array.from(outputEl.querySelectorAll('[data-display-id]'))
+        .filter(element => element.dataset.displayId === String(displayId));
+    if (existing.length) {
+        existing.forEach(element => {
+            element.innerHTML = html;
+            activateOutputScripts(element);
         });
     } else {
         // Fallback: append as new display data
@@ -3458,13 +4603,20 @@ function updateDisplayData(cellId, html, displayId) {
     }
 }
 
-function clearCellOutput(cellId) {
+function clearCellOutput(cellId, wait = false) {
+    if (wait) {
+        pendingClearOutputs.add(cellId);
+        return;
+    }
     const outputEl = document.getElementById(`output-${cellId}`);
     if (!outputEl) return;
 
+    if (_streamRafIds.has(cellId)) cancelAnimationFrame(_streamRafIds.get(cellId));
+    _streamRafIds.delete(cellId);
+    _streamDirty.delete(cellId);
     outputEl.innerHTML = '';
     outputEl.classList.remove('error');
-    streamTextContent.set(cellId, '');
+    resetOutputRenderState(cellId);
 }
 
 function finishCodeStreaming(cellId, hasError) {
@@ -3474,27 +4626,22 @@ function finishCodeStreaming(cellId, hasError) {
 
     clearPendingRunRequest(cellId);
 
-    if (cell) {
-        cell.classList.remove('streaming');
-        const cancelBtn = cell.querySelector('.btn-cancel');
-        const runBtn = cell.querySelector('.btn-run');
-        if (cancelBtn) cancelBtn.style.display = 'none';
-        if (runBtn) runBtn.style.display = '';
-    }
+    setCellRunControlState(cell, false);
 
     if (outputEl && hasError) {
         outputEl.classList.add('error');
     }
 
-    // Cancel any pending debounced stream render to prevent overwriting OOB output
+    // Flush the last frame before removing the accumulator. Otherwise a fast
+    // stream_end can arrive before requestAnimationFrame and lose final text.
     if (_streamRafIds.has(cellId)) {
-        cancelAnimationFrame(_streamRafIds.get(cellId));
-        _streamRafIds.delete(cellId);
+        flushPendingCodeOutput(cellId);
     }
     _streamDirty.delete(cellId);
 
-    // Clean up text content tracker
-    streamTextContent.delete(cellId);
+    streamRenderState.delete(cellId);
+    pendingClearOutputs.delete(cellId);
+    setupLargeOutput(cellId);
 
     // Clear the streaming timeout
     clearCodeStreamingTimeout(cellId);
@@ -3512,13 +4659,9 @@ const pendingRunRequests = new Set();
 
 function markPendingRunRequest(cellId) {
     pendingRunRequests.add(cellId);
-    const cell = document.getElementById(`cell-${cellId}`);
-    const runBtn = cell?.querySelector('.btn-run');
-    if (runBtn) runBtn.disabled = true;
 }
 
 function clearPendingRunRequest(cellId) {
-    if (!pendingRunRequests.has(cellId)) return;
     pendingRunRequests.delete(cellId);
     const cell = document.getElementById(`cell-${cellId}`);
     const runBtn = cell?.querySelector('.btn-run');
@@ -3836,6 +4979,7 @@ function processOOBSwap(html) {
                 console.log('[WS] Skipping OOB swap for cell being edited/streamed:', cellId);
                 continue;
             }
+            if (target.dataset.type !== element.dataset.type) destroyMonacoEditor(cellId);
 
             // Replace the cell
             element.removeAttribute('hx-swap-oob');
@@ -3849,9 +4993,9 @@ function processOOBSwap(html) {
 
                 // Reinitialize Monaco editor if it's a code or shell cell
                 if (newCell.dataset.type === 'code') {
-                    setTimeout(() => initMonacoEditor(cellId), 0);
+                    setTimeout(() => observeMonacoCell(cellId), 0);
                 } else if (newCell.dataset.type === 'shell') {
-                    setTimeout(() => initMonacoEditor(cellId, 'sh'), 0);
+                    setTimeout(() => observeMonacoCell(cellId, 'sh'), 0);
                 }
             }
 
@@ -3863,11 +5007,24 @@ function processOOBSwap(html) {
             // This preserves the Monaco editor DOM — no FOUST
             console.log('[OOB] Targeted swap for:', targetId);
             element.removeAttribute('hx-swap-oob');
+            if (targetId.startsWith('header-')) {
+                // Update execution metadata in place and leave action controls
+                // connected. Replacing or detaching those controls can lose
+                // either HTMX listeners or compiled inline source-sync handlers.
+                const currentSummary = target.firstElementChild;
+                const replacementSummary = element.firstElementChild;
+                if (currentSummary && replacementSummary) {
+                    currentSummary.replaceWith(replacementSummary);
+                    continue;
+                }
+            }
             target.replaceWith(element);
             // Reinitialize HTMX bindings on the new element
             const newEl = document.getElementById(targetId);
             if (newEl) {
-                htmx.process(newEl);
+                if (targetId.startsWith('output-')) {
+                    htmx.process(newEl);
+                }
                 // Re-execute scripts in output OOB swaps (e.g., YouTube embeds, interactive widgets).
                 // innerHTML/replaceWith does NOT execute <script> tags — we must clone them
                 // into new <script> elements so the browser runs them. This mirrors the
@@ -3879,6 +5036,7 @@ function processOOBSwap(html) {
                         newScript.textContent = script.textContent;
                         script.parentNode.replaceChild(newScript, script);
                     });
+                    setupLargeOutput(targetId.replace('output-', ''));
                 }
             }
         }
@@ -3933,19 +5091,19 @@ function processOOBSwap(html) {
 }
 
 function reinitializeMonacoEditors() {
-    // Destroy all existing Monaco editors
-    for (const cellId of Object.keys(monacoEditors)) {
+    // Full-container recovery invalidates every prior view/model.
+    for (const cellId of Object.keys(monacoModels)) {
         destroyMonacoEditor(cellId);
     }
 
-    // Find all code and shell cells and initialize their editors
+    // Observe all code and shell cells; only near-visible views initialize.
     document.querySelectorAll('.cell[data-type="code"]').forEach(cell => {
         const cellId = cell.id.replace('cell-', '');
-        setTimeout(() => initMonacoEditor(cellId), 0);
+        setTimeout(() => observeMonacoCell(cellId), 0);
     });
     document.querySelectorAll('.cell[data-type="shell"]').forEach(cell => {
         const cellId = cell.id.replace('cell-', '');
-        setTimeout(() => initMonacoEditor(cellId, 'sh'), 0);
+        setTimeout(() => observeMonacoCell(cellId, 'sh'), 0);
     });
 }
 
@@ -4187,11 +5345,11 @@ const ToolConfirmation = (function() {
         confirm: function(confirmationId) {
             const pending = pendingConfirmations.get(confirmationId);
             if (pending && ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
+                sendWebSocketControl({
                     type: 'tool_confirmation_response',
                     confirmation_id: confirmationId,
                     approved: true
-                }));
+                });
             }
             this.removeDialog(confirmationId);
             pendingConfirmations.delete(confirmationId);
@@ -4201,11 +5359,11 @@ const ToolConfirmation = (function() {
         cancel: function(confirmationId) {
             const pending = pendingConfirmations.get(confirmationId);
             if (pending && ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
+                sendWebSocketControl({
                     type: 'tool_confirmation_response',
                     confirmation_id: confirmationId,
                     approved: false
-                }));
+                });
             }
             this.removeDialog(confirmationId);
             pendingConfirmations.delete(confirmationId);
@@ -4223,6 +5381,7 @@ const ToolConfirmation = (function() {
 
 // Track pending cell execution when kernel is not yet selected
 let pendingCellRunId = null;
+let pendingCellRunAdvance = true;
 
 function toggleKernelModal(nbId) {
     const overlay = document.getElementById('kernel-modal-overlay');
@@ -4232,6 +5391,7 @@ function toggleKernelModal(nbId) {
     if (wasVisible) {
         kernelModalDismissed = true;
         pendingCellRunId = null;
+        pendingCellRunAdvance = true;
     } else {
         kernelModalDismissed = false;
     }
@@ -4290,12 +5450,11 @@ function selectKernelRuntime(btn, runtime) {
 function _runPendingCell() {
     if (!pendingCellRunId) return;
     const cellId = pendingCellRunId;
+    const advance = pendingCellRunAdvance;
     pendingCellRunId = null;
+    pendingCellRunAdvance = true;
     const cell = document.getElementById(`cell-${cellId}`);
-    if (cell) {
-        const btn = cell.querySelector('.btn-run');
-        if (btn) btn.click();
-    }
+    if (cell) clickCellRunButton(cell, {advance});
 }
 
 function applyKernelSelection(nbId) {
@@ -4393,14 +5552,28 @@ document.addEventListener('htmx:beforeRequest', function(e) {
     // Get request path from HTMX element or requestConfig
     const elt = e.detail.elt;
     const path = elt?.getAttribute('hx-post') || e.detail.requestConfig?.path || e.detail.pathInfo?.requestPath || '';
-    if (!path.match(/\/cell\/[^/]+\/run$/) || canRunCurrentKernel()) return;
+    if (!path.match(/\/cell\/[^/]+\/run$/)) return;
+    const match = path.match(/\/cell\/([^/]+)\/run$/);
+    const cellId = match ? match[1] : null;
+    const advance = runIntentTracker.consume(elt, {defaultAdvance: true});
+    if (canRunCurrentKernel()) {
+        // Disable only after HTMX has accepted the request. Disabling from the
+        // inline click handler can make HTMX discard reruns on a replaced header.
+        if (elt?.classList?.contains('btn-run')) elt.disabled = true;
+        if (advance && cellId) {
+            // Let the originating click finish bubbling first. Otherwise the
+            // cell click listener can re-select the run cell after focus has
+            // already moved to the next editor.
+            requestAnimationFrame(() => {
+                const cell = document.getElementById(`cell-${cellId}`);
+                if (cell) moveToNextCell(cell);
+            });
+        }
+        return;
+    }
 
     // Cancel the HTMX request
     e.preventDefault();
-
-    // Extract cell ID from URL
-    const match = path.match(/\/cell\/([^/]+)\/run$/);
-    const cellId = match ? match[1] : null;
 
     // Revert UI state that was set by prepareCodeRun() or startStreaming()
     if (cellId) {
@@ -4418,6 +5591,7 @@ document.addEventListener('htmx:beforeRequest', function(e) {
 
     // Store pending cell and show kernel modal
     pendingCellRunId = cellId;
+    pendingCellRunAdvance = advance;
     const kernelState = getKernelState();
     const displayState = kernelState?.kernel?.display_state;
     if (kernelState?.kernel?.exists && ['connecting', 'initializing', 'restarting', 'busy'].includes(displayState)) {
@@ -4432,6 +5606,20 @@ document.addEventListener('htmx:beforeRequest', function(e) {
         kernelModalDismissed = false;
         overlay.classList.add('visible');
     }
+});
+
+// HTMX evaluates inline values while constructing the request, which can race
+// Monaco's final input event during fast edits. Overwrite run parameters at
+// the last configurable phase so the backend always receives the live model.
+document.addEventListener('htmx:configRequest', function(e) {
+    const path = e.detail.path || e.detail.pathInfo?.requestPath || '';
+    const match = path.match(/\/cell\/([^/]+)\/run$/);
+    if (!match) return;
+    const cellId = match[1];
+    syncAllContent(cellId);
+    e.detail.parameters.source = getCellSourceForRequest(cellId);
+    e.detail.parameters.expected_version =
+        document.getElementById(`version-${cellId}`)?.value || '-1';
 });
 
 // Server-side safety net: kernel-required HX-Trigger
@@ -4454,6 +5642,7 @@ document.addEventListener('kernel-required', function(e) {
     }
 
     pendingCellRunId = cellId;
+    pendingCellRunAdvance = true;
     const overlay = document.getElementById('kernel-modal-overlay');
     if (overlay && !overlay.classList.contains('visible')) {
         kernelModalDismissed = false;
@@ -4703,9 +5892,13 @@ function showDeleteConfirm(filePath, displayName) {
     const modal = document.getElementById('delete-confirm-modal');
     const pathInput = document.getElementById('delete-file-path');
     const displaySpan = document.getElementById('delete-file-display');
+    const notebookWarning = document.getElementById('delete-notebook-warning');
     if (modal && pathInput && displaySpan) {
         pathInput.value = filePath;
         displaySpan.textContent = displayName;
+        if (notebookWarning) {
+            notebookWarning.style.display = filePath.toLowerCase().endsWith('.ipynb') ? 'block' : 'none';
+        }
         modal.classList.add('visible');
     }
 }
@@ -4724,13 +5917,26 @@ function confirmDeleteFile() {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: `path=${encodeURIComponent(filePath)}&active_notebook_id=${encodeURIComponent(activeNotebookId)}&active_file_relpath=${encodeURIComponent(activeFileRelpath)}`
-    }).then(r => r.text()).then(html => {
+    }).then(async r => {
+        const result = await r.json();
+        if (!r.ok || !result.ok) throw new Error(result.message || `Delete failed: ${r.status}`);
+        return result;
+    }).then(result => {
         const container = document.getElementById('file-list-content');
-        if (container) {
-            container.outerHTML = html;
+        if (container && result.html) {
+            container.outerHTML = result.html;
             const newContainer = document.getElementById('file-list-content');
             if (newContainer && typeof htmx !== 'undefined') htmx.process(newContainer);
         }
+        if (result.deleted_notebook_id && result.deleted_notebook_id === window.NOTEBOOK_ID) {
+            handleNotebookDeleted({
+                notebook_id: result.deleted_notebook_id,
+                workspace_url: result.workspace_url,
+            });
+        }
+    }).catch(error => {
+        console.error('[Files] Delete failed:', error);
+        showKernelStatusMessage(error.message || 'The file could not be deleted.', 'error', 7000);
     });
     hideDeleteConfirm();
 }

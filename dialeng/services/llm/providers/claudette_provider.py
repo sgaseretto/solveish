@@ -106,6 +106,7 @@ class ClaudetteProvider(BaseLLMProvider):
         model: str,
         use_thinking: bool,
         config: Any,
+        cancel_event: Any = None,
     ) -> AsyncIterator[Dict]:
         logger.info(f"claudette: Using model {model}")
         logger.info(f"claudette: Context has {len(context_messages)} messages")
@@ -155,6 +156,7 @@ class ClaudetteProvider(BaseLLMProvider):
         notebook_id: str,
         registry: Any,
         max_steps: int,
+        cancel_event: Any = None,
     ) -> AsyncIterator[Dict]:
         """Stream with tool loop using claudette (direct API/Bedrock).
 
@@ -195,6 +197,8 @@ class ClaudetteProvider(BaseLLMProvider):
             current_prompt = prompt
 
         while steps < max_steps:
+            if cancel_event and cancel_event.is_set():
+                break
             steps += 1
             logger.debug(f"claudette-tools: Step {steps}/{max_steps}")
 

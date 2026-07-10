@@ -26,15 +26,19 @@ DEFAULT_CONFIG = {
     },
     "models": {
         "available": [
-            {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5"},
-            {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5"},
-            {"id": "claude-3-5-sonnet", "name": "Claude 3.5 Sonnet"},
-            {"id": "claude-3-5-haiku", "name": "Claude 3.5 Haiku"}
+            {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "providers": ["anthropic_api", "bedrock", "claude_code_subscription"], "capabilities": ["tools", "images", "thinking", "usage"]},
+            {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "providers": ["anthropic_api", "bedrock", "claude_code_subscription"], "capabilities": ["tools", "images", "thinking", "usage"]},
+            {"id": "claude-3-5-sonnet", "name": "Claude 3.5 Sonnet", "providers": ["anthropic_api", "bedrock", "claude_code_subscription"], "capabilities": ["tools", "images", "usage"]},
+            {"id": "claude-3-5-haiku", "name": "Claude 3.5 Haiku", "providers": ["anthropic_api", "bedrock", "claude_code_subscription"], "capabilities": ["tools", "images", "usage"]},
+            {"id": "gpt-5.4", "name": "GPT-5.4", "providers": ["openai_codex"], "capabilities": ["tools", "images", "thinking", "skills", "usage"]},
+            {"id": "gpt-5.4-mini", "name": "GPT-5.4 Mini", "providers": ["openai_codex"], "capabilities": ["tools", "images", "thinking", "skills", "usage"]},
+            {"id": "gpt-5.3-codex", "name": "GPT-5.3 Codex", "providers": ["openai_codex"], "capabilities": ["tools", "images", "thinking", "skills", "usage"]}
         ],
         "defaults": {
             "bedrock": "claude-haiku-4-5",
             "anthropic_api": "claude-sonnet-4-5",
             "claude_code_subscription": "claude-sonnet-4-5",
+            "openai_codex": "gpt-5.4",
             "fallback": "claude-sonnet-4-5",
             "comment": "Default model per provider. bedrock=AWS Bedrock, anthropic_api=direct API, claude_code_subscription=Claude Code CLI. fallback is used when provider is unknown."
         },
@@ -58,6 +62,12 @@ DEFAULT_CONFIG = {
             "claude-3-5-sonnet": "sonnet",
             "claude-3-5-haiku": "haiku",
             "comment": "Model IDs for Claude Code subscription - uses simple names (sonnet, haiku, opus)"
+        },
+        "openai_codex_map": {
+            "gpt-5.4": "gpt-5.4",
+            "gpt-5.4-mini": "gpt-5.4-mini",
+            "gpt-5.3-codex": "gpt-5.3-codex",
+            "comment": "Models exposed by the OpenAI Codex subscription transport"
         }
     },
     "modes": {
@@ -71,7 +81,24 @@ DEFAULT_CONFIG = {
     "llm": {
         "debug_mode": False,
         "debug_log_dir": "./debug_logs",
+        "openai_codex_enabled": True,
+        "openai_codex_transport": "auto",
         "comment": "LLM provider settings. debug_mode saves prompts and responses to JSON files."
+    },
+    "skills": {
+        "enabled": True,
+        "comment": "Load project-scoped OpenAI Codex skills from .dialeng/skills."
+    },
+    "persistence": {
+        "atomic_explicit_save": True,
+        "autosave": {
+            "enabled": False,
+            "debounce_ms": 1500,
+            "idle_only": True,
+            "recovery_snapshots": True,
+            "max_recovery_files": 5
+        },
+        "comment": "Explicit saves are atomic. Autosave and recovery files are opt-in and disabled by default."
     },
     "tool_settings": {
         "max_steps": 5,
@@ -105,6 +132,8 @@ class ModelConfig:
     """Configuration for a single model."""
     id: str
     name: str
+    providers: List[str] = field(default_factory=list)
+    capabilities: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -120,6 +149,7 @@ class DialengConfig:
     anthropic_api_map: Dict[str, str] = field(default_factory=dict)
     bedrock_map: Dict[str, str] = field(default_factory=dict)
     claude_code_map: Dict[str, str] = field(default_factory=dict)
+    openai_codex_map: Dict[str, str] = field(default_factory=dict)
 
     # Provider-specific default models
     default_models: Dict[str, str] = field(default_factory=dict)
@@ -133,6 +163,19 @@ class DialengConfig:
     # LLM provider settings
     debug_mode: bool = False  # Enable debug logging to files
     debug_log_dir: str = "./debug_logs"  # Directory for debug logs
+    openai_codex_enabled: bool = True
+    openai_codex_transport: str = "auto"
+
+    # Project-scoped skill settings
+    skills_enabled: bool = True
+
+    # Persistence. Autosave remains opt-in.
+    persistence_atomic_explicit_save: bool = True
+    autosave_enabled: bool = False
+    autosave_debounce_ms: int = 1500
+    autosave_idle_only: bool = True
+    autosave_recovery_snapshots: bool = True
+    autosave_max_recovery_files: int = 5
 
     # Tool calling settings
     tool_max_steps: int = 5  # Maximum tool calls per prompt
@@ -167,6 +210,7 @@ class DialengConfig:
         Returns:
             The default model ID for the specified backend.
         """
+        backend = self.provider_backend(backend)
         if backend and backend in self.default_models:
             return self.default_models[backend]
 
@@ -174,9 +218,37 @@ class DialengConfig:
         fallback = self.default_models.get("fallback", "claude-sonnet-4-5")
         return fallback
 
-    def get_model_choices(self) -> List[tuple]:
+    @staticmethod
+    def provider_backend(provider: Optional[str]) -> Optional[str]:
+        """Normalize a provider selection key to its model-config backend."""
+        aliases = {
+            "claudette:anthropic_api": "anthropic_api",
+            "claudette:bedrock": "bedrock",
+            "claude_agent_sdk": "claude_code_subscription",
+            "openai_codex": "openai_codex",
+        }
+        return aliases.get(provider or "", provider)
+
+    def get_models_for_provider(self, provider: Optional[str]) -> List[ModelConfig]:
+        """Return models compatible with a provider selection key."""
+        backend = self.provider_backend(provider)
+        if not backend:
+            return list(self.available_models)
+        return [m for m in self.available_models if not m.providers or backend in m.providers]
+
+    def get_model_choices(self, provider: Optional[str] = None) -> List[tuple]:
         """Get model choices for UI select (id, name) tuples."""
-        return [(m.id, m.name) for m in self.available_models]
+        return [(m.id, m.name) for m in self.get_models_for_provider(provider)]
+
+    def validate_model(self, provider: Optional[str], model_id: Optional[str]) -> str:
+        """Return a compatible model ID, falling back to the provider default."""
+        valid = {m.id for m in self.get_models_for_provider(provider)}
+        if model_id and model_id in valid:
+            return model_id
+        default = self.get_default_model(provider)
+        if default in valid:
+            return default
+        return next(iter(valid), default)
 
     def get_api_model_name(self, model_id: str, backend: str) -> str:
         """Get the API model name for a given model ID and backend.
@@ -188,10 +260,13 @@ class DialengConfig:
         Returns:
             The appropriate model name for the API
         """
+        backend = self.provider_backend(backend)
         if backend == "bedrock":
             return self.bedrock_map.get(model_id, model_id)
         elif backend == "claude_code_subscription":
             return self.claude_code_map.get(model_id, model_id)
+        elif backend == "openai_codex":
+            return self.openai_codex_map.get(model_id, model_id)
         else:
             return self.anthropic_api_map.get(model_id, model_id)
 
@@ -217,7 +292,12 @@ def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
     config.available_models = [
         ModelConfig(
             id=m.get("id", ""),
-            name=m.get("name", m.get("id", ""))
+            name=m.get("name", m.get("id", "")),
+            providers=list(m.get("providers") or (
+                ["openai_codex"] if str(m.get("id", "")).startswith("gpt-")
+                else ["anthropic_api", "bedrock", "claude_code_subscription"]
+            )),
+            capabilities=list(m.get("capabilities", [])),
         )
         for m in available
         if m.get("id")  # Skip entries without ID
@@ -243,6 +323,26 @@ def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
         k: v for k, v in models.get("claude_code_map", {}).items()
         if k != "comment"
     }
+    config.openai_codex_map = {
+        k: v for k, v in models.get("openai_codex_map", {}).items()
+        if k != "comment"
+    }
+
+    # Existing configs predate provider-qualified model entries. Add the
+    # built-in Codex catalog in memory without rewriting the user's file.
+    if not any("openai_codex" in m.providers for m in config.available_models):
+        for raw_model in DEFAULT_CONFIG["models"]["available"]:
+            if "openai_codex" not in raw_model.get("providers", []):
+                continue
+            config.available_models.append(ModelConfig(
+                id=raw_model["id"],
+                name=raw_model["name"],
+                providers=list(raw_model["providers"]),
+                capabilities=list(raw_model.get("capabilities", [])),
+            ))
+        config.default_models.setdefault("openai_codex", "gpt-5.4")
+        config.openai_codex_map = dict(DEFAULT_CONFIG["models"]["openai_codex_map"])
+        config.openai_codex_map.pop("comment", None)
 
     # Modes
     modes = raw.get("modes", {})
@@ -256,6 +356,30 @@ def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
     llm = raw.get("llm", {})
     config.debug_mode = llm.get("debug_mode", False)
     config.debug_log_dir = llm.get("debug_log_dir", "./debug_logs")
+    config.openai_codex_enabled = bool(llm.get("openai_codex_enabled", True))
+    config.openai_codex_transport = str(llm.get("openai_codex_transport", "auto"))
+    if config.openai_codex_transport not in {"auto", "websocket", "sse"}:
+        logger.warning("Invalid Codex transport %r; using auto", config.openai_codex_transport)
+        config.openai_codex_transport = "auto"
+
+    skills = raw.get("skills", {})
+    config.skills_enabled = bool(skills.get("enabled", True))
+
+    persistence = raw.get("persistence", {})
+    autosave = persistence.get("autosave", {})
+    config.persistence_atomic_explicit_save = bool(
+        persistence.get("atomic_explicit_save", True)
+    )
+    config.autosave_enabled = bool(autosave.get("enabled", False))
+    config.autosave_debounce_ms = max(50, int(autosave.get("debounce_ms", 1500)))
+    config.autosave_idle_only = bool(autosave.get("idle_only", True))
+    config.autosave_recovery_snapshots = bool(
+        autosave.get("recovery_snapshots", True)
+    )
+    config.autosave_max_recovery_files = max(
+        1,
+        int(autosave.get("max_recovery_files", 5)),
+    )
 
     # Tool calling settings
     tool_settings = raw.get("tool_settings", {})

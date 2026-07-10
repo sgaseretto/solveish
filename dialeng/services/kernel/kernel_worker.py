@@ -7,11 +7,25 @@ IPython's capture_output context manager.
 """
 import sys
 import traceback
+import base64
 from multiprocessing import Queue
 from typing import Optional
 
 from execnb.shell import CaptureShell
 from fastcore.basics import patch
+
+
+def _wire_safe_mime_bundle(data: dict) -> dict:
+    """Convert formatter bytes to Jupyter wire-compatible MIME values."""
+    normalized = dict(data or {})
+    for mime_type in ('image/png', 'image/jpeg', 'image/gif', 'image/webp'):
+        value = normalized.get(mime_type)
+        if isinstance(value, bytes):
+            normalized[mime_type] = base64.b64encode(value).decode('ascii')
+    svg = normalized.get('image/svg+xml')
+    if isinstance(svg, bytes):
+        normalized['image/svg+xml'] = svg.decode('utf-8', errors='replace')
+    return normalized
 
 
 class StreamingStdout:
@@ -66,14 +80,16 @@ class StreamingDisplayPublisher:
         self.is_publishing = False  # Required by IPython's _tee
 
     def publish(self, data: dict, metadata: Optional[dict] = None,
-                source: Optional[str] = None, **kwargs):
+                source: Optional[str] = None, transient: Optional[dict] = None,
+                update: bool = False, **kwargs):
         """Publish display data to the queue."""
         self.is_publishing = True
         try:
             self.queue.put({
-                'type': 'display_data',
-                'data': data,
-                'metadata': metadata or {}
+                'type': 'update_display_data' if update else 'display_data',
+                'data': _wire_safe_mime_bundle(data),
+                'metadata': metadata or {},
+                'display_id': (transient or {}).get('display_id'),
             })
         finally:
             self.is_publishing = False
@@ -99,6 +115,8 @@ def _run_streaming(self: CaptureShell, raw_cell: str, output_queue: Queue,
     """
     old_stdout, old_stderr = sys.stdout, sys.stderr
     old_display_pub = getattr(self, 'display_pub', None)
+    old_showtraceback = self.showtraceback
+    old_showsyntaxerror = self.showsyntaxerror
 
     try:
         # Replace stdout/stderr with streaming versions
@@ -107,6 +125,12 @@ def _run_streaming(self: CaptureShell, raw_cell: str, output_queue: Queue,
 
         # Replace display publisher for rich outputs
         self.display_pub = StreamingDisplayPublisher(output_queue, self)
+
+        # IPython normally prints exceptions to stderr and also returns them on
+        # ExecutionResult. Dialeng emits the latter as a structured Jupyter
+        # error output, so suppress the duplicate stderr rendering here.
+        self.showtraceback = lambda *args, **kwargs: None
+        self.showsyntaxerror = lambda *args, **kwargs: None
 
         # Run the cell using InteractiveShell's run_cell
         # (bypassing CaptureShell's capture_output wrapper)
@@ -121,51 +145,27 @@ def _run_streaming(self: CaptureShell, raw_cell: str, output_queue: Queue,
         # Send final result if there was one
         if result.result is not None:
             obj = result.result
-            mime_data = {'text/plain': repr(obj)}
-
-            # Check for rich representations (PIL images, HTML widgets, etc.)
-            # and include them in the MIME bundle so they render inline.
+            mime_data = {}
+            mime_metadata = {}
             try:
-                if hasattr(obj, '_repr_png_'):
-                    png = obj._repr_png_()
-                    if png:
-                        import base64
-                        if isinstance(png, bytes):
-                            png = base64.b64encode(png).decode('utf-8')
-                        mime_data['image/png'] = png
-                elif hasattr(obj, '_repr_html_'):
-                    html = obj._repr_html_()
-                    if html:
-                        mime_data['text/html'] = html
-                elif hasattr(obj, '_repr_markdown_'):
-                    md_text = obj._repr_markdown_()
-                    if md_text:
-                        try:
-                            from markdown_it import MarkdownIt
-                            mime_data['text/html'] = MarkdownIt().enable('table').render(md_text)
-                        except ImportError:
-                            mime_data['text/markdown'] = md_text
+                mime_data, mime_metadata = self.display_formatter.format(obj)
+                mime_data = _wire_safe_mime_bundle(mime_data)
             except Exception:
-                pass
+                # A broken repr must not crash or erase an otherwise successful
+                # execution. IPython formatters normally provide this fallback.
+                mime_data = {'text/plain': f'<{type(obj).__name__}>'}
+                mime_metadata = {}
 
-            # If we have rich content, send as display_data so the
-            # frontend renders it properly (images, HTML, etc.)
-            if len(mime_data) > 1:
-                output_queue.put({
-                    'type': 'display_data',
-                    'data': mime_data,
-                    'metadata': {}
-                })
-            else:
+            if mime_data:
                 output_queue.put({
                     'type': 'execute_result',
                     'data': mime_data,
-                    'metadata': {}
+                    'metadata': mime_metadata or {},
                 })
 
         # Send error if execution failed
-        if result.error_in_exec:
-            exc = result.error_in_exec
+        exc = result.error_before_exec or result.error_in_exec
+        if exc:
             tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
             output_queue.put({
                 'type': 'error',
@@ -179,6 +179,8 @@ def _run_streaming(self: CaptureShell, raw_cell: str, output_queue: Queue,
     finally:
         sys.stdout = old_stdout
         sys.stderr = old_stderr
+        self.showtraceback = old_showtraceback
+        self.showsyntaxerror = old_showsyntaxerror
         if old_display_pub is not None:
             self.display_pub = old_display_pub
 

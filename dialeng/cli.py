@@ -8,6 +8,7 @@ Usage:
     dialeng --init             # Start server + create CRAFT.ipynb (auto-detect name)
     dialeng --init my_pkg      # Start server + create CRAFT.ipynb with package name
     dialeng new_folder --init  # Create folder, init CRAFT, start server
+    dialeng init [path]        # Initialize a project and exit
     dialeng package init       # Scaffold nbdev-compatible package
 """
 import argparse
@@ -16,7 +17,7 @@ import sys
 from pathlib import Path
 
 # Subcommand names that should not be treated as path arguments
-_SUBCOMMANDS = {"package"}
+_SUBCOMMANDS = {"init", "package"}
 
 
 def parse_args(argv=None):
@@ -99,6 +100,13 @@ def _parse_subcommand(argv):
     )
     subparsers = parser.add_subparsers(dest="subcommand")
 
+    # --- `dialeng init [path]` ---
+    project_init = subparsers.add_parser("init", help="Initialize a Dialeng project and exit")
+    project_init.add_argument("path", nargs="?", default=".",
+                              help="Project directory (default: current directory)")
+    project_init.add_argument("--name", dest="project_name", default=None,
+                              help="Package/reuse name (default: detect or derive from directory)")
+
     # --- `dialeng package init` ---
     pkg_parser = subparsers.add_parser("package", help="Package management commands")
     pkg_sub = pkg_parser.add_subparsers(dest="package_action")
@@ -130,6 +138,18 @@ def resolve_root_dir(path_str: str, respect_env: bool = True) -> Path:
 def cli(argv=None):
     """Main CLI entry point."""
     args = parse_args(argv)
+
+    if args.subcommand == "init":
+        from dialeng.services.project_init_service import initialize_project
+        root = resolve_root_dir(args.path, respect_env=False)
+        print(f"Initializing Dialeng project in {root}...")
+        result = initialize_project(root, name=args.project_name)
+        if result.get("error"):
+            raise SystemExit(result["error"])
+        print(f"  Config: {result['config_path']}")
+        print(f"  Skills: {result['skills_dir']}")
+        print("Dialeng project is ready.")
+        return
 
     if args.subcommand == "package":
         if args.package_action == "init":
