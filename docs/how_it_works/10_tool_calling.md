@@ -377,10 +377,6 @@ Tool calling works with both LLM providers:
 
 Uses the native Anthropic tool calling API.
 
-### claude-agent-sdk (Claude Code Subscription)
-
-Uses claude-agent-sdk directly for tool support via MCP servers.
-
 ## Error Handling
 
 - **Invalid variable**: Shows error marker in prompt and continues

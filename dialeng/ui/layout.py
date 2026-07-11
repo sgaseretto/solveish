@@ -13,6 +13,7 @@ from .controls import AddButtons
 from .settings import SettingsSidebar, SettingsOverlay
 from .outline import OutlineSidebar, OutlineToggleButton
 from .kernel_modal import KernelToolbarButton, KernelModal
+from .skill_creator import SkillCreatorButton, SkillCreatorModal
 from .file_explorer import FileExplorerSidebar, NewItemModal, DeleteConfirmModal
 from .icons import sprites as icon_sprites
 from dialeng.services.dialeng_config import DialengConfig
@@ -95,6 +96,13 @@ def ModelSelect(nb, available_models: list):
     )
 
 
+def _notebook_usage_total(nb) -> int:
+    return sum(
+        int(((getattr(cell, "llm_execution", None) or {}).get("usage") or {}).get("total_tokens") or 0)
+        for cell in nb.cells
+    )
+
+
 def WorkspacePage(root: Path, config: Optional[DialengConfig] = None,
                   kernel_notebooks: Optional[set] = None,
                   notebook_deleted: bool = False):
@@ -137,6 +145,7 @@ def WorkspacePage(root: Path, config: Optional[DialengConfig] = None,
                             onclick="toggleSettings()",
                             title="Settings",
                         ),
+                        SkillCreatorButton(bool(config and config.skills_enabled and config.skills_creator_enabled)),
                         Button(
                             icon_sprites('sun', sz=16),
                             cls="theme-toggle",
@@ -169,6 +178,7 @@ def WorkspacePage(root: Path, config: Optional[DialengConfig] = None,
         DeleteConfirmModal(),
         SettingsOverlay() if config else None,
         SettingsSidebar(config) if config else None,
+        SkillCreatorModal() if config and config.skills_enabled and config.skills_creator_enabled else None,
     )
 
 
@@ -244,6 +254,7 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                     ),
                     Div(
                         # Right group: controls
+                        SkillCreatorButton(bool(config and config.skills_enabled and config.skills_creator_enabled)),
                         Button(icon_sprites('settings', sz=16), cls="btn btn-sm settings-btn", id="settings-btn",
                                onclick="toggleSettings()", title="Settings"),
                         Button(icon_sprites('sun', sz=16), cls="theme-toggle", id="theme-toggle",
@@ -279,6 +290,12 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                             "Modified" if nb.modified else "Saved",
                             id="notebook-save-state",
                             cls=f"notebook-save-state {'modified' if nb.modified else 'saved'}",
+                        ),
+                        Span(
+                            f"{_notebook_usage_total(nb):,} tok",
+                            id="notebook-llm-usage",
+                            cls="notebook-llm-usage",
+                            title="Cumulative prompt token usage stored in this notebook",
                         ),
                         Button(icon_sprites('download', sz=14), cls="btn btn-sm",
                                hx_get=f"/dialeng/{nb.id}/export", title="Download .ipynb"),
@@ -331,5 +348,6 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
         Script("if(!window.KERNEL_ALIVE){var o=document.getElementById('kernel-modal-overlay');if(o)o.classList.add('visible');}") if not kernel_alive else None,
         # Settings sidebar and overlay (outside main layout - overlay style)
         SettingsOverlay() if config else None,
-        SettingsSidebar(config) if config else None
+        SettingsSidebar(config) if config else None,
+        SkillCreatorModal() if config and config.skills_enabled and config.skills_creator_enabled else None,
     )

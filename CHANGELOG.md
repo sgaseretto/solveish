@@ -7,7 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-11
+
+### Changed
+
+#### Prompt Lifecycle And Codex Observability
+- Prompt runs now keep an explicit backend operation active through output persistence and terminal UI broadcasts; concurrent edits, structural changes, saves, and provider/model changes receive immediate actionable conflicts instead of waiting behind a lock
+- Prompt Shift+Enter advancement now waits for `prompt_run_terminal`, preventing trailing-cell creation from racing an active stream, and terminal cleanup always releases operation state even if persistence or a client broadcast fails
+- Added request-local Codex diagnostics for operation ID, provider/model, transport, first-token latency, duration, retries, sanitized request/response IDs, tool steps, cancellation/error state, and token usage
+- Added reload-safe prompt diagnostic panels and notebook cumulative token usage without adding operational metadata to LLM context
+- Categorized authentication, entitlement, rate-limit, network, malformed-tool, and server failures with Connect, Choose Model, or Retry actions while preserving the previous response when a failed run produces no replacement content
+- Fixed a final-frame race that could append the last streamed prompt chunk twice after the authoritative output update
+- Added strict Codex/Bedrock provider configuration validation and removed generic/legacy provider fallbacks from generated project configuration
+
+#### Codex And Bedrock Provider Simplification
+- Removed the retired Claude subscription transport and direct-provider credential path; OpenAI Codex and AWS Bedrock are now the only production LLM providers
+- Made Codex the preferred authenticated provider, restricted Claudette to Bedrock, and removed obsolete provider settings, model maps, credential probes, tests, and dependencies
+- Migrated repository notebooks to `openai_codex` with `gpt-5.4` and replaced the retired provider reference notebook with prompt-cell validation for stateless context, images, tools, and skills
+- Added opt-in authenticated Codex browser coverage for context correction, image output, kernel-defined tools, project skills, save/reload persistence, and failure diagnostics
+
 ### Added
+
+#### Notebook-To-Skill Creation
+- Added a packaged `skill-creator` with project override precedence and dedicated build, inspect, update, and commit tools for OpenAI Codex prompts
+- Added deterministic Dialeng-aware notebook extraction that preserves edited Prompt input/output context, excludes skipped cells and outputs by default, redacts likely credentials, bounds source size, and emits nbs2ctx-style document boundaries
+- Added reviewable builds under `.dialeng/skill-builds/`, optional refinement through any authenticated Dialeng provider, provenance hashes, validation, stale-preview protection, and atomic installation into `.dialeng/skills/`
+- Added a responsive toolbar workflow with notebook selection, all-file previews, validation/refinement warnings, and explicit confirmation, plus `dialeng skill create|update|list|validate` CLI commands
+- Added settings for enabling the creator and bounding notebook source bytes, project initialization ignore rules for private staged context, focused service/route/UI/CLI tests, and architecture/user documentation
+- Expanded skill sources to supported local text/code files and HTTP(S) pages converted through `web2md`, with source type, content hash, fetch timestamp, bounded extraction, secret redaction, and staged source refresh support
+
+#### Backend-Authoritative Settings
+- Added typed settings definitions with server-side coercion, bounds/options validation, effective value sources, environment-managed fields, and explicit live/new-kernel/restart apply modes
+- Added SHA-256 settings revisions and dirty-field-only updates so stale browser tabs receive a conflict instead of silently overwriting newer project configuration
+- Made `dialeng_config.json` writes atomic and moved provider/Colab validation into a serialized background activation phase with visible pending, ready, and failed states
+- Settings now refresh whenever the panel opens, synchronize clean fields across tabs, preserve local dirty edits, apply display CSS and autosave state live, and expose search, revert, dirty-state, source, and inline validation affordances
+- Added optional autosave/recovery controls to the settings panel while keeping autosave disabled by default, and project initialization now ignores only `.dialeng/recovery/` while preserving shareable project skills
+- Added unit and real-browser coverage for atomic settings writes, validation, environment overrides, stale revisions, live display changes, and two-tab merging
+
+#### Deterministic Browser Regression Suite
+- Added Python Playwright/pytest scenarios for cell mutations, provider switching, Shift+Enter navigation, prompt editing, two-tab synchronization, kernel recovery, notebook deletion, and Jupyter rich outputs against a real Dialeng subprocess
+- Added a credential-isolated deterministic streaming provider plus E2E-only kernel-process and WebSocket fault controls, with normal servers exposing neither test interface
+- Added failure-only screenshots, traces, DOM snapshots, console/page errors, redacted server logs, diagnostics, and final notebook artifacts
+- Added ordered GitHub Actions jobs for unit tests and Chromium E2E tests without retries, plus explicitly opt-in OpenAI and Colab smoke markers
+- Fixed open-notebook deletion so terminal WebSocket notifications drain before connections are removed, allowing every open tab to recover gracefully
 
 #### Cell Mutation And Jupyter Output Reliability
 - Prompt and code run controls now use one explicit running/terminal-state transition, so completion, cancellation, errors, and programmatic starts consistently restore an enabled Run button; prompt reruns no longer silently fail after switching from Mock to a real provider
@@ -141,6 +183,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+#### OpenAI Codex Skill Requests
+- Removed the unsupported top-level `metadata` parameter from Codex subscription request bodies, preventing skill-enabled prompt cells from failing with HTTP 400
+- Kept active skill names and content hashes in Dialeng-local provider diagnostics and logs instead of transmitting them to the Codex endpoint
+
 #### Revisioned WebSocket Recovery
 - FastHTML WebSocket control messages now use the required outer `msg` envelope, fixing join, heartbeat, cancellation, and confirmation payload validation
 - WebSocket disconnect cleanup now uses handshake identity and mutates the stored client collection, preventing stale writer queues and inflated tab counts after reconnects
@@ -197,9 +243,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Notebook saves continue to use the current `##### 🤖Reply🤖<!-- SOLVEIT_SEPARATOR_xxx -->` format, while notebook loads now also accept the older `##### Reply<!-- SOLVEIT_SEPARATOR_xxx -->` format for backward compatibility
 - Added `tests/test_prompt_persistence.py` covering prompt-cell round-tripping through the active `Notebook.save()` / `Notebook.load()` path plus legacy separator compatibility
 - Prompt completion and manual prompt-output edits now broadcast a canonical `prompt_output_update` payload, so connected tabs converge on the backend-committed final response instead of relying only on streamed chunks or full-cell swaps
-- `claude-agent-sdk` prompt execution now preserves notebook image context by sending real multimodal blocks through `query()` instead of flattening those images to `[Image]` placeholders in the text transcript
+- `retired-Claude-provider` prompt execution now preserves notebook image context by sending real multimodal blocks through `query()` instead of flattening those images to `[Image]` placeholders in the text transcript
 - Added `tests/test_sdk_query_payload.py` covering the SDK prompt builder for both multimodal notebook context and plain text fallback
-- Built-in LLM tools now route consistently across `claudette` and `claude-agent-sdk`; if built-ins are enabled, both providers enter the tool loop even without an explicit `&\`func\`` reference
+- Built-in LLM tools now route consistently across `claudette` and `retired-Claude-provider`; if built-ins are enabled, both providers enter the tool loop even without an explicit `&\`func\`` reference
 - Added `tests/test_llm_tool_routing.py` to verify provider-independent built-in tool routing
 - Prompt special syntax now supports `$`expression`` evaluation (not just simple variable names), so prompts can inject fresh values like `$`len(items)`` or `$`config.theme.name`` from the active kernel
 - Tool references now support Solveit-style dotted names and list syntax such as `&`obj.method`` and `&`[tool_a, tool_b]``
@@ -551,9 +597,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 #### LLM Service Provider-Based Architecture Refactor
-- **Modularized `services/llm_service.py`** — Refactored the ~1540-line monolithic LLM service into a provider-based architecture under `services/llm/` package. Each LLM backend (claudette, claudette-agent, claude-agent-sdk) is now a separate provider class implementing `BaseLLMProvider` ABC.
+- **Modularized `services/llm_service.py`** — Refactored the ~1540-line monolithic LLM service into a provider-based architecture under `services/llm/` package. Each LLM backend (claudette, claudette-agent, retired-Claude-provider) is now a separate provider class implementing `BaseLLMProvider` ABC.
 - **`BaseLLMProvider` ABC** (`services/llm/base_provider.py`) — Abstract base class with `ProviderInfo`/`LLMResult` dataclasses, following the existing `BaseKernel` pattern. Defines the contract for `stream()`, `stream_with_tools()`, `check_thinking_support()`, `get_info()`, and `initialize()`.
-- **Three provider implementations** — `ClaudetteProvider` (API/Bedrock), `ClaudetteAgentProvider` (Claude Code subscription wrapper), `ClaudeAgentSdkProvider` (direct SDK with MCP tool support and real-time `StreamEvent` streaming).
+- **Three provider implementations** — `ClaudetteProvider` (API/Bedrock), `ClaudetteAgentProvider` (retired Claude subscription wrapper), `ClaudeAgentSdkProvider` (direct SDK with MCP tool support and real-time `StreamEvent` streaming).
 - **Slim coordinator** (`services/llm/llm_service.py`) — `LLMService` class with the same public API (`stream_response`, `stream_response_with_tools`, `get_provider`, `last_usage`, `last_cost`). Owns provider selection, mode/model resolution, prompt parsing, and tool registry orchestration.
 - **Shared utilities** (`services/llm/utils.py`) — Extracted stateless helper functions: `build_prompt_with_context`, `execute_tool`, `format_tool_result_for_llm`, `save_debug_log`, `chunk_text`, `build_text_tool_definitions`, `parse_text_tool_calls`, `build_tool_results_prompt`.
 - **Compatibility shim** — `services/llm_service.py` remains as a thin re-export so existing `from services.llm_service import ...` imports continue to work.
@@ -733,7 +779,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Default models are now per-provider** - Configuration now supports different default models for each provider:
   - `bedrock`: Default to cheaper models (e.g., Haiku) for pay-per-use
   - `anthropic_api`: Configurable per preference
-  - `claude_code_subscription`: Can use more capable models with flat-rate subscription
+  - `retired_claude_subscription`: Can use more capable models with flat-rate subscription
   - `fallback`: Used when provider is unknown
 - **Removed `default` flag from model entries** - The new `models.defaults` section replaces per-model default flags
 - **Updated startup logging** - Now shows active default model based on detected provider
@@ -973,7 +1019,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 #### Direct SDK Mode for Maximum Session Isolation
-- **New `use_sdk_directly` option** - Uses `claude-agent-sdk.query()` directly instead of claudette-agent wrapper for maximum isolation (disabled by default). Each query:
+- **New `use_sdk_directly` option** - Uses `retired-Claude-provider.query()` directly instead of claudette-agent wrapper for maximum isolation (disabled by default). Each query:
   - Creates a completely fresh subprocess
   - Uses a unique temporary directory as `cwd`
   - Sets all stateless options explicitly (`continue_conversation=False`, `resume=None`, `setting_sources=[]`)
@@ -1097,7 +1143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   This ensures truly stateless queries where the notebook cells are the sole source of truth for conversation history.
 - **Conversation history chronological ordering** - Fixed bug where pinned cells were placed before all non-pinned cells regardless of their actual notebook position, breaking chronological order. Now all context cells are sorted by their original notebook index before being converted to messages. This fixes LLM confusion when previous prompt/response pairs appeared out of order.
 - **Off-by-one prompt/response issue** - Fixed bug where LLM responses were consistently one prompt behind the current question. Two issues were found: (1) multiple "User:" messages in history confused the SDK, and (2) `AsyncChat._append_pr` is async but `stream()` calls it without await, so prompts were never added to history. Fix: build a single prompt string with context, manually append to `chat.h`, then call `stream(None)` to skip the broken `_append_pr` call.
-- **Claude Code credential detection** - Now uses direct `claude_agent_sdk` probe instead of searching for CLI binary. This fixes an issue where credentials weren't detected on first startup even when logged in, but worked after running any script using `claude_agent_sdk` first.
+- **Claude Code credential detection** - Now uses direct `retired_claude_provider` probe instead of searching for CLI binary. This fixes an issue where credentials weren't detected on first startup even when logged in, but worked after running any script using `retired_claude_provider` first.
 - **System prompt context clarification** - System prompts now include a preamble explaining that conversation history may include code cells and notes from the notebook. This prevents Claude from analyzing/listing notebook cells when the user asks a simple question like "Hello".
 - **Streaming block handling** - Properly handles claudette-agent's message block format, distinguishing between thinking blocks (`type='thinking'`) and text blocks (`text` attribute)
 - **Thinking state management** - Correctly tracks thinking phase start/end across streaming, ensuring `thinking_end` is always yielded even if no text blocks follow
@@ -1245,11 +1291,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Multi-Provider LLM Support
 - **Automatic credential detection** - System detects available LLM credentials at startup in priority order:
-  1. Anthropic API key (`ANTHROPIC_API_KEY`)
+  1. Anthropic API key (`retired provider credential`)
   2. AWS Bedrock credentials (env vars, profiles, IAM)
   3. Claude Code CLI subscription
-- **claudette integration** - Direct Anthropic API and AWS Bedrock support via `claudette` library
-- **claudette-agent integration** - Claude Code subscription support via `claudette-agent` library
+- **claudette integration** - Historical direct-provider and AWS Bedrock support via `claudette` library
+- **claudette-agent integration** - retired Claude subscription support via `claudette-agent` library
 - **Startup logging** - Clear credential status shown at startup with provider, backend, and source details
 - **Dynamic UI** - Mode selector only shows available options based on detected credentials
 
@@ -1257,9 +1303,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Auto-generated config file** - `dialeng_config.json` created on first startup with sensible defaults
 - **Model configuration** - Define available models for UI picker with customizable names
 - **Backend-specific model mappings** - Separate model ID mappings for:
-  - `anthropic_api_map` - Direct Anthropic API (with date suffix)
+  - `retired_provider_map` - Historical direct-provider IDs (with date suffix)
   - `bedrock_map` - AWS Bedrock (with region prefix and version suffix)
-  - `claudette_agent_map` - Claude Code subscription (simple names)
+  - `claudette_agent_map` - retired Claude subscription (simple names)
 - **AWS region configuration** - Configurable region for Bedrock API calls
 - **Default mode setting** - Configure default dialog mode for new notebooks
 - **Config status logging** - Shows loaded models and defaults at startup
@@ -1276,7 +1322,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Dependencies
 
-- Added `claudette>=0.2.0` - For direct Anthropic API and AWS Bedrock
+- Added `claudette>=0.2.0` - For retired direct provider and AWS Bedrock
 - Added `anthropic>=0.40.0` - Anthropic SDK
 - Added `boto3>=1.34.0` - AWS SDK for Bedrock
 - Added `botocore>=1.34.0` - AWS core library

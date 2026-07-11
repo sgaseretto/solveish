@@ -5,6 +5,35 @@ editing, execution, collaboration, and Jupyter output rendering. Run it after
 changes to cell routes, WebSocket events, Monaco integration, notebook
 revisions, output rendering, or keyboard shortcuts.
 
+## Automated Coverage
+
+The highest-risk paths in this guide are automated in `tests/e2e/` using a real
+Dialeng subprocess and Chromium. Run them before starting the broader manual
+matrix:
+
+```bash
+uv run playwright install chromium
+uv run pytest -q -m e2e tests/e2e
+```
+
+Automated modules map to this guide as follows:
+
+| Automated module | Covered manual areas |
+| --- | --- |
+| `test_cell_mutations.py` | Type transitions and structural operations |
+| `test_prompt_providers.py` | Mock run, provider/model switch, rerun |
+| `test_shift_enter_navigation.py` | Long-notebook focus and trailing cells |
+| `test_prompt_editing.py` | Repeated prompt input/output context edits |
+| `test_collaboration.py` | Two-tab source, output, and structure convergence |
+| `test_kernel_lifecycle.py` | Attach, restart, process death, WebSocket reconnect |
+| `test_notebook_deletion.py` | Deleting a notebook open in multiple tabs |
+| `test_rich_outputs.py` | HTML, JSON, and image MIME rendering |
+
+See [Browser E2E Testing](../how_it_works/22_browser_e2e_testing.md) for fixture,
+fault-injection, CI, and failure-artifact details. Continue to use the manual
+matrix for exploratory combinations, visual judgment, and real Colab/provider
+validation.
+
 ## Test Isolation
 
 Never run destructive cases against the repository's source notebooks. Copy
@@ -106,6 +135,12 @@ request is dispatched. The viewport remains stable, then reveals only the new
 cell when needed. Running never jumps to the beginning of the page, completion
 does not move focus a second time, and the active editor matches the highlighted
 cell. For `N` cells there are exactly `N + 1` add rows.
+
+For a slow Prompt run, also attempt source editing, Save, provider/model changes,
+and cell add/delete while streaming. Each must return immediately with a visible
+Wait/Cancel conflict, never hang. Cancel once and confirm the operation releases;
+close one of two observing tabs and confirm the server-owned run completes in the
+remaining tab.
 
 ### 5. Move, Duplicate, Clipboard, Merge, And Delete
 
@@ -235,9 +270,9 @@ server port.
 | `shell_integration.ipynb` | `%bash` variable expansion and `!uname -a` | Pass |
 | `mistlefoot_demo.ipynb` | sub/sup, highlight, emoji previews; programmatic and rich HTML rendering | Pass |
 | `test_dialoghelper.ipynb` | setup, `curr_dialog`, `read_msg`, `add_msg`, `msg_str_replace`, `del_msg` | Pass after setting `dh_settings['port'] = 8765` in the disposable kernel |
-| `test_tool_calling.ipynb` | variables/functions, live `$` injection, Claude Agent SDK `&greet` tool call | Pass |
+| `test_tool_calling.ipynb` | variables/functions, live `$` injection, and Codex/Bedrock fenced-tool calls | Pass |
 | `test_dialoghelper_advanced.ipynb` | advanced cross-dialog and data-flow cases | Manual extended run |
-| `test_claude_agent_query.ipynb` | direct SDK and image message examples | Manual external-provider run |
+| `test_openai_codex_prompt.ipynb` | stateless context edits, image context, tools, and skills | Manual external-provider run |
 | `demo_project/colab_test.ipynb` | Colab, fastai download/training, progress displays | Manual Colab/GPU run |
 | `test_capture.ipynb` | browser screen capture permissions and image context | Manual OS-permission run |
 

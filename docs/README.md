@@ -28,6 +28,7 @@ docs/
 - [Notebook Regression QA](guides/notebook_regression_qa.md) - Manual interaction, collaboration, execution, and output regression suite
 - [Writing AUTORUN Extensions](guides/autorun_extensions.md) - Tutorial for creating extensions from notebooks
 - [Notebook to Package](guides/notebook_to_package.md) - Three-phase progression from exploration to published package
+- [Codex Skills](guides/codex_skills.md) - Project skills and reviewable notebook-to-skill creation
 
 ### For Developers
 - [DEVELOPERS.md](../DEVELOPERS.md) - Extension points, patterns, architecture
@@ -44,6 +45,7 @@ docs/
 | 3 | [Real-time Collaboration](how_it_works/03_real_time_collaboration.md) | WebSocket architecture, OOB swaps, conflict handling |
 | 20 | [Multi-provider LLM and Codex](how_it_works/20_multi_provider_llm_and_codex.md) | Provider inventory, Codex OAuth/transport, and project skills |
 | 21 | [Performance and Reliability](how_it_works/21_performance_reliability.md) | Runtime lifecycle, revision recovery, persistence, lazy rendering, caches, and diagnostics |
+| 24 | [Notebook-to-Skill Creation](how_it_works/24_notebook_skill_creation.md) | Built-in creator, deterministic extraction, staged refinement, and atomic installation |
 
 ## Contributing Documentation
 

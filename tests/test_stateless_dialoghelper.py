@@ -35,7 +35,7 @@ def _get_creds():
 async def _run_stateless_sdk_direct():
     """Test stateless behavior using SDK directly."""
     print("\n" + "=" * 60)
-    print("Testing STATELESS behavior with claude-agent-sdk direct")
+    print("Testing stateless notebook-authoritative prompt behavior")
     print("=" * 60)
 
     # Create LLMService - credentials already detected above

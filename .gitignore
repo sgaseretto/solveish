@@ -31,6 +31,9 @@ dialeng_config.json
 
 # Debug logs
 debug_logs/
+test-results/
+.dialeng/recovery/
+.dialeng/skill-builds/
 
 # Jupyter checkpoints
 .ipynb_checkpoints/

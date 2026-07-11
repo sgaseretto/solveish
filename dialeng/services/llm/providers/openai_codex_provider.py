@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import platform
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -36,6 +37,41 @@ class ResponseState:
     usage: Optional[Dict[str, Any]] = None
     thinking_active: bool = False
     emitted: bool = False
+
+
+def _new_diagnostics() -> Dict[str, Any]:
+    return {
+        "started_at": time.perf_counter(),
+        "first_token_at": None,
+        "transport": None,
+        "retry_count": 0,
+        "request_ids": [],
+        "response_ids": [],
+    }
+
+
+def _record_response_diagnostics(event: Dict[str, Any], diagnostics: Dict[str, Any]) -> None:
+    response = event.get("response") or {}
+    response_id = response.get("id") or event.get("response_id")
+    if response_id and response_id not in diagnostics["response_ids"]:
+        diagnostics["response_ids"].append(str(response_id))
+
+
+def _diagnostic_event(diagnostics: Dict[str, Any]) -> Dict[str, Any]:
+    ended_at = time.perf_counter()
+    first_token_at = diagnostics.get("first_token_at")
+    return {
+        "type": "diagnostic",
+        "diagnostics": {
+            "transport": diagnostics.get("transport") or "unknown",
+            "ttft_ms": round((first_token_at - diagnostics["started_at"]) * 1000, 1)
+            if first_token_at else None,
+            "duration_ms": round((ended_at - diagnostics["started_at"]) * 1000, 1),
+            "retry_count": int(diagnostics.get("retry_count") or 0),
+            "request_ids": list(diagnostics.get("request_ids") or []),
+            "response_ids": list(diagnostics.get("response_ids") or []),
+        },
+    }
 
 
 def _text_content(content: Any, *, assistant: bool = False) -> Any:
@@ -115,6 +151,7 @@ class OpenAICodexProvider(BaseLLMProvider):
     def __init__(self) -> None:
         super().__init__()
         self.auth = get_openai_codex_auth_service()
+        self._last_skill_metadata: List[Dict[str, str]] = []
 
     async def initialize(self) -> None:
         credentials = await self.auth.get_valid_credentials()
@@ -147,6 +184,8 @@ class OpenAICodexProvider(BaseLLMProvider):
         config: Any,
         cancel_event: Any = None,
     ) -> AsyncIterator[Dict]:
+        self._capture_skill_metadata()
+        diagnostics = _new_diagnostics()
         body = self._request_body(
             model=model,
             system_prompt=system_prompt,
@@ -155,10 +194,16 @@ class OpenAICodexProvider(BaseLLMProvider):
             use_thinking=use_thinking,
         )
         state = ResponseState()
-        async for event in self._request_events(body, config, cancel_event, allow_retry=True):
+        async for event in self._request_events(
+            body, config, cancel_event, allow_retry=True, diagnostics=diagnostics,
+        ):
+            _record_response_diagnostics(event, diagnostics)
             async for normalized in self._normalize_event(event, state):
+                if normalized["type"] in {"chunk", "thinking", "tool_call"} and diagnostics["first_token_at"] is None:
+                    diagnostics["first_token_at"] = time.perf_counter()
                 yield normalized
         self._set_usage(state.usage)
+        yield _diagnostic_event(diagnostics)
 
     async def stream_with_tools(
         self,
@@ -175,6 +220,8 @@ class OpenAICodexProvider(BaseLLMProvider):
         max_steps: int,
         cancel_event: Any = None,
     ) -> AsyncIterator[Dict]:
+        self._capture_skill_metadata()
+        diagnostics = _new_diagnostics()
         input_items = build_codex_input(context_messages, prompt)
         codex_tools = build_codex_tools(tools)
 
@@ -190,12 +237,16 @@ class OpenAICodexProvider(BaseLLMProvider):
                 use_thinking=use_thinking,
             )
             async for event in self._request_events(
-                body, config, cancel_event, allow_retry=(_step == 0)
+                body, config, cancel_event, allow_retry=(_step == 0), diagnostics=diagnostics,
             ):
+                _record_response_diagnostics(event, diagnostics)
                 async for normalized in self._normalize_event(event, state):
+                    if normalized["type"] in {"chunk", "thinking", "tool_call"} and diagnostics["first_token_at"] is None:
+                        diagnostics["first_token_at"] = time.perf_counter()
                     yield normalized
             self._set_usage(state.usage)
             if not state.tool_calls:
+                yield _diagnostic_event(diagnostics)
                 return
 
             input_items.extend(state.output_items)
@@ -230,6 +281,7 @@ class OpenAICodexProvider(BaseLLMProvider):
                     "output": utils.format_tool_result_for_llm(result),
                 })
 
+        yield _diagnostic_event(diagnostics)
         yield {"type": "error", "content": f"Tool loop reached the {max_steps}-step limit"}
 
     @staticmethod
@@ -252,25 +304,35 @@ class OpenAICodexProvider(BaseLLMProvider):
             "tool_choice": "auto",
             "parallel_tool_calls": False,
         }
-        from dialeng.services.dialeng_config import get_config
-        if get_config().skills_enabled:
-            from dialeng.services.skill_service import get_skill_service
-            skill_metadata = get_skill_service().execution_metadata()
-            if skill_metadata:
-                body["metadata"] = {
-                    "dialeng_skills": ",".join(
-                        f"{item['name']}:{item['sha256'][:12]}" for item in skill_metadata
-                    )[:500]
-                }
-                logger.info(
-                    "Codex prompt skills (skills=%s)",
-                    ", ".join(item["name"] for item in skill_metadata),
-                )
         if tools:
             body["tools"] = tools
         if use_thinking:
             body["reasoning"] = {"effort": "medium", "summary": "auto"}
         return body
+
+    def _capture_skill_metadata(self) -> None:
+        """Keep skill provenance in Dialeng diagnostics, not the Codex payload."""
+        from dialeng.services.dialeng_config import get_config
+
+        config = get_config()
+        if not config.skills_enabled:
+            self._last_skill_metadata = []
+            return
+        from dialeng.services.skill_service import get_skill_service
+
+        self._last_skill_metadata = get_skill_service().execution_metadata(
+            include_creator=config.skills_creator_enabled,
+        )
+        if self._last_skill_metadata:
+            logger.info(
+                "Codex prompt skills (skills=%s)",
+                ", ".join(item["name"] for item in self._last_skill_metadata),
+            )
+
+    @property
+    def last_skill_metadata(self) -> List[Dict[str, str]]:
+        """Return a copy of the skill provenance captured for the last request."""
+        return [dict(item) for item in self._last_skill_metadata]
 
     async def _request_events(
         self,
@@ -279,27 +341,37 @@ class OpenAICodexProvider(BaseLLMProvider):
         cancel_event: Any,
         *,
         allow_retry: bool,
+        diagnostics: Dict[str, Any],
     ) -> AsyncIterator[Dict[str, Any]]:
         transport = getattr(config, "openai_codex_transport", "auto")
         if transport in {"auto", "websocket"}:
+            diagnostics["transport"] = "websocket"
             emitted = False
             try:
-                async for event in self._websocket_events(body, cancel_event):
+                async for event in self._websocket_events(body, cancel_event, diagnostics):
                     emitted = emitted or _is_meaningful_event(event)
                     yield event
                 return
             except Exception as exc:
                 if transport == "websocket" or emitted or not allow_retry:
                     raise
+                diagnostics["retry_count"] += 1
                 logger.warning("Codex WebSocket did not start; falling back to SSE: %s", exc)
-        async for event in self._sse_events(body, cancel_event, allow_retry=allow_retry):
+        diagnostics["transport"] = "sse"
+        async for event in self._sse_events(
+            body, cancel_event, allow_retry=allow_retry, diagnostics=diagnostics,
+        ):
             yield event
 
-    async def _headers(self, websocket: bool = False) -> Dict[str, str]:
+    async def _headers(
+        self, websocket: bool = False, diagnostics: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, str]:
         credentials = await self.auth.get_valid_credentials()
         if not credentials:
             raise RuntimeError("OpenAI Codex authentication expired; reconnect in Settings")
         request_id = str(uuid.uuid4())
+        if diagnostics is not None:
+            diagnostics["request_ids"].append(request_id)
         headers = {
             "Authorization": f"Bearer {credentials.access}",
             "chatgpt-account-id": credentials.account_id,
@@ -319,11 +391,11 @@ class OpenAICodexProvider(BaseLLMProvider):
         return headers
 
     async def _websocket_events(
-        self, body: Dict[str, Any], cancel_event: Any
+        self, body: Dict[str, Any], cancel_event: Any, diagnostics: Dict[str, Any],
     ) -> AsyncIterator[Dict[str, Any]]:
         from websockets.asyncio.client import connect
 
-        headers = await self._headers(websocket=True)
+        headers = await self._headers(websocket=True, diagnostics=diagnostics)
         async with connect(
             CODEX_WEBSOCKET_URL,
             additional_headers=headers,
@@ -348,13 +420,14 @@ class OpenAICodexProvider(BaseLLMProvider):
                     return
 
     async def _sse_events(
-        self, body: Dict[str, Any], cancel_event: Any, *, allow_retry: bool
+        self, body: Dict[str, Any], cancel_event: Any, *, allow_retry: bool,
+        diagnostics: Dict[str, Any],
     ) -> AsyncIterator[Dict[str, Any]]:
         refreshed = False
         for attempt in range(3):
             emitted = False
             try:
-                headers = await self._headers()
+                headers = await self._headers(diagnostics=diagnostics)
                 async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=20.0)) as client:
                     async with client.stream("POST", CODEX_BASE_URL, headers=headers, json=body) as response:
                         if response.status_code == 401 and not refreshed and allow_retry:
@@ -364,6 +437,7 @@ class OpenAICodexProvider(BaseLLMProvider):
                         if response.status_code >= 400:
                             error_body = (await response.aread()).decode("utf-8", errors="replace")
                             if response.status_code in RETRYABLE_STATUS and attempt < 2 and allow_retry:
+                                diagnostics["retry_count"] += 1
                                 await asyncio.sleep(2 ** attempt)
                                 continue
                             raise RuntimeError(self._format_http_error(response.status_code, error_body))
@@ -406,6 +480,7 @@ class OpenAICodexProvider(BaseLLMProvider):
                     raise asyncio.CancelledError
                 if emitted or not allow_retry or attempt >= 2:
                     raise
+                diagnostics["retry_count"] += 1
                 await asyncio.sleep(2 ** attempt)
 
     @staticmethod
@@ -457,8 +532,10 @@ class OpenAICodexProvider(BaseLLMProvider):
                 else:
                     try:
                         arguments = json.loads(raw_arguments)
-                    except (json.JSONDecodeError, TypeError):
-                        arguments = {}
+                    except (json.JSONDecodeError, TypeError) as exc:
+                        raise ValueError(
+                            f"Malformed tool arguments for {item.get('name') or 'unknown tool'}"
+                        ) from exc
                 call = {
                     "call_id": item.get("call_id") or item.get("id") or str(uuid.uuid4()),
                     "name": item.get("name", ""),
@@ -507,7 +584,7 @@ def _register_openai_codex_provider() -> None:
         name="openai_codex",
         label="OpenAI Codex subscription",
         factory=OpenAICodexProvider,
-        priority=4,
+        priority=10,
     ))
 
 

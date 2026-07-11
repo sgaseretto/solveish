@@ -32,8 +32,28 @@ def test_codex_request_is_ephemeral_and_sequential(tmp_path):
     )
     assert body["store"] is False
     assert "previous_response_id" not in body
+    assert "metadata" not in body
     assert body["parallel_tool_calls"] is False
     assert body["reasoning"]["summary"] == "auto"
+
+
+def test_skill_provenance_stays_local_instead_of_entering_transport_body(tmp_path):
+    skill = tmp_path / ".dialeng" / "skills" / "local-skill" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: local-skill\ndescription: Use for local tests.\n---\nRead the project source.\n",
+        encoding="utf-8",
+    )
+    set_skill_root(tmp_path)
+    provider = OpenAICodexProvider()
+    provider._capture_skill_metadata()
+    assert {item["name"] for item in provider.last_skill_metadata} == {
+        "skill-creator", "local-skill"
+    }
+    body = provider._request_body(
+        model="gpt-5.4", system_prompt="system", input_items=[], tools=[], use_thinking=False,
+    )
+    assert "metadata" not in body
 
 
 def test_tool_schema_and_event_normalization():
@@ -70,16 +90,23 @@ def test_tool_schema_and_event_normalization():
         "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
     }]
 
+    with pytest.raises(ValueError, match="Malformed tool arguments"):
+        asyncio.run(collect({
+            "type": "response.output_item.done",
+            "item": {"type": "function_call", "name": "view", "arguments": "{broken"},
+        }))
+
 
 def test_auto_transport_falls_back_only_before_meaningful_output(monkeypatch):
     provider = OpenAICodexProvider()
 
-    async def websocket_before_output(_body, _cancel):
+    async def websocket_before_output(_body, _cancel, _diagnostics):
         yield {"type": "response.created"}
         raise RuntimeError("socket failed")
 
-    async def sse(_body, _cancel, *, allow_retry):
+    async def sse(_body, _cancel, *, allow_retry, diagnostics):
         assert allow_retry is True
+        assert diagnostics["transport"] == "sse"
         yield {"type": "response.output_text.delta", "delta": "fallback"}
 
     monkeypatch.setattr(provider, "_websocket_events", websocket_before_output)
@@ -87,12 +114,18 @@ def test_auto_transport_falls_back_only_before_meaningful_output(monkeypatch):
 
     async def collect():
         config = type("Config", (), {"openai_codex_transport": "auto"})()
-        return [event async for event in provider._request_events({}, config, None, allow_retry=True)]
+        diagnostics = {
+            "started_at": 0, "first_token_at": None, "transport": None,
+            "retry_count": 0, "request_ids": [], "response_ids": [],
+        }
+        return [event async for event in provider._request_events(
+            {}, config, None, allow_retry=True, diagnostics=diagnostics,
+        )]
 
     events = asyncio.run(collect())
     assert events[-1]["delta"] == "fallback"
 
-    async def websocket_after_output(_body, _cancel):
+    async def websocket_after_output(_body, _cancel, _diagnostics):
         yield {"type": "response.output_text.delta", "delta": "started"}
         raise RuntimeError("socket failed")
 

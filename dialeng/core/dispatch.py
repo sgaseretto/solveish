@@ -244,7 +244,7 @@ def cell_to_llm_messages(cell: 'Cell') -> List[Dict]:
     if cell_type == "code":
         # Build multimodal content blocks: text (source + output) + images.
         # Images are extracted separately so providers can place them in user
-        # turns only (Anthropic API requirement). Text output has base64 <img>
+        # turns only (Bedrock message requirement). Text output has base64 <img>
         # tags stripped to avoid bloating the prompt.
         # See: docs/how_it_works/06_llm_integration.md "Image Handling in LLM Context"
         content_blocks = [{"type": "text", "text": f"```python\n{cell.source}\n```"}]

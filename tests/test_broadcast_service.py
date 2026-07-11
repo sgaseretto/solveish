@@ -58,6 +58,30 @@ def test_connection_id_removes_client_when_send_wrapper_changes():
     assert manager.client_count("demo") == 0
 
 
+def test_drain_waits_for_terminal_event_before_connections_are_dropped():
+    async def run():
+        release = asyncio.Event()
+        delivered = []
+
+        async def send(message):
+            await release.wait()
+            delivered.append(json.loads(message))
+
+        manager = BroadcastManager()
+        manager.add_connection("demo", send)
+        await manager.broadcast_json("demo", {"type": "notebook_deleted"})
+        drain_task = asyncio.create_task(manager.drain_notebook("demo"))
+        await asyncio.sleep(0)
+        assert not drain_task.done()
+
+        release.set()
+        assert await drain_task is True
+        manager.drop_notebook("demo")
+        assert delivered == [{"type": "notebook_deleted"}]
+
+    asyncio.run(run())
+
+
 def test_removing_one_of_multiple_clients_updates_stored_collection():
     async def send_one(_message):
         return None

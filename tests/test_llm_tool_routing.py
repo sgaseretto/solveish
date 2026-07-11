@@ -49,7 +49,7 @@ async def _collect(async_iterable):
 
 
 def test_builtin_tools_are_routed_consistently_for_all_providers(monkeypatch):
-    for provider_name in ("claudette", "claude_agent_sdk", "openai_codex"):
+    for provider_name in ("claudette:bedrock", "openai_codex"):
         service = LLMService()
         provider = _FakeProvider()
         registry = _FakeRegistry()

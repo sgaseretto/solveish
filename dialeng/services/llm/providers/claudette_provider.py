@@ -1,7 +1,6 @@
-"""Claudette provider - Direct Anthropic API or AWS Bedrock.
+"""Claudette provider for AWS Bedrock.
 
-Uses the claudette library for streaming responses. Supports both
-direct Anthropic API (via ANTHROPIC_API_KEY) and AWS Bedrock.
+Uses the claudette library for streaming responses through AnthropicBedrock.
 """
 from typing import AsyncIterator, Dict, List, Any, Optional
 import asyncio
@@ -14,10 +13,12 @@ logger = logging.getLogger(__name__)
 
 
 class ClaudetteProvider(BaseLLMProvider):
-    """LLM provider using claudette (direct API/Bedrock)."""
+    """LLM provider using claudette with AWS Bedrock exclusively."""
 
-    def __init__(self, backend: str = "anthropic_api"):
+    def __init__(self, backend: str = "bedrock"):
         super().__init__()
+        if backend != "bedrock":
+            raise ValueError(f"Unsupported Claudette backend: {backend}")
         self._backend = backend
         self._Chat = None
         self._Client = None
@@ -26,7 +27,7 @@ class ClaudetteProvider(BaseLLMProvider):
     def _split_context_images(context_messages: List[Dict]):
         """Separate image blocks from context messages.
 
-        Why this is needed (Anthropic API constraints):
+        Why this is needed (Bedrock message constraints):
         - Images can only appear in user turns, not assistant turns.
         - Context messages include prior prompt cell outputs (assistant role) which
           may contain image blocks after cell_to_llm_messages processing.
@@ -86,17 +87,14 @@ class ClaudetteProvider(BaseLLMProvider):
                 "3.7" in model_lower)
 
     def _create_client(self, api_model: str):
-        """Create the appropriate claudette Client based on backend type."""
-        if self._backend == "bedrock":
-            from anthropic import AnthropicBedrock
-            from dialeng.services.dialeng_config import get_config
-            config = get_config()
-            aws_region = config.aws_region
-            logger.debug(f"Creating AnthropicBedrock with region={aws_region}")
-            ab = AnthropicBedrock(aws_region=aws_region)
-            return self._Client(api_model, ab)
-        else:
-            return self._Client(api_model)
+        """Create a claudette client backed by AWS Bedrock."""
+        from anthropic import AnthropicBedrock
+        from dialeng.services.dialeng_config import get_config
+        config = get_config()
+        aws_region = config.aws_region
+        logger.debug(f"Creating AnthropicBedrock with region={aws_region}")
+        ab = AnthropicBedrock(aws_region=aws_region)
+        return self._Client(api_model, ab)
 
     async def stream(
         self,
@@ -326,9 +324,9 @@ class ClaudetteProvider(BaseLLMProvider):
 def _register_claudette_provider():
     from dialeng.core.registry import registry, ProviderRegistration
     registry.register_provider(ProviderRegistration(
-        name="claudette", label="Anthropic API / Bedrock",
+        name="claudette", label="AWS Bedrock",
         factory=ClaudetteProvider,
-        priority=10  # Highest priority - direct API access
+        priority=5,
     ))
 
 _register_claudette_provider()

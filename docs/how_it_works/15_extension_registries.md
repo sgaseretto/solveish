@@ -42,7 +42,7 @@ graph TD
         SK[subprocess_kernel.py] -->|register_kernel_type| K
         CK[colab_kernel.py] -->|register_kernel_type| K
         CP[claudette_provider.py] -->|register_provider| P
-        CS[claude_agent_sdk_provider.py] -->|register_provider| P
+        OP[openai_codex_provider.py] -->|register_provider| P
     end
 
     subgraph "Consumers"
@@ -94,8 +94,8 @@ The kernel selection modal (`ui/kernel_modal.py`) iterates `registry.kernels` to
 ```python
 @dataclass
 class ProviderRegistration:
-    name: str               # "claudette", "claude_agent_sdk"
-    label: str              # "Anthropic API", "Claude Code Subscription"
+    name: str               # "claudette", "openai_codex"
+    label: str              # "AWS Bedrock", "OpenAI Codex"
     factory: Callable       # () -> BaseLLMProvider
     credential_checker: Optional[Callable] = None
     priority: int = 0       # Higher = preferred
@@ -109,8 +109,8 @@ class ProviderRegistration:
 
 | Provider | Priority | File |
 |----------|----------|------|
-| `claudette` | 10 | `services/llm/providers/claudette_provider.py` |
-| `claude_agent_sdk` | 5 | `services/llm/providers/claude_agent_sdk_provider.py` |
+| `openai_codex` | 10 | `services/llm/providers/openai_codex_provider.py` |
+| `claudette` | 5 | `services/llm/providers/claudette_provider.py` |
 
 ## Toolbar Item Registry
 

@@ -24,6 +24,12 @@
         - docs: https://nbdev.fast.ai/getting_started.html
     - ContextKit:
         - repo: https://github.com/AnswerDotAI/ContextKit
+    - nbs2ctx notebook context reference:
+        - repo: https://github.com/AnswerDotAI/nbs2ctx
+        - docs: https://answerdotai.github.io/nbs2ctx/core.html
+    - web2md web-page context reference:
+        - repo: https://github.com/AnswerDotAI/web2md
+        - service: https://web2md.answer.ai/
     - OpenAI Codex integration references:
         - official docs: https://developers.openai.com/codex/
         - Golm protocol/lifecycle reference: https://github.com/sgaseretto/golm/tree/main/packages/golm-ai

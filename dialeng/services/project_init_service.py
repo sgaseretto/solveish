@@ -19,7 +19,29 @@ Create one directory per skill and put a `SKILL.md` file in it:
 Each `SKILL.md` needs YAML frontmatter with `name` and `description`. Project
 skills are discovered only for the OpenAI Codex provider and can reference
 additional files inside their own directory.
+
+Dialeng also ships a built-in `skill-creator`. Use the toolbar workflow or
+`dialeng skill create` to produce a staged, reviewable skill from notebooks.
 """
+
+
+def _ensure_recovery_ignored(root: Path) -> bool:
+    """Ignore private runtime context without ignoring installed project skills."""
+    gitignore = root / ".gitignore"
+    entries = (".dialeng/recovery/", ".dialeng/skill-builds/")
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    existing_lines = {line.strip() for line in existing.splitlines()}
+    missing = [entry for entry in entries if entry not in existing_lines]
+    if not missing:
+        return False
+    prefix = "" if not existing or existing.endswith("\n") else "\n"
+    gitignore.write_text(
+        f"{existing}{prefix}\n# Dialeng private runtime context\n"
+        + "\n".join(missing)
+        + "\n",
+        encoding="utf-8",
+    )
+    return True
 
 
 def initialize_project(root: Path, name: Optional[str] = None) -> dict:
@@ -41,6 +63,7 @@ def initialize_project(root: Path, name: Optional[str] = None) -> dict:
     skills_readme_created = not skills_readme.exists()
     if skills_readme_created:
         skills_readme.write_text(SKILLS_README, encoding="utf-8")
+    gitignore_updated = _ensure_recovery_ignored(root)
 
     return {
         **craft_result,
@@ -49,4 +72,5 @@ def initialize_project(root: Path, name: Optional[str] = None) -> dict:
         "config_created": config_created,
         "skills_dir": str(skills_dir),
         "skills_readme_created": skills_readme_created,
+        "gitignore_updated": gitignore_updated,
     }

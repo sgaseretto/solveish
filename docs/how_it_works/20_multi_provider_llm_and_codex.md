@@ -1,100 +1,110 @@
-# Multi-Provider LLM And OpenAI Codex Architecture
+# OpenAI Codex And Bedrock Architecture
 
-Dialeng resolves an LLM provider and model for every prompt execution. The
-notebook remains the source of conversation state: each run sends the current
-cells above the prompt and does not continue a hidden provider-side session.
+Dialeng's provider manager resolves a provider for every prompt request and
+caches only initialized transport objects. Conversation state is never cached;
+the notebook remains the authoritative context.
 
-## Provider Inventory
-
-`credential_service.py` probes every backend independently and builds a
-`CredentialInventory`. A failed Anthropic probe does not hide a valid Bedrock,
-Claude Code, or OpenAI Codex login.
-
-Provider IDs are backend-qualified:
-
-| Provider ID | Authentication |
-|---|---|
-| `claudette:anthropic_api` | `ANTHROPIC_API_KEY` |
-| `claudette:bedrock` | AWS credential chain |
-| `claude_agent_sdk` | Claude Code subscription |
-| `openai_codex` | OpenAI Codex subscription OAuth |
-
-The selected provider is persisted as `metadata.dialeng_provider`; the model is
-persisted as both `dialeng_model` and the compatible `solveit_model`. Legacy
-notebooks without provider metadata migrate to the highest-priority available
-Claude backend. If a saved provider later becomes unavailable, Dialeng keeps the
-selection visible and rejects execution without clearing the previous response.
+## Components
 
 ```mermaid
 flowchart LR
-    P["Prompt run"] --> N["Read notebook provider + model"]
-    N --> V{"Authenticated and compatible?"}
-    V -->|No| E["Toast error; preserve output"]
-    V -->|Yes| M["LLMService provider manager"]
-    M --> C["Build current notebook transcript"]
-    C --> R["Provider stream"]
-    R --> W["Normalized WebSocket events"]
+    Notebook["Notebook provider + model"] --> Service["LLMService"]
+    Inventory["Codex and Bedrock credential inventory"] --> Service
+    Service --> Codex["OpenAICodexProvider"]
+    Service --> Bedrock["ClaudetteProvider (Bedrock)"]
+    Skills["Project skills"] --> Codex
+    Registry["Built-in, fenced, and CRAFT tools"] --> Codex
+    Registry --> Bedrock
 ```
 
-`LLMService` caches one initialized instance per provider key and protects first
-initialization with a per-provider async lock. Context construction, variable
-injection, tool discovery, CRAFT tools, `pyrun`, and confirmation remain above
-the provider layer.
+`LLMService` owns provider/model validation, prompt parsing, variable injection,
+tool discovery, and skill augmentation. Providers only translate the normalized
+request and emit normalized events.
 
-## Codex Transport
+## Codex Authentication And Transport
 
-`OpenAICodexProvider` is implemented in Dialeng and does not import Golm. It
-uses the OpenAI Codex subscription Responses transport with WebSocket first and
-SSE fallback. Every request has `store=false`, contains a fresh complete
-notebook transcript, and omits `previous_response_id`.
+Codex credentials come from `DIALENG_OPENAI_CODEX_ACCESS_TOKEN` or Dialeng's
+private `~/.dialeng/auth.json` OAuth store. Login uses PKCE and a loopback
+callback, with manual completion available when the callback port cannot be
+opened. Browser status responses never expose tokens.
 
-The provider:
+The Codex provider uses WebSocket first and SSE as a pre-output fallback. It
+sends a fresh Responses request with `store=false`, complete text/image context,
+tool definitions, and `parallel_tool_calls=false`. Hidden reasoning is never
+shown; only supported reasoning summaries are normalized for the UI.
 
-- converts text and base64 image blocks into Responses input items
-- normalizes text, reasoning summaries, tool calls, tool results, usage, and errors
-- disables parallel tool calls while Dialeng persists tool steps sequentially
-- retries only before streamed output or tool side effects
-- refreshes OAuth once on a pre-stream `401`
-- closes the active stream when prompt cancellation is requested
+Project skills are discovered from `.dialeng/skills/`. Their compact metadata
+is added to the Codex system prompt, while `read_skill` provides constrained,
+on-demand access to skill files.
 
-Hidden reasoning is never displayed. Only reasoning-summary events are mapped
-to Dialeng thinking events.
+## Bedrock Transport
 
-The implementation was informed by the protocol/lifecycle patterns in
-[`golm-ai`](https://github.com/sgaseretto/golm/tree/main/packages/golm-ai) and
-[`golm-agent`](https://github.com/sgaseretto/golm/tree/main/packages/golm-agent),
-but no Golm package is a dependency.
+The Bedrock provider uses the AWS credential chain and configured region to
+construct `AnthropicBedrock`, then passes it to Claudette. It supports the same
+provider-neutral notebook context, built-in tools, fenced tools, images, usage,
+and output event contract as Codex.
 
-## OAuth Lifecycle
+## Selection And Collaboration
 
-The server owns one OpenAI login flow and identity. Credentials are stored under
-`~/.dialeng/auth.json` with mode `0600`; writes use a temporary file and atomic
-replace. `DIALENG_OPENAI_CODEX_ACCESS_TOKEN` has precedence and is never stored
-or refreshed.
+Provider and model changes are backend-authoritative and broadcast to every tab.
+Codex is the default when both providers are authenticated. A notebook with an
+unknown provider cannot run until the user selects an available provider; Dialeng
+does not silently reinterpret unsupported provider metadata.
+
+Project configuration is validated before provider initialization. Every model
+must explicitly belong to `openai_codex` or `bedrock`; removed provider keys and
+unknown provider defaults stop startup with a path-specific diagnostic rather
+than being ignored. Import-time bootstrap uses in-memory defaults until the CLI
+has selected the actual project root.
+
+## Prompt Operation Boundary
+
+Prompt execution has one operation ID from request through terminal commit.
+While it is active, notebook mutations, explicit saves, and provider/model
+changes receive an immediate `409 prompt_operation_conflict` response with Wait
+and Cancel choices. Deleting an open notebook first cancels its active prompt.
+Closing a browser tab does not cancel a server-owned run; another tab can keep
+observing it and the result remains notebook-authoritative.
 
 ```mermaid
 sequenceDiagram
-    participant UI as Settings UI
-    participant D as Dialeng auth service
-    participant O as OpenAI OAuth
-    UI->>D: POST /auth/openai/start
-    D-->>UI: authorization URL and callback status
-    UI->>O: Open authorization URL
-    O->>D: localhost:1455 callback
-    UI->>D: poll /auth/openai/status
-    D->>O: exchange code + PKCE verifier
-    D-->>UI: authenticated status, no tokens
-    D-->>UI: broadcast llm_status
+    participant UI as Browser
+    participant App as Dialeng
+    participant LLM as Codex or Bedrock
+    UI->>App: POST cell/run
+    App-->>UI: prompt_stream_start
+    App->>LLM: Stateless full-context request
+    LLM-->>App: chunks, tools, usage
+    App->>App: Persist output + execution metadata
+    App-->>UI: prompt_output_update
+    App-->>UI: prompt_execution_update
+    App-->>UI: prompt_run_terminal
+    App-->>UI: HTTP response completes
 ```
 
-If port `1455` is unavailable, the user can paste the final redirect URL or
-`code#state`. State and PKCE are verified before exchange. Login, refresh, and
-logout invalidate provider instances and broadcast updated choices to all tabs.
+Prompt Shift+Enter navigation is deferred until `prompt_run_terminal`. This
+keeps next-cell creation out of the active mutation window. Cleanup removes the
+operation marker in an unconditional `finally` path, so persistence or broadcast
+failures cannot permanently block the notebook.
 
-## Backend-Authoritative Selection
+## Diagnostics, Usage, And Failures
 
-The toolbar has separate provider and model selectors. Provider changes are
-validated on the server, select a provider-compatible default model, and return
-the replacement model selector. `kernel_snapshot` includes the same LLM state,
-and a separate `llm_status` event refreshes authentication and model catalogs
-without reloading the page.
+Each prompt cell stores `dialeng_llm_execution` metadata containing the provider,
+model, transport, operation ID, time to first token, duration, retries, sanitized
+request/response IDs, tool-step count, status, and normalized input/cached/output/
+total token usage. The compact cell panel renders this metadata, and the toolbar
+sums usage across prompt cells. Neither is included by context construction.
+
+Codex failures are mapped to authentication, model entitlement, rate limit,
+network, malformed tool call, server, or generic provider categories. The UI
+offers Connect, Choose Model, or Retry as appropriate. A failed run with no new
+assistant content updates diagnostics but preserves the previously authored
+response.
+
+## Validation
+
+Normal CI uses the deterministic provider. Authenticated Codex validation is
+explicitly opt-in and uses independent one-call browser scenarios for current
+context, images, tools, skills, and persistence/reload. Tests wait for the
+backend terminal boundary and capture screenshots, traces, browser errors, and
+redacted server logs on failure.

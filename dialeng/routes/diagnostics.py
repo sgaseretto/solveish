@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -18,8 +19,15 @@ def register_diagnostics_routes(
 ) -> None:
     """Register diagnostics routes against explicitly supplied services."""
 
+    @rt("/healthz")
+    def healthz():
+        return {
+            "status": "ok",
+            "e2e": os.environ.get("DIALENG_E2E") == "1",
+        }
+
     @rt("/dialeng/diagnostics/performance")
-    def get(recent_limit: int = 50):
+    def performance_diagnostics(recent_limit: int = 50):
         counts = runtime_counts()
         for name, value in counts.items():
             performance_monitor.set_gauge(f"runtime.{name}", value)
@@ -64,7 +72,7 @@ def register_diagnostics_routes(
         return {"ok": True}
 
     @rt("/dialeng/{nb_id}/diagnostics")
-    def get(nb_id: str):
+    def notebook_diagnostics(nb_id: str):
         snapshot = build_kernel_snapshot(nb_id)
         runtime = runtime_registry.get(nb_id)
         return {

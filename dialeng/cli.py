@@ -10,6 +10,7 @@ Usage:
     dialeng new_folder --init  # Create folder, init CRAFT, start server
     dialeng init [path]        # Initialize a project and exit
     dialeng package init       # Scaffold nbdev-compatible package
+    dialeng skill create NAME  # Create a project skill from notebooks
 """
 import argparse
 import os
@@ -17,7 +18,7 @@ import sys
 from pathlib import Path
 
 # Subcommand names that should not be treated as path arguments
-_SUBCOMMANDS = {"init", "package"}
+_SUBCOMMANDS = {"init", "package", "skill"}
 
 
 def parse_args(argv=None):
@@ -114,6 +115,39 @@ def _parse_subcommand(argv):
     init_parser.add_argument("--name", dest="package_name", default=None,
                              help="Package name (default: directory name)")
 
+    # --- `dialeng skill ...` ---
+    skill_parser = subparsers.add_parser("skill", help="Create and manage project skills")
+    skill_sub = skill_parser.add_subparsers(dest="skill_action")
+
+    def add_skill_build_arguments(command):
+        command.add_argument("name", help="Lowercase skill name")
+        command.add_argument("--from", dest="sources", nargs="+", required=True,
+                             help="Notebook files, directories, or glob patterns")
+        command.add_argument("--description", required=True,
+                             help="Specific description of when the skill should be used")
+        command.add_argument("--instructions", default="",
+                             help="Additional workflow requirements")
+        command.add_argument("--include-outputs", action="store_true",
+                             help="Include bounded text outputs (off by default)")
+        command.add_argument("--provider", default=None,
+                             help="LLM provider used to refine the deterministic draft")
+        command.add_argument("--model", default=None,
+                             help="Model used to refine the deterministic draft")
+        command.add_argument("--no-llm", action="store_true",
+                             help="Keep the deterministic draft without LLM refinement")
+        command.add_argument("--yes", action="store_true",
+                             help="Install without an interactive confirmation prompt")
+        command.add_argument("--path", default=".", help="Dialeng project directory")
+
+    create_skill = skill_sub.add_parser("create", help="Create a skill from notebooks")
+    add_skill_build_arguments(create_skill)
+    update_skill = skill_sub.add_parser("update", help="Replace an existing notebook-derived skill")
+    add_skill_build_arguments(update_skill)
+    list_skills = skill_sub.add_parser("list", help="List discovered skills")
+    list_skills.add_argument("--path", default=".", help="Dialeng project directory")
+    validate_skill = skill_sub.add_parser("validate", help="Validate discovered skills")
+    validate_skill.add_argument("--path", default=".", help="Dialeng project directory")
+
     return parser.parse_args(argv)
 
 
@@ -160,6 +194,9 @@ def cli(argv=None):
             print("Usage: dialeng package init [--name NAME]")
         return
 
+    if args.subcommand == "skill":
+        return _run_skill_command(args)
+
     # Default: start the server
     root_dir = resolve_root_dir(args.path)
 
@@ -173,3 +210,85 @@ def cli(argv=None):
 
     from dialeng.app import main
     main(root_dir=root_dir, port=args.port)
+
+
+def _run_skill_command(args):
+    """Execute project skill commands without starting the Dialeng server."""
+    import asyncio
+    import json
+
+    from dialeng.services.dialeng_config import load_config
+    from dialeng.services.skill_creation_service import get_skill_creation_service
+    from dialeng.services.skill_service import set_skill_root
+
+    if not args.skill_action:
+        print("Usage: dialeng skill {create,update,list,validate}")
+        return
+    root = resolve_root_dir(args.path, respect_env=False)
+    config = load_config(
+        config_path=root / "dialeng_config.json",
+        force_reload=True,
+        create_if_missing=False,
+    )
+    service = set_skill_root(root)
+
+    if args.skill_action == "list":
+        for skill in service.skills:
+            print(f"{skill.name}\t{skill.source}\t{skill.description}")
+        for diagnostic in service.diagnostics:
+            print(f"INVALID\t{diagnostic.path}\t{diagnostic.message}")
+        return
+
+    if args.skill_action == "validate":
+        if service.diagnostics:
+            for diagnostic in service.diagnostics:
+                print(f"INVALID {diagnostic.path}: {diagnostic.message}")
+            raise SystemExit(1)
+        print(f"Validated {len(service.skills)} skill(s).")
+        return
+
+    if not config.skills_creator_enabled:
+        raise SystemExit("Skill creation is disabled by skills.creator_enabled")
+    creation = get_skill_creation_service()
+    preview = creation.create_build(
+        args.name,
+        args.description,
+        args.sources,
+        instructions=args.instructions,
+        include_outputs=args.include_outputs,
+    )
+    if not args.no_llm:
+        try:
+            preview = asyncio.run(creation.refine_build(
+                preview["build_id"],
+                provider=args.provider,
+                model=args.model,
+                instructions=args.instructions,
+            ))
+        except Exception as exc:
+            print(f"LLM refinement unavailable; keeping deterministic draft: {exc}")
+
+    print(json.dumps({
+        "build_id": preview["build_id"],
+        "target": preview["target"],
+        "build_hash": preview["build_hash"],
+        "warnings": preview["warnings"],
+        "validation_errors": preview["validation_errors"],
+    }, indent=2))
+    print("\n--- SKILL.md preview ---\n")
+    print(preview["files"]["SKILL.md"])
+    if preview["validation_errors"]:
+        raise SystemExit("The staged skill is invalid and was not installed")
+
+    confirmed = bool(args.yes)
+    if not confirmed and sys.stdin.isatty():
+        confirmed = input(f"Install {preview['target']}? [y/N] ").strip().lower() in {"y", "yes"}
+    if not confirmed:
+        print(f"Build staged as {preview['build_id']}; rerun with --yes to install automatically.")
+        return
+    result = creation.commit_build(
+        preview["build_id"],
+        preview["build_hash"],
+        overwrite=args.skill_action == "update",
+    )
+    print(f"Installed {result['name']} at {result['path']}")

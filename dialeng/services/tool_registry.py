@@ -46,7 +46,7 @@ TYPE_NAME_MAP = {
 # Tools that modify files (require confirmation when enabled)
 FILE_MODIFYING_TOOLS = {
     'create', 'str_replace', 'strs_replace', 'insert', 'replace_lines',
-    'file_insert_line', 'file_del_lines', 'sed'
+    'file_insert_line', 'file_del_lines', 'sed', 'commit_skill_build'
 }
 
 
@@ -162,6 +162,11 @@ def function_to_tool_schema(func: Callable, name: Optional[str] = None) -> Dict[
     """
     func_name = name or getattr(func, '__name__', None) or func.__class__.__name__
     sig = inspect.signature(func)
+    try:
+        from typing import get_type_hints
+        type_hints = get_type_hints(func)
+    except Exception:
+        type_hints = {}
     docstring = inspect.getdoc(func) or f"Call the {func_name} function"
 
     # Build properties from parameters
@@ -174,8 +179,9 @@ def function_to_tool_schema(func: Callable, name: Optional[str] = None) -> Dict[
             continue
 
         # Get type schema
-        if param.annotation != inspect.Parameter.empty:
-            prop = python_type_to_json_schema(param.annotation)
+        annotation = type_hints.get(param_name, param.annotation)
+        if annotation != inspect.Parameter.empty:
+            prop = python_type_to_json_schema(annotation)
         else:
             prop = {'type': 'string'}
 

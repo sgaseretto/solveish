@@ -8,6 +8,11 @@ from fasthtml.common import *
 from typing import List, Tuple, Optional, Any, Dict
 from .icons import sprites as ss
 from dialeng.services.dialeng_config import DialengConfig
+from dialeng.services.settings_service import (
+    SettingDefinition,
+    get_setting_definitions,
+    register_dynamic_setting,
+)
 
 
 def _get_extension_settings_sections():
@@ -35,6 +40,53 @@ def SettingsGroup(title: str, *children, open: bool = False):
     )
 
 
+def _control_definition(
+    name: str,
+    kind: str,
+    current: Any,
+    *,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+    choices: Tuple[str, ...] = (),
+    apply_mode: str = "live",
+) -> SettingDefinition:
+    definition = get_setting_definitions().get(name)
+    if definition is None:
+        definition = SettingDefinition(
+            name,
+            kind,
+            current,
+            apply_mode,
+            minimum,
+            maximum,
+            choices,
+        )
+        register_dynamic_setting(definition)
+    return definition
+
+
+def _setting_badges(name: str, definition: SettingDefinition):
+    apply_labels = {
+        "new_kernel": "new kernels",
+        "reload": "reload",
+        "server_restart": "restart",
+    }
+    return (
+        Span("", cls="setting-source-badge", data_setting_source=name),
+        Span(
+            apply_labels[definition.apply_mode],
+            cls=f"setting-apply-badge {definition.apply_mode}",
+        ) if definition.apply_mode in apply_labels else None,
+    )
+
+
+def _setting_row_attrs(name: str, definition: SettingDefinition) -> Dict[str, str]:
+    return {
+        "data_setting_path": name,
+        "data_apply_mode": definition.apply_mode,
+    }
+
+
 def SettingSelect(label: str, name: str, options: List[Tuple[str, str]], current: str,
                   help_text: str = None):
     """Dropdown select for settings.
@@ -49,8 +101,13 @@ def SettingSelect(label: str, name: str, options: List[Tuple[str, str]], current
     Returns:
         Div containing label and select element
     """
+    if current and current not in {value for value, _ in options}:
+        options = [(current, f"{current} (configured)")] + list(options)
+    definition = _control_definition(
+        name, "str", current, choices=tuple(value for value, _ in options)
+    )
     return Div(
-        Label(label, fr=name, cls="setting-label"),
+        Div(Label(label, fr=name, cls="setting-label"), *_setting_badges(name, definition), cls="setting-label-row"),
         Select(
             *[Option(display, value=val, selected=current == val)
               for val, display in options],
@@ -59,7 +116,9 @@ def SettingSelect(label: str, name: str, options: List[Tuple[str, str]], current
             cls="setting-select"
         ),
         Small(help_text, cls="setting-help") if help_text else None,
-        cls="setting-row"
+        Div("", cls="setting-field-error", data_setting_error=name),
+        cls="setting-row",
+        **_setting_row_attrs(name, definition),
     )
 
 
@@ -91,11 +150,16 @@ def SettingToggle(label: str, name: str, current: bool = None, requires_restart:
                 value = None
                 break
         current = bool(value) if value is not None else default
-    restart_badge = Span(ss('triangle-alert', sz=12), " restart", cls="restart-badge") if requires_restart else None
+    definition = _control_definition(
+        name,
+        "bool",
+        current,
+        apply_mode="server_restart" if requires_restart else "live",
+    )
     return Div(
         Div(
             Label(label, fr=name, cls="setting-label"),
-            restart_badge,
+            *_setting_badges(name, definition),
             cls="setting-label-row"
         ),
         Label(
@@ -108,7 +172,9 @@ def SettingToggle(label: str, name: str, current: bool = None, requires_restart:
             cls="toggle-switch"
         ),
         Small(help_text, cls="setting-help") if help_text else None,
-        cls="setting-row setting-toggle-row"
+        Div("", cls="setting-field-error", data_setting_error=name),
+        cls="setting-row setting-toggle-row",
+        **_setting_row_attrs(name, definition),
     )
 
 
@@ -128,13 +194,16 @@ def SettingNumber(label: str, name: str, current: int, min_val: int = 0,
     Returns:
         Div containing number input
     """
+    definition = _control_definition(name, "int", current, minimum=min_val, maximum=max_val)
     return Div(
-        Label(label, fr=name, cls="setting-label"),
+        Div(Label(label, fr=name, cls="setting-label"), *_setting_badges(name, definition), cls="setting-label-row"),
         Input(type="number", name=name, id=name.replace(".", "-"),
               value=str(current), min=str(min_val), max=str(max_val),
               step=str(step), cls="setting-number"),
         Small(help_text, cls="setting-help") if help_text else None,
-        cls="setting-row"
+        Div("", cls="setting-field-error", data_setting_error=name),
+        cls="setting-row",
+        **_setting_row_attrs(name, definition),
     )
 
 
@@ -153,8 +222,9 @@ def SettingRange(label: str, name: str, current: int, min_val: int = 1,
     Returns:
         Div containing slider with value display
     """
+    definition = _control_definition(name, "int", current, minimum=min_val, maximum=max_val)
     return Div(
-        Label(label, fr=name, cls="setting-label"),
+        Div(Label(label, fr=name, cls="setting-label"), *_setting_badges(name, definition), cls="setting-label-row"),
         Div(
             Input(type="range", name=name, id=name.replace(".", "-"),
                   value=str(current), min=str(min_val), max=str(max_val),
@@ -164,7 +234,9 @@ def SettingRange(label: str, name: str, current: int, min_val: int = 1,
             cls="range-container"
         ),
         Small(help_text, cls="setting-help") if help_text else None,
-        cls="setting-row"
+        Div("", cls="setting-field-error", data_setting_error=name),
+        cls="setting-row",
+        **_setting_row_attrs(name, definition),
     )
 
 
@@ -180,12 +252,15 @@ def SettingText(label: str, name: str, current: str, help_text: str = None):
     Returns:
         Div containing text input
     """
+    definition = _control_definition(name, "str", current)
     return Div(
-        Label(label, fr=name, cls="setting-label"),
+        Div(Label(label, fr=name, cls="setting-label"), *_setting_badges(name, definition), cls="setting-label-row"),
         Input(type="text", name=name, id=name.replace(".", "-"),
               value=current, cls="setting-text"),
         Small(help_text, cls="setting-help") if help_text else None,
-        cls="setting-row"
+        Div("", cls="setting-field-error", data_setting_error=name),
+        cls="setting-row",
+        **_setting_row_attrs(name, definition),
     )
 
 
@@ -238,14 +313,29 @@ def SettingsSidebar(config: DialengConfig):
         # Header with close button
         Div(
             Span(ss('settings', sz=16), " Settings", cls="settings-title"),
-            Button("✕", cls="settings-close-btn", onclick="toggleSettings()",
+            Button("✕", cls="settings-close-btn", onclick="closeSettings()",
                    title="Close settings"),
             cls="settings-header"
         ),
 
         # Scrollable content
         Div(
+            Input(
+                type="search",
+                id="settings-search",
+                cls="settings-search",
+                placeholder="Search settings",
+                aria_label="Search settings",
+                oninput="filterSettings(this.value)",
+            ),
+            Div(
+                "No unsaved changes",
+                id="settings-change-summary",
+                cls="settings-change-summary",
+                aria_live="polite",
+            ),
             Form(
+                Input(type="hidden", id="settings-revision", name="_revision", value=""),
                 # Dialeng Display Settings (top of list for easy access)
                 SettingsGroup(
                     "Dialeng Display Settings",
@@ -280,10 +370,6 @@ def SettingsSidebar(config: DialengConfig):
                                   config.get_model_choices("claudette:bedrock"),
                                   config.default_models.get("bedrock", "claude-haiku-4-5"),
                                   "Default model when using AWS Bedrock"),
-                    SettingSelect("Claude Code Model", "models.defaults.claude_code_subscription",
-                                  config.get_model_choices("claude_agent_sdk"),
-                                  config.default_models.get("claude_code_subscription", "claude-sonnet-4-5"),
-                                  "Default model when using Claude Code subscription"),
                     SettingSelect("OpenAI Codex Model", "models.defaults.openai_codex",
                                   config.get_model_choices("openai_codex"),
                                   config.default_models.get("openai_codex", "gpt-5.4"),
@@ -326,6 +412,12 @@ def SettingsSidebar(config: DialengConfig):
                     SettingToggle("Enable project skills", "skills.enabled",
                                   config.skills_enabled,
                                   help_text="Discover OpenAI Codex skills from .dialeng/skills."),
+                    SettingToggle("Enable skill creator", "skills.creator_enabled",
+                                  config.skills_creator_enabled,
+                                  help_text="Show the staged notebook-to-skill workflow and its dedicated tools."),
+                    SettingNumber("Skill source limit (bytes)", "skills.max_source_bytes",
+                                  config.skills_max_source_bytes, 65536, 20971520, 65536,
+                                  "Maximum extracted notebook context accepted by one skill build."),
                     open=True,
                 ),
 
@@ -353,12 +445,59 @@ def SettingsSidebar(config: DialengConfig):
                     open=False
                 ),
 
+                SettingsGroup(
+                    "Persistence",
+                    SettingToggle(
+                        "Atomic explicit saves",
+                        "persistence.atomic_explicit_save",
+                        config.persistence_atomic_explicit_save,
+                        help_text="Write notebook saves atomically so a failed write cannot replace the previous file.",
+                    ),
+                    SettingToggle(
+                        "Enable autosave",
+                        "persistence.autosave.enabled",
+                        config.autosave_enabled,
+                        help_text="Optional. Explicit save remains available and autosave stays disabled by default.",
+                    ),
+                    SettingNumber(
+                        "Autosave debounce (ms)",
+                        "persistence.autosave.debounce_ms",
+                        config.autosave_debounce_ms,
+                        50,
+                        60000,
+                        50,
+                        "Wait this long after the last change before autosaving.",
+                    ),
+                    SettingToggle(
+                        "Autosave only while idle",
+                        "persistence.autosave.idle_only",
+                        config.autosave_idle_only,
+                        help_text="Do not autosave while a cell or prompt is executing.",
+                    ),
+                    SettingToggle(
+                        "Create recovery snapshots",
+                        "persistence.autosave.recovery_snapshots",
+                        config.autosave_recovery_snapshots,
+                        help_text="Keep bounded recovery copies under .dialeng/recovery/ when autosave is enabled.",
+                    ),
+                    SettingNumber(
+                        "Recovery snapshots per notebook",
+                        "persistence.autosave.max_recovery_files",
+                        config.autosave_max_recovery_files,
+                        1,
+                        100,
+                        1,
+                        "Older snapshots are removed automatically.",
+                    ),
+                    open=False,
+                ),
+
                 # Google Colab Settings
                 SettingsGroup(
                     "Google Colab",
                     SettingToggle("Enable Colab", "colab.enabled",
                                   config.colab_enabled,
-                                  help_text="Enable Google Colab as a remote kernel. Save to reload — a 'Connect Google' button will appear in the toolbar."),
+                                  help_text="Enable Google Colab as a remote kernel. Runtime setup continues in the background after saving."),
                     SettingSelect("Auth Provider", "colab.auth_provider",
                                   colab_auth_options, config.colab_auth_provider,
                                   "oauth_local is the default. oauth_remote works better for headless/remote servers. adc uses gcloud application-default credentials."),
@@ -394,18 +533,18 @@ def SettingsSidebar(config: DialengConfig):
                   )],
 
                 id="settings-form",
-                hx_post="/settings",
-                hx_target="#settings-status",
-                hx_swap="innerHTML"
+                onsubmit="saveSettings(event)",
             ),
             cls="settings-content"
         ),
 
         # Footer with save button and status
         Div(
+            Button("Revert", type="button", cls="btn settings-revert-btn",
+                   onclick="revertSettings()", id="settings-revert-btn", disabled=True),
             Button("Save Settings", type="submit", form="settings-form",
-                   cls="btn settings-save-btn"),
-            Div(id="settings-status", cls="settings-status"),
+                   cls="btn settings-save-btn", id="settings-save-btn", disabled=True),
+            Div(id="settings-status", cls="settings-status", role="status", aria_live="polite"),
             cls="settings-footer"
         ),
 
@@ -423,5 +562,5 @@ def SettingsOverlay():
     return Div(
         id="settings-overlay",
         cls="settings-overlay",
-        onclick="toggleSettings()"
+        onclick="closeSettings()"
     )

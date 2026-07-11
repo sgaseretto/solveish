@@ -89,7 +89,10 @@ class LLMService:
         if provider_id == "openai_codex" and config.skills_enabled:
             from dialeng.services.skill_service import get_skill_service
             skill_service = get_skill_service()
-            system_prompt = skill_service.augment_system_prompt(system_prompt)
+            system_prompt = skill_service.augment_system_prompt(
+                system_prompt,
+                include_creator=config.skills_creator_enabled,
+            )
 
         return system_prompt, api_model, config
 
@@ -183,10 +186,24 @@ class LLMService:
                 from dialeng.services.dialeng_config import get_config
                 from dialeng.services.skill_service import get_skill_service
 
-                if get_config().skills_enabled and get_skill_service().model_skills:
-                    schema = registry.get_builtin_schema("read_skill")
-                    if schema and all(tool.get("name") != "read_skill" for tool in tools):
-                        tools.append(schema)
+                skill_config = get_config()
+                if skill_config.skills_enabled and get_skill_service().model_skills:
+                    skill_tools = ["read_skill"]
+                    if skill_config.skills_creator_enabled:
+                        skill_tools.extend([
+                            "build_skill_from_notebooks",
+                            "inspect_skill_build",
+                            "update_skill_build",
+                            "refresh_skill_build_sources",
+                            "commit_skill_build",
+                        ])
+                    existing = {tool.get("name") for tool in tools}
+                    for tool_name in skill_tools:
+                        get_schema = getattr(registry, "get_builtin_schema", None)
+                        schema = get_schema(tool_name) if get_schema else None
+                        if schema and tool_name not in existing:
+                            tools.append(schema)
+                            existing.add(tool_name)
 
             for tool in tools:
                 yield {

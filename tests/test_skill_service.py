@@ -49,9 +49,36 @@ def test_disabled_skill_is_not_model_invokable(tmp_path):
     path.write_text(path.read_text().replace("description:", "disable-model-invocation: true\ndescription:"), encoding="utf-8")
     service = SkillService(tmp_path)
     assert service.skills[0].disable_model_invocation is True
-    assert "<skills>" not in service.augment_system_prompt("system")
+    assert "skill-creator" in service.augment_system_prompt("system")
+    assert "test-skill" not in service.augment_system_prompt("system")
     with pytest.raises(ValueError, match="disables model invocation"):
         service.read_skill("test-skill")
+
+
+def test_builtin_skill_creator_is_available_and_project_can_override_it(tmp_path):
+    service = SkillService(tmp_path)
+    creator = next(skill for skill in service.all_skills if skill.name == "skill-creator")
+    assert creator.source == "builtin"
+    assert "build_skill_from_notebooks" in service.read_skill("skill-creator")
+
+    _write_skill(
+        tmp_path,
+        "skill-creator",
+        name="skill-creator",
+        description="Project-specific creator",
+        body="Use the project workflow.",
+    )
+    service.refresh(force=True)
+    creator = next(skill for skill in service.all_skills if skill.name == "skill-creator")
+    assert creator.source == "project"
+    assert creator.description == "Project-specific creator"
+
+
+def test_builtin_skill_creator_can_be_hidden_without_hiding_project_skills(tmp_path):
+    _write_skill(tmp_path, "testing")
+    prompt = SkillService(tmp_path).augment_system_prompt("system", include_creator=False)
+    assert "skill-creator" not in prompt
+    assert "test-skill" in prompt
 
 
 def test_symlinked_skill_root_cannot_escape_project(tmp_path):

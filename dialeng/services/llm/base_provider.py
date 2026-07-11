@@ -11,10 +11,10 @@ from dataclasses import dataclass, field
 @dataclass
 class ProviderInfo:
     """Static metadata about an LLM provider backend."""
-    provider_name: str           # "claudette" | "claude_agent_sdk"
-    display_name: str            # "Claudette (API/Bedrock)" | "Claude Agent SDK"
+    provider_name: str           # "claudette" | "openai_codex"
+    display_name: str            # "Claudette (bedrock)" | "OpenAI Codex"
     supports_native_tools: bool  # True for claudette (Anthropic tool calling)
-    supports_mcp_tools: bool     # True for claude_agent_sdk (MCP-based tools)
+    supports_mcp_tools: bool     # Provider supports MCP-native tools
     supports_streaming: bool = True
     capabilities: List[str] = field(default_factory=list)
 

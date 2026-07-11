@@ -65,7 +65,7 @@ flowchart TB
 
     subgraph "LLM Integration"
         CTX[build_context_messages]
-        LLM[claude-agent-sdk]
+        LLM[Codex or Bedrock provider]
     end
 
     DH --> CE

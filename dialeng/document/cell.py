@@ -203,6 +203,7 @@ class Cell:
     pinned: bool = False
     use_thinking: bool = False
     is_exported: bool = False
+    llm_execution: dict = field(default_factory=dict)
 
     # UI collapse state
     collapsed: bool = False
@@ -352,6 +353,7 @@ class Cell:
             'pinned': self.pinned,
             'use_thinking': self.use_thinking,
             'is_exported': self.is_exported,
+            'llm_execution': dict(self.llm_execution),
             'collapsed': self.collapsed,
             'input_collapse': self.input_collapse.value,
             'output_collapse': self.output_collapse.value,
@@ -396,6 +398,7 @@ class Cell:
             pinned=data.get('pinned', False),
             use_thinking=data.get('use_thinking', False),
             is_exported=data.get('is_exported', False),
+            llm_execution=dict(data.get('llm_execution') or {}),
             collapsed=data.get('collapsed', False),
             input_collapse=CollapseLevel(data.get('input_collapse', 0)),
             output_collapse=CollapseLevel(data.get('output_collapse', 0)),
@@ -454,6 +457,7 @@ class Cell:
             if self.pinned: cell["metadata"]["pinned"] = True
             if self.input_collapse: cell["metadata"]["input_collapse"] = int(self.input_collapse)
             if self.output_collapse: cell["metadata"]["output_collapse"] = int(self.output_collapse)
+            if self.llm_execution: cell["metadata"]["dialeng_llm_execution"] = self.llm_execution
         return cell
 
     @classmethod

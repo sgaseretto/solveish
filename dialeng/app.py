@@ -54,7 +54,14 @@ from dialeng.services.credential_service import (
     CredentialInventory, CredentialStatus,
 )
 from dialeng.services.dialeng_config import (
-    load_config, get_config, print_config_status, update_config, get_config_dict
+    load_config, get_config, print_config_status
+)
+from dialeng.services.settings_service import (
+    SettingsConflictError,
+    SettingsValidationError,
+    apply_modes_for,
+    commit_settings,
+    settings_snapshot,
 )
 from dialeng.services.shell_service import (
     SHFMT_AVAILABLE, warn_missing_shfmt, print_shfmt_status
@@ -85,7 +92,12 @@ from dialeng.services.outline_cache import outline_cache
 from dialeng.services.notebook_mutation_service import notebook_mutation_service
 from dialeng.services.openai_codex_auth import get_openai_codex_auth_service
 from dialeng.services.skill_service import set_skill_root
-from dialeng.routes import register_diagnostics_routes, register_websocket_routes
+from dialeng.routes import (
+    register_diagnostics_routes,
+    register_e2e_routes,
+    register_skill_routes,
+    register_websocket_routes,
+)
 
 # UI Components (extracted to ui/ package)
 from dialeng.ui import (
@@ -209,6 +221,10 @@ runtime_registry = NotebookRuntimeRegistry()
 # Colab session manager is initialized asynchronously after the server is ready.
 colab_session_manager = None
 colab_auth_service = None
+_settings_update_lock = asyncio.Lock()
+_settings_apply_lock = asyncio.Lock()
+_settings_activation: dict[str, Any] = {"status": "ready"}
+_settings_activation_tasks: set[asyncio.Task] = set()
 
 
 async def _init_colab_async() -> None:
@@ -418,6 +434,82 @@ project_file_watch_task: Optional[asyncio.Task] = None
 remote_service_state = {"providers": "idle", "colab": "idle"}
 
 
+def _active_prompt_cells(notebook_id: str) -> list[str]:
+    prefix = f"{notebook_id}:"
+    return [key[len(prefix):] for key in prompt_cancel_events if key.startswith(prefix)]
+
+
+def _prompt_operation_conflict(notebook_id: str, operation: str) -> JSONResponse:
+    active_cells = _active_prompt_cells(notebook_id)
+    return JSONResponse({
+        "status": "conflict",
+        "type": "prompt_operation_conflict",
+        "operation": operation,
+        "notebook_id": notebook_id,
+        "active_cell_ids": active_cells,
+        "message": "A prompt is still running. Wait for it to finish or cancel it before changing the notebook.",
+        "actions": ["wait", "cancel"],
+    }, status_code=409)
+
+
+def _cancel_active_prompts(notebook_id: str) -> list[str]:
+    active_cells = _active_prompt_cells(notebook_id)
+    for cell_id in active_cells:
+        cancelled_cells.add(cell_id)
+        event = prompt_cancel_events.get(f"{notebook_id}:{cell_id}")
+        if event:
+            event.set()
+    return active_cells
+
+
+def _normalized_llm_usage(usage: Optional[dict]) -> dict[str, int]:
+    usage = usage or {}
+    details = usage.get("input_tokens_details") or {}
+    cached = usage.get("cached_tokens", details.get("cached_tokens", 0))
+    input_tokens = int(usage.get("input_tokens") or 0)
+    output_tokens = int(usage.get("output_tokens") or 0)
+    return {
+        "input_tokens": input_tokens,
+        "cached_tokens": int(cached or 0),
+        "output_tokens": output_tokens,
+        "total_tokens": int(usage.get("total_tokens") or input_tokens + output_tokens),
+    }
+
+
+def _merge_llm_usage(total: dict[str, int], usage: Optional[dict]) -> None:
+    normalized = _normalized_llm_usage(usage)
+    for key, value in normalized.items():
+        total[key] = int(total.get(key) or 0) + value
+
+
+def _notebook_llm_usage(notebook) -> dict[str, int]:
+    total = _normalized_llm_usage({})
+    for cell in notebook.cells:
+        execution = getattr(cell, "llm_execution", None) or {}
+        _merge_llm_usage(total, execution.get("usage"))
+    return total
+
+
+def _classify_llm_failure(message: str) -> dict[str, Any]:
+    lowered = message.lower()
+    if any(token in lowered for token in ("401", "authentication", "authenticate", "expired", "unauthorized")):
+        return {"category": "authentication", "action": "connect", "label": "Connect OpenAI", "retryable": False}
+    if (
+        any(token in lowered for token in ("entitlement", "model_not_found", "does not have access", "not available for provider"))
+        or ("model" in lowered and any(token in lowered for token in ("not found", "no access", "unsupported")))
+    ):
+        return {"category": "model_entitlement", "action": "choose_model", "label": "Choose Model", "retryable": False}
+    if any(token in lowered for token in ("429", "rate limit", "quota")):
+        return {"category": "rate_limit", "action": "retry", "label": "Retry", "retryable": True}
+    if any(token in lowered for token in ("malformed", "invalid tool", "tool arguments", "json decode")):
+        return {"category": "malformed_tool_call", "action": "retry", "label": "Retry", "retryable": True}
+    if any(token in lowered for token in ("timeout", "timed out", "network", "connection", "socket", "transport")):
+        return {"category": "network", "action": "retry", "label": "Retry", "retryable": True}
+    if any(token in lowered for token in ("500", "502", "503", "504", "server error")):
+        return {"category": "server", "action": "retry", "label": "Retry", "retryable": True}
+    return {"category": "provider", "action": "retry", "label": "Retry", "retryable": True}
+
+
 def serialized_notebook_mutation(handler):
     """Serialize a route mutation and make supplied operation IDs idempotent."""
     signature = inspect.signature(handler)
@@ -435,6 +527,8 @@ def serialized_notebook_mutation(handler):
         operation_id = bound.arguments.get("operation_id") or None
         if not notebook_id:
             return await handler(*args, **kwargs)
+        if _active_prompt_cells(notebook_id):
+            return _prompt_operation_conflict(notebook_id, handler.__name__)
         try:
             async with runtime_registry.mutation(
                 notebook_id,
@@ -795,7 +889,7 @@ def _event_stream(event_type: str) -> str:
     if event_type.startswith("cell_") or event_type == "prompt_output_update":
         return "notebook"
     if event_type in {
-        "stream_chunk", "stream_end", "prompt_stream_start", "thinking_start", "thinking_end",
+        "stream_chunk", "stream_end", "prompt_stream_start", "prompt_run_terminal", "prompt_execution_update", "thinking_start", "thinking_end",
         "code_stream_start", "code_stream_chunk", "code_stream_end", "code_display_data",
         "code_update_display", "code_clear_output", "var_substituted", "tool_available",
         "tool_call", "tool_result", "llm_usage", "tool_confirmation_request",
@@ -1051,8 +1145,7 @@ def _load_notebook(path: str) -> Notebook:
             error_type=type(exc).__name__,
         )
         raise
-    # Legacy notebooks did not persist a provider. Migrate them to the highest
-    # priority authenticated Claude backend (or the current default).
+    # Notebooks without provider metadata use the current authenticated default.
     if not nb.llm_provider:
         nb.llm_provider = CREDENTIAL_INVENTORY.default_provider()
         nb.modified = True
@@ -1907,6 +2000,12 @@ async def _app_shutdown():
         project_file_watch_task.cancel()
         await asyncio.gather(project_file_watch_task, return_exceptions=True)
     project_file_watch_task = None
+    for task in tuple(_settings_activation_tasks):
+        if not task.done():
+            task.cancel()
+    if _settings_activation_tasks:
+        await asyncio.gather(*tuple(_settings_activation_tasks), return_exceptions=True)
+        _settings_activation_tasks.clear()
     await autosave_manager.flush_all(timeout_seconds=3.0)
     await _shutdown_server_runtime()
 
@@ -1939,6 +2038,20 @@ register_diagnostics_routes(
         "sync_tasks": len(kernel_sync_tasks),
     },
 )
+
+register_skill_routes(
+    rt,
+    project_root=lambda: NOTEBOOKS_DIR,
+    config_provider=lambda: DIALENG_CONFIG,
+)
+
+if os.environ.get("DIALENG_E2E") == "1":
+    register_e2e_routes(
+        rt,
+        kernel_service=kernel_service,
+        broadcast_json=broadcast_json,
+        broadcast_kernel_snapshot=broadcast_kernel_snapshot,
+    )
 
 # ============================================================================
 # Extension Development Endpoints
@@ -2126,6 +2239,13 @@ async def post(path: str = "", active_notebook_id: str = "", active_file_relpath
     if target.exists() and target.is_file():
         if target.suffix == ".ipynb":
             nb_id = _nb_id_from_path(target)
+            cancelled_prompts = _cancel_active_prompts(nb_id)
+            if cancelled_prompts:
+                logger.info(
+                    "Cancelling active prompts before notebook deletion (notebook=%s, cells=%s)",
+                    nb_id,
+                    ",".join(cancelled_prompts),
+                )
             async with runtime_registry.get_or_create(nb_id).mutation_lock:
                 deleting_notebooks.add(nb_id)
                 runtime_registry.set_lifecycle(nb_id, LifecycleState.DELETING)
@@ -2150,6 +2270,7 @@ async def post(path: str = "", active_notebook_id: str = "", active_file_relpath
                         "workspace_url": "/dialeng/workspace?deleted=1",
                         "message": "Notebook deleted. Its kernel and pending work were stopped.",
                     })
+                    await broadcast_manager.drain_notebook(nb_id)
                     broadcast_manager.drop_notebook(nb_id)
                 except Exception:
                     logger.exception("Notebook deletion failed (notebook=%s, path=%s)", nb_id, path)
@@ -2331,6 +2452,8 @@ async def get(nb_id: str):
 
 @rt("/dialeng/{nb_id}/save")
 async def post(nb_id: str, overwrite: bool = False):
+    if _active_prompt_cells(nb_id):
+        return _prompt_operation_conflict(nb_id, "save")
     try:
         save_notebook(nb_id, overwrite_external=overwrite)
     except ExternalFileChangedError as exc:
@@ -2407,6 +2530,8 @@ async def post(nb_id: str, action: str):
 
 @rt("/dialeng/{nb_id}/mode")
 async def post(nb_id: str, mode: str):
+    if _active_prompt_cells(nb_id):
+        return _prompt_operation_conflict(nb_id, "mode_change")
     nb = get_notebook(nb_id)
     nb.dialog_mode = mode
     nb.modified = True
@@ -2415,6 +2540,8 @@ async def post(nb_id: str, mode: str):
 
 @rt("/dialeng/{nb_id}/model")
 async def post(nb_id: str, model: str):
+    if _active_prompt_cells(nb_id):
+        return _prompt_operation_conflict(nb_id, "model_change")
     nb = get_notebook(nb_id)
     valid_model = DIALENG_CONFIG.validate_model(nb.llm_provider, model)
     if valid_model != model:
@@ -2434,6 +2561,8 @@ async def post(nb_id: str, model: str):
 @rt("/dialeng/{nb_id}/provider")
 async def post(nb_id: str, provider: str):
     """Select an authenticated provider and its compatible backend default."""
+    if _active_prompt_cells(nb_id):
+        return _prompt_operation_conflict(nb_id, "provider_change")
     nb = get_notebook(nb_id)
     status = CREDENTIAL_INVENTORY.get(provider)
     if not status or not status.authenticated or provider == "mock_only":
@@ -3290,137 +3419,187 @@ async def post():
 
 @rt("/settings")
 def get():
-    """Get current settings as JSON for API use."""
-    config_dict = get_config_dict()
-    return Response(content=json.dumps(config_dict, indent=2),
-                    media_type="application/json")
+    """Return the current backend-authoritative settings snapshot."""
+    return JSONResponse(settings_snapshot(
+        NOTEBOOKS_DIR / "dialeng_config.json",
+        activation=_settings_activation,
+    ))
+
+
+async def _broadcast_settings_changed(snapshot: dict[str, Any]) -> None:
+    await broadcast_all_json({"type": "settings_changed", **snapshot})
+
+
+async def _activate_settings(revision: str, changed_paths: list[str]) -> None:
+    """Apply saved settings without holding the request or event loop."""
+    global CREDENTIAL_INVENTORY, CREDENTIAL_STATUS
+    global colab_auth_service, colab_session_manager, _settings_activation
+
+    async with _settings_apply_lock:
+        config_path = NOTEBOOKS_DIR / "dialeng_config.json"
+        current = settings_snapshot(config_path)
+        if current["revision"] != revision:
+            return
+
+        _settings_activation = {
+            "status": "validating",
+            "revision": revision,
+            "message": "Validating providers and applying runtime settings...",
+        }
+        await _broadcast_settings_changed(settings_snapshot(
+            config_path, activation=_settings_activation
+        ))
+        try:
+            set_skill_root(NOTEBOOKS_DIR)
+            inventory = await refresh_credential_inventory_async(NOTEBOOKS_DIR / ".env")
+            if settings_snapshot(config_path)["revision"] != revision:
+                return
+            _apply_llm_inventory(inventory)
+
+            colab_changed = False
+            # Auth-provider changes are intentionally restart-bound. Existing
+            # authenticated runtimes are not torn down as a side effect of Save.
+            if "colab.auth_provider" not in changed_paths:
+                if DIALENG_CONFIG.colab_enabled and colab_auth_service is None:
+                    from dialeng.services.colab import ColabAuthService, ColabSessionManager
+                    from dialeng.services.colab.colab_auth import resolve_oauth_credentials
+
+                    creds = await resolve_oauth_credentials(DIALENG_CONFIG.colab_auth_provider)
+                    colab_auth_service = ColabAuthService(
+                        credentials=creds,
+                        auth_provider=DIALENG_CONFIG.colab_auth_provider,
+                    )
+                    await colab_auth_service.validate_session()
+                    colab_session_manager = ColabSessionManager(
+                        colab_auth_service,
+                        default_accelerator=DIALENG_CONFIG.colab_default_accelerator,
+                    )
+                    if colab_auth_service.is_authenticated:
+                        try:
+                            await colab_session_manager.prune_stale_metadata()
+                        except Exception as exc:
+                            logger.warning(
+                                "Failed to prune Colab session metadata from settings: %s",
+                                exc,
+                            )
+                    kernel_service.set_colab_session_manager(colab_session_manager)
+                    colab_changed = True
+                elif not DIALENG_CONFIG.colab_enabled and colab_auth_service is not None:
+                    if colab_session_manager:
+                        await colab_session_manager.shutdown_all()
+                    colab_auth_service = None
+                    colab_session_manager = None
+                    kernel_service.set_colab_session_manager(None)
+                    colab_changed = True
+
+            if colab_session_manager is not None:
+                colab_session_manager.default_accelerator = (
+                    DIALENG_CONFIG.colab_default_accelerator
+                )
+
+            if colab_changed:
+                await _mark_all_outlines_dirty("colab_settings_change")
+            else:
+                await broadcast_all_kernel_snapshots()
+            await broadcast_all_llm_statuses()
+
+            _settings_activation = {
+                "status": "ready",
+                "revision": revision,
+                "message": "Settings are active.",
+            }
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Saved settings could not be fully activated")
+            _settings_activation = {
+                "status": "failed",
+                "revision": revision,
+                "message": "Settings were saved, but runtime activation failed.",
+                "error": str(exc),
+            }
+        finally:
+            if settings_snapshot(config_path)["revision"] == revision:
+                await _broadcast_settings_changed(settings_snapshot(
+                    config_path, activation=_settings_activation
+                ))
+
+
+def _track_settings_activation(task: asyncio.Task) -> None:
+    _settings_activation_tasks.add(task)
+    task.add_done_callback(_settings_activation_tasks.discard)
 
 @rt("/settings")
 async def post(request):
-    """Update settings from the settings form.
-
-    Parses form data and updates the config file.
-    Returns a status message for the settings sidebar.
-    """
-    form_data = await request.form()
-
-    # Build updates dict from form data
-    # Form field names use dot notation: "aws.region", "modes.default", etc.
-    updates = {}
-
-    for field_name, value in form_data.multi_items():
-        # Parse the dotted path into nested dict
-        keys = field_name.split('.')
-
-        # Handle toggle values: hidden input sends "off", checkbox sends "on"
-        # When checkbox is checked, both "off" and "on" are sent — "on" wins
-        # (last value for same name). When unchecked, only "off" is sent.
-        if value == 'on':
-            value = True
-        elif value == 'off':
-            value = False
-        elif value.isdigit():
-            value = int(value)
-        else:
-            # Try to parse as float
-            try:
-                value = float(value)
-                if value.is_integer():
-                    value = int(value)
-            except ValueError:
-                pass  # Keep as string
-
-        # Build nested dict for this path
-        current = updates
-        for key in keys[:-1]:
-            if key not in current:
-                current[key] = {}
-            current = current[key]
-        current[keys[-1]] = value
-
+    """Atomically apply a revision-checked partial settings update."""
     try:
-        # Apply updates to config (explicitly use project dir path)
         config_path = NOTEBOOKS_DIR / "dialeng_config.json"
-        update_config(updates, config_path=config_path)
-
-        # Reload the global config
-        global DIALENG_CONFIG, colab_auth_service, colab_session_manager
-        DIALENG_CONFIG = load_config(config_path=config_path, force_reload=True)
-        set_skill_root(NOTEBOOKS_DIR)
-        _refresh_llm_runtime()
-
-        # Lazily initialize or tear down Colab services based on new config
-        colab_changed = False
-        active_auth_provider = getattr(colab_auth_service, "auth_provider", None)
-        provider_changed = (
-            DIALENG_CONFIG.colab_enabled
-            and colab_auth_service is not None
-            and active_auth_provider != DIALENG_CONFIG.colab_auth_provider
-        )
-        if provider_changed:
-            if colab_session_manager:
-                await colab_session_manager.shutdown_all()
-            colab_auth_service = None
-            colab_session_manager = None
-            kernel_service.set_colab_session_manager(None)
-
-        if DIALENG_CONFIG.colab_enabled and colab_auth_service is None:
-            from dialeng.services.colab import ColabAuthService, ColabSessionManager
-            from dialeng.services.colab.colab_auth import resolve_oauth_credentials
-            _creds = await resolve_oauth_credentials(DIALENG_CONFIG.colab_auth_provider)
-            colab_auth_service = ColabAuthService(
-                credentials=_creds,
-                auth_provider=DIALENG_CONFIG.colab_auth_provider,
-            )
-            await colab_auth_service.validate_session()
-            colab_session_manager = ColabSessionManager(
-                colab_auth_service,
-                default_accelerator=DIALENG_CONFIG.colab_default_accelerator,
-            )
-            if colab_auth_service.is_authenticated:
-                try:
-                    await colab_session_manager.prune_stale_metadata()
-                except Exception as e:
-                    logger.warning("Failed to prune Colab session metadata from settings: %s", e)
-            kernel_service.set_colab_session_manager(colab_session_manager)
-            logger.info(
-                "Colab services initialized from settings (oauth_source=%s, auth_provider=%s, authenticated=%s, email=%s, validation_error=%s)",
-                _creds.source,
-                DIALENG_CONFIG.colab_auth_provider,
-                colab_auth_service.is_authenticated,
-                colab_auth_service.account_email,
-                colab_auth_service.session_error,
-            )
-            colab_changed = True
-        elif not DIALENG_CONFIG.colab_enabled and colab_auth_service is not None:
-            if colab_session_manager:
-                await colab_session_manager.shutdown_all()
-            colab_auth_service = None
-            colab_session_manager = None
-            kernel_service.set_colab_session_manager(None)
-            logger.info("Colab services disabled from settings")
-            colab_changed = True
-
-        if colab_changed:
-            await _mark_all_outlines_dirty("colab_settings_change")
+        content_type = request.headers.get("content-type", "")
+        if "application/json" in content_type:
+            payload = await request.json()
+            changes = payload.get("changes", {})
+            expected_revision = str(payload.get("revision", ""))
         else:
-            await broadcast_all_kernel_snapshots()
-        await broadcast_all_llm_statuses()
+            form_data = await request.form()
+            expected_revision = str(form_data.get("_revision", ""))
+            changes = {
+                key: value
+                for key, value in form_data.multi_items()
+                if not key.startswith("_")
+            }
+        if not isinstance(changes, dict):
+            raise SettingsValidationError({"_form": "Changes must be an object."})
 
-        if colab_changed:
-            return Div(
-                "Settings saved. Kernel controls refreshed.",
-                cls="settings-status success"
+        async with _settings_update_lock:
+            config, snapshot, changed_paths = await asyncio.to_thread(
+                commit_settings,
+                config_path,
+                changes,
+                expected_revision,
             )
+            global DIALENG_CONFIG, _settings_activation
+            DIALENG_CONFIG = config
 
-        return Div(
-            "Settings saved successfully!",
-            cls="settings-status success"
+        modes = apply_modes_for(changed_paths, config)
+        if changed_paths:
+            _settings_activation = {
+                "status": "pending",
+                "revision": snapshot["revision"],
+                "message": "Settings saved. Runtime validation is queued.",
+            }
+            snapshot["activation"] = dict(_settings_activation)
+            snapshot["changed_paths"] = changed_paths
+            snapshot["apply_modes"] = modes
+            await _broadcast_settings_changed(snapshot)
+            task = asyncio.create_task(
+                _activate_settings(snapshot["revision"], changed_paths),
+                name=f"settings-activation:{snapshot['revision'][:8]}",
+            )
+            _track_settings_activation(task)
+            return JSONResponse(snapshot, status_code=202)
+
+        snapshot["changed_paths"] = []
+        snapshot["apply_modes"] = []
+        return JSONResponse(snapshot)
+    except SettingsConflictError as exc:
+        snapshot = settings_snapshot(
+            NOTEBOOKS_DIR / "dialeng_config.json",
+            activation=_settings_activation,
         )
-    except Exception as e:
-        return Div(
-            f"Error saving settings: {str(e)}",
-            cls="settings-status error"
+        return JSONResponse(
+            {"error": "settings_conflict", "message": str(exc), "snapshot": snapshot},
+            status_code=409,
+        )
+    except SettingsValidationError as exc:
+        return JSONResponse(
+            {"error": "validation_error", "message": str(exc), "errors": exc.errors},
+            status_code=422,
+        )
+    except Exception as exc:
+        logger.exception("Failed to save settings")
+        return JSONResponse(
+            {"error": "settings_save_failed", "message": str(exc)},
+            status_code=500,
         )
 
 # Cell operations - now include notebook ID in path
@@ -3910,6 +4089,10 @@ async def post(nb_id: str, cid: str, source: str = None, expected_version: int =
         })
         return resp
 
+    active_prompts = _active_prompt_cells(nb_id)
+    if active_prompts:
+        return _prompt_operation_conflict(nb_id, "cell_run")
+
     # Shift+Enter dispatches the run and next-cell requests together. Source
     # persistence must use the same lock as structural mutations so notebook
     # revision events are emitted in commit order instead of creating false gaps.
@@ -3999,6 +4182,23 @@ async def post(nb_id: str, cid: str, source: str = None, expected_version: int =
         cancel_key = f"{nb_id}:{cid}"
         cancel_event = asyncio.Event()
         prompt_cancel_events[cancel_key] = cancel_event
+        previous_output = c.output
+        execution_started = time.perf_counter()
+        execution_diagnostics: dict[str, Any] = {
+            "operation_id": run_op_id,
+            "provider": nb.llm_provider,
+            "model": nb.model,
+            "transport": "mock" if nb.dialog_mode == "mock" else "provider",
+            "ttft_ms": None,
+            "duration_ms": None,
+            "retry_count": 0,
+            "request_ids": [],
+            "response_ids": [],
+            "tool_steps": 0,
+            "usage": _normalized_llm_usage({}),
+            "status": "running",
+        }
+        failure_info: Optional[dict[str, Any]] = None
 
         if nb.dialog_mode != "mock":
             selected_provider = CREDENTIAL_INVENTORY.get(nb.llm_provider)
@@ -4092,20 +4292,38 @@ async def post(nb_id: str, cid: str, source: str = None, expected_version: int =
         # Notify clients that this prompt cell is now generating.
         # This is needed for cells created programmatically (e.g., via _add_msg_unsafe
         # with run_mode='run') where no UI button click triggers startStreaming().
-        await broadcast_json(nb_id, {"type": "prompt_stream_start", "cell_id": cid})
-
+        terminal_status = "completed"
         try:
+            await broadcast_json(nb_id, {"type": "prompt_stream_start", "cell_id": cid})
             async for item in stream_func:
+                if (
+                    item.get("type") in {"chunk", "thinking", "tool_call"}
+                    and execution_diagnostics["ttft_ms"] is None
+                ):
+                    execution_diagnostics["ttft_ms"] = round(
+                        (time.perf_counter() - execution_started) * 1000, 1,
+                    )
                 # Check if cancelled
                 if cid in cancelled_cells:
                     cancelled_cells.discard(cid)
+                    terminal_status = "cancelled"
                     break
 
                 # Handle errors from LLM service
                 if item["type"] == "error":
-                    post_tool_text.append(f"\n\n**Error:** {item['content']}")
-                    # Send error to WebSocket
-                    await broadcast_json(nb_id, {"type": "stream_chunk", "cell_id": cid, "chunk": f"\n\n**Error:** {item['content']}"})
+                    terminal_status = "error"
+                    failure_info = {
+                        **_classify_llm_failure(item["content"]),
+                        "message": item["content"],
+                    }
+                    await broadcast_json(nb_id, {
+                        "type": "status_message",
+                        "message": item["content"],
+                        "tone": "error",
+                        "action": failure_info["action"],
+                        "action_label": failure_info["label"],
+                        "cell_id": cid,
+                    })
                     break
 
                 # Collect response chunks with proper categorization
@@ -4173,6 +4391,17 @@ async def post(nb_id: str, cid: str, source: str = None, expected_version: int =
                         })
                         del current_tool_call[tool_id]
                     has_active_tool_call = False
+                    execution_diagnostics["tool_steps"] += 1
+                elif item["type"] == "usage":
+                    _merge_llm_usage(execution_diagnostics["usage"], item.get("usage"))
+                elif item["type"] == "diagnostic":
+                    provider_diagnostics = item.get("diagnostics") or {}
+                    for key in (
+                        "transport", "ttft_ms", "duration_ms", "retry_count",
+                        "request_ids", "response_ids",
+                    ):
+                        if key in provider_diagnostics:
+                            execution_diagnostics[key] = provider_diagnostics[key]
 
                 # Send streaming updates via WebSocket
                 if item["type"] == "thinking_start":
@@ -4221,66 +4450,121 @@ async def post(nb_id: str, cid: str, source: str = None, expected_version: int =
                         "type": "llm_usage",
                         "cell_id": cid,
                         "provider": nb.llm_provider,
-                        "usage": item.get("usage", {}),
+                        "usage": execution_diagnostics["usage"],
                     })
-                else:  # chunk
+                elif item["type"] == "diagnostic":
+                    pass
+                elif item["type"] == "chunk":
                     await broadcast_json(nb_id, {"type": "stream_chunk", "cell_id": cid, "chunk": item["content"]})
         except asyncio.CancelledError:
+            terminal_status = "cancelled"
             logger.info("Prompt generation cancelled (notebook=%s, cell=%s)", nb_id, cid)
         except Exception as e:
-            # Catch any unexpected errors during streaming
-            error_msg = f"\n\n**Error:** Streaming error: {str(e)}"
-            post_tool_text.append(error_msg)
-            await broadcast_json(nb_id, {"type": "stream_chunk", "cell_id": cid, "chunk": error_msg})
+            terminal_status = "error"
+            failure_info = {**_classify_llm_failure(str(e)), "message": str(e)}
+            await broadcast_json(nb_id, {
+                "type": "status_message",
+                "message": f"Prompt failed: {e}",
+                "tone": "error",
+                "action": failure_info["action"],
+                "action_label": failure_info["label"],
+                "cell_id": cid,
+            })
         finally:
-            prompt_cancel_events.pop(cancel_key, None)
-            # Determine the final response text based on whether tools were used
-            if had_any_tools:
-                # Tools were used: post_tool_text is the final response to user
-                # All text after the last tool_result goes OUTSIDE the LLM Steps
-                # Pre-tool and inter-tool reasoning is already captured as steps
-                response_text = "".join(post_tool_text)
-            else:
-                # No tools: pre_tool_text is the entire response
-                response_text = "".join(pre_tool_text)
+            try:
+                # Determine the final response text based on whether tools were used
+                if had_any_tools:
+                    response_text = "".join(post_tool_text)
+                else:
+                    response_text = "".join(pre_tool_text)
+                response_text = _deduplicate_response_text(response_text)
+                tool_steps_md = _format_tool_steps_markdown(tool_events)
+                final_output = tool_steps_md + response_text if tool_steps_md else response_text
+                if terminal_status == "error" and not final_output.strip():
+                    final_output = previous_output
+                execution_diagnostics["duration_ms"] = execution_diagnostics.get("duration_ms") or round(
+                    (time.perf_counter() - execution_started) * 1000, 1,
+                )
+                execution_diagnostics["status"] = terminal_status
+                if failure_info:
+                    execution_diagnostics["failure"] = failure_info
+                async with runtime_registry.mutation(nb_id):
+                    current_cell = nb.get_cell(cid)
+                    if current_cell is not None:
+                        c = current_cell
+                        output_changed = _commit_cell_output(
+                            nb_id, nb, c, final_output, reason="prompt_output_commit",
+                        )
+                        c.time_run = datetime.now().strftime("%H:%M:%S")
+                        previous_execution = c.llm_execution
+                        c.llm_execution = dict(execution_diagnostics)
+                        if not output_changed and previous_execution != c.llm_execution:
+                            c.version += 1
+                            c.last_modified = datetime.now()
+                            _touch_notebook_revision(nb_id, "prompt_execution_commit")
+                        nb.modified = True
+                        await broadcast_json(nb_id, _prompt_output_payload(nb_id, c))
+                        await broadcast_json(nb_id, {
+                            "type": "prompt_execution_update",
+                            "cell_id": cid,
+                            "execution": c.llm_execution,
+                            "notebook_usage": _notebook_llm_usage(nb),
+                        })
+                        log_operation(
+                            logger,
+                            "prompt_run_completed",
+                            op_id=run_op_id,
+                            notebook=nb_id,
+                            cell=cid,
+                            version=c.version,
+                            notebook_revision=_get_notebook_revision(nb_id),
+                            provider=nb.llm_provider,
+                            model=nb.model,
+                            transport=execution_diagnostics["transport"],
+                            ttft_ms=execution_diagnostics["ttft_ms"],
+                            duration_ms=execution_diagnostics["duration_ms"],
+                            retry_count=execution_diagnostics["retry_count"],
+                            usage=execution_diagnostics["usage"],
+                            tool_steps=execution_diagnostics["tool_steps"],
+                            status=terminal_status,
+                            request_ids=execution_diagnostics["request_ids"],
+                            response_ids=execution_diagnostics["response_ids"],
+                        )
 
-            # Deduplicate response text to handle LLM output issues
-            response_text = _deduplicate_response_text(response_text)
+                if nb.get_cell(cid) is not None:
+                    await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
+                    await broadcast_json(nb_id, {
+                        "type": "cell_class_update",
+                        "cell_id": c.id,
+                        "cls": get_cell_state_classes(c),
+                    })
+            except Exception:
+                terminal_status = "error"
+                logger.exception(
+                    "Prompt terminal persistence failed (notebook=%s, cell=%s, operation_id=%s)",
+                    nb_id, cid, run_op_id,
+                )
+            finally:
+                # Never leave a notebook permanently blocked if persistence or
+                # a UI broadcast fails during terminal processing.
+                prompt_cancel_events.pop(cancel_key, None)
 
-            # Build tool steps markdown if there were any tool events
-            tool_steps_md = _format_tool_steps_markdown(tool_events)
-
-            # Prepend LLM steps to response if any
-            final_output = tool_steps_md + response_text if tool_steps_md else response_text
-            async with runtime_registry.mutation(nb_id):
-                current_cell = nb.get_cell(cid)
-                if current_cell is not None:
-                    c = current_cell
-                    _commit_cell_output(nb_id, nb, c, final_output, reason="prompt_output_commit")
-                    c.time_run = datetime.now().strftime("%H:%M:%S")
-                    nb.modified = True
-
-                    await broadcast_json(nb_id, _prompt_output_payload(nb_id, c))
-                    log_operation(
-                        logger,
-                        "prompt_run_completed",
-                        op_id=run_op_id,
-                        notebook=nb_id,
-                        cell=cid,
-                        version=c.version,
-                        notebook_revision=_get_notebook_revision(nb_id),
+            terminal_payload = {
+                "type": "prompt_run_terminal",
+                "cell_id": cid,
+                "operation_id": run_op_id,
+                "status": terminal_status,
+                "version": getattr(c, "version", None),
+                "notebook_revision": _get_notebook_revision(nb_id),
+            }
+            for payload in (terminal_payload, {"type": "stream_end", "cell_id": cid}):
+                try:
+                    await broadcast_json(nb_id, payload)
+                except Exception:
+                    logger.exception(
+                        "Prompt terminal broadcast failed (notebook=%s, cell=%s, event=%s)",
+                        nb_id, cid, payload["type"],
                     )
-
-                # End the browser stream even if the cell was removed meanwhile.
-                await broadcast_json(nb_id, {"type": "stream_end", "cell_id": cid})
-
-        # FOUST fix: use targeted updates instead of CellViewOOB for prompt completion.
-        # The output was already streamed to the client via stream_chunk/stream_end,
-        # so only the header (execution count, time) and cell classes (state badges)
-        # need updating. No full cell replacement, no DOM churn.
-        if nb.get_cell(cid) is not None:
-            await broadcast_to_notebook(nb_id, CellHeaderOOB(c, nb_id))
-            await broadcast_json(nb_id, {"type": "cell_class_update", "cell_id": c.id, "cls": get_cell_state_classes(c)})
 
     # Selection and scroll position belong to the initiating browser. Prompt
     # output/header updates already arrive through granular WebSocket events, so

@@ -34,6 +34,7 @@ class _Client:
     pending: deque[_OutboundMessage] = field(default_factory=deque)
     wakeup: asyncio.Event | None = None
     writer_task: asyncio.Task | None = None
+    drained: asyncio.Event | None = None
     closed: bool = False
 
 
@@ -99,6 +100,8 @@ class BroadcastManager:
             loop = None
         if loop is not None:
             client.wakeup = asyncio.Event()
+            client.drained = asyncio.Event()
+            client.drained.set()
             client.writer_task = loop.create_task(
                 self._writer_loop(notebook_id, client),
                 name=f"dialeng-ws-writer-{notebook_id}",
@@ -140,6 +143,8 @@ class BroadcastManager:
     def _close_client(self, client: _Client) -> None:
         client.closed = True
         client.pending.clear()
+        if client.drained is not None:
+            client.drained.set()
         try:
             current_task = asyncio.current_task()
         except RuntimeError:
@@ -167,6 +172,8 @@ class BroadcastManager:
                             labels={"event_type": outbound.event_type},
                             record_event=False,
                         )
+                if client.drained is not None:
+                    client.drained.set()
                 client.wakeup.clear()
         except asyncio.CancelledError:
             raise
@@ -179,6 +186,8 @@ class BroadcastManager:
                     error_type=type(exc).__name__,
                 )
             client.closed = True
+            if client.drained is not None:
+                client.drained.set()
             clients = self._clients(notebook_id)
             if client in clients:
                 clients.remove(client)
@@ -268,9 +277,26 @@ class BroadcastManager:
             return "overflow"
 
         client.pending.append(outbound)
+        if client.drained is not None:
+            client.drained.clear()
         if client.wakeup is not None:
             client.wakeup.set()
         return "queued"
+
+    async def drain_notebook(self, notebook_id: str, timeout: float = 5.0) -> bool:
+        """Wait until queued messages have been sent to current notebook clients."""
+        waits = [
+            client.drained.wait()
+            for client in list(self._clients(notebook_id))
+            if client.drained is not None and not client.closed
+        ]
+        if not waits:
+            return True
+        try:
+            await asyncio.wait_for(asyncio.gather(*waits), timeout=max(0.01, timeout))
+            return True
+        except asyncio.TimeoutError:
+            return False
 
     async def _broadcast(
         self,

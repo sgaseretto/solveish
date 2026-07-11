@@ -64,6 +64,7 @@ def _cell_to_jupyter(cell: Cell) -> dict:
                 'use_thinking': cell.use_thinking,
                 'collapsed': cell.collapsed,
                 'pinned': cell.pinned,
+                'dialeng_llm_execution': cell.llm_execution,
             }
         }
 
@@ -178,6 +179,7 @@ def _jupyter_to_cell(jcell: dict, index: int = 0) -> Cell:
         output_collapse=CollapseLevel(metadata.get('output_collapse', 0)),
         heading_collapsed=metadata.get('heading_collapsed', False),
         bookmark=metadata.get('bookmark', 0),
+        llm_execution=dict(metadata.get('dialeng_llm_execution') or {}),
     )
 
     return cell

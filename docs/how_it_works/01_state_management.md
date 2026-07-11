@@ -193,7 +193,8 @@ Recovery snapshots live under `.dialeng/recovery/` with bounded retention. A
 newer recovery is offered for inspect, restore, or discard; it never silently
 replaces the canonical notebook. Recovery JSON is parsed and loaded as a
 notebook before atomic replacement, so corrupted recovery data cannot damage
-the canonical file.
+the canonical file. `dialeng init` adds `.dialeng/recovery/` to the project
+`.gitignore` without ignoring shareable `.dialeng/skills/` content.
 
 ## Caches and Invalidation
 

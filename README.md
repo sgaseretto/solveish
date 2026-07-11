@@ -15,6 +15,8 @@ An open-source Solveit-like notebook built entirely with **FastHTML**. Features 
 - **Safe persistence**: Atomic explicit saves by default, with optional disabled-by-default autosave and recovery snapshots
 - **Runtime diagnostics**: Inspect browser, provider, kernel, queue, setup, save, and revision state from the toolbar
 - **Editable AI responses**: Both user prompts AND AI responses are fully editable
+- **Source-derived skills**: Generate, review, refresh, and install reusable Codex skills from notebooks, local text/code files, and web2md-converted pages
+- **Prompt observability**: Inspect per-run latency, transport, retries, tool steps, status, and token usage without adding diagnostics to model context
 - **Solveit-compatible**: Standard `.ipynb` format with Solveit metadata conventions
 - **Pure Python**: Built with FastHTML, no JavaScript frameworks
 - **Mock LLM included**: Works out of the box without API keys
@@ -51,6 +53,17 @@ dialeng ./my-project
 For a repository-local install, use `uv add "dialeng @ git+https://github.com/sgaseretto/solveish.git"`
 and run `uv run dialeng init .` followed by `uv run dialeng .`. See the
 [project initialization guide](docs/guides/project_initialization.md).
+
+Create a reusable project skill from notebook-authored workflows through the
+toolbar sparkles button or the CLI:
+
+```bash
+uv run dialeng skill create lesson-helper \
+  --from lessons/01_intro.ipynb lessons/02_workflow.ipynb \
+  --description "Use when applying the lesson workflow."
+```
+
+See the [Codex skills guide](docs/guides/codex_skills.md).
 
 ---
 
@@ -281,25 +294,12 @@ flowchart TB
 
 ## 🔧 Extending Dialeng
 
-### Swap LLM Provider
+### LLM Providers
 
-Replace the mock LLM with a real provider:
-
-```python
-# In app.py, replace mock_llm_stream with:
-
-import anthropic
-
-async def real_llm_stream(prompt: str, context: str):
-    client = anthropic.Anthropic()
-    with client.messages.stream(
-        model="claude-sonnet-4-20250514",
-        max_tokens=4096,
-        messages=[{"role": "user", "content": f"{context}\n\n{prompt}"}]
-    ) as stream:
-        for text in stream.text_stream:
-            yield text
-```
+Dialeng includes OpenAI Codex subscription and AWS Bedrock providers. Provider
+implementations conform to `BaseLLMProvider` and register through the central
+registry; prompt context, tools, streaming events, and persistence remain in the
+provider-neutral coordinator.
 
 ### Add New Cell Type
 

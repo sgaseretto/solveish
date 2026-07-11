@@ -2,6 +2,7 @@
 
 import json
 import random
+import time
 from pathlib import Path
 
 from starlette.testclient import TestClient
@@ -226,17 +227,66 @@ def test_prompt_run_does_not_append_or_return_a_replacement_cell(tmp_path: Path,
         monkeypatch.setattr(appmod.kernel_service, "has_kernel", lambda _nb_id: True)
         client = TestClient(appmod.app)
 
-        response = client.post(
-            f"/dialeng/demo/cell/{cell.id}/run",
-            data={"source": cell.source, "expected_version": 0},
-        )
+        with client.websocket_connect("/ws/demo") as websocket:
+            response = client.post(
+                f"/dialeng/demo/cell/{cell.id}/run",
+                data={"source": cell.source, "expected_version": 0},
+            )
+            terminal = _next_json_event(websocket, "prompt_run_terminal")
 
         assert response.status_code == 200
         assert response.text == ""
         assert [item.id for item in notebook.cells] == [cell.id]
         assert appmod._get_structure_revision("demo") == 0
         assert cell.output
+        assert terminal["status"] == "completed"
+        assert terminal["version"] == cell.version
+        assert not appmod._active_prompt_cells("demo")
     finally:
+        appmod.runtime_registry.clear_runtime(
+            "demo", lifecycle=appmod.LifecycleState.STOPPED,
+        )
+        appmod.set_root_dir(previous_root)
+
+
+def test_prompt_mutations_conflict_immediately_while_stream_is_active(tmp_path: Path):
+    root = tmp_path / "notebooks"
+    root.mkdir()
+    _write_notebook(root / "demo.ipynb")
+    previous_root = appmod.NOTEBOOKS_DIR
+
+    try:
+        appmod.set_root_dir(root)
+        notebook = appmod.get_notebook("demo")
+        cell = appmod.notebook_mutation_service.add(
+            notebook, position=0, cell_type="prompt",
+        )
+        cell.source = "Original prompt"
+        appmod.prompt_cancel_events[f"demo:{cell.id}"] = appmod.asyncio.Event()
+        client = TestClient(appmod.app)
+
+        started = time.perf_counter()
+        source = client.post(
+            f"/dialeng/demo/cell/{cell.id}/source",
+            data={"source": "Changed during run", "expected_version": 0},
+        )
+        save = client.post("/dialeng/demo/save")
+        provider = client.post("/dialeng/demo/provider", data={"provider": "openai_codex"})
+        elapsed = time.perf_counter() - started
+
+        assert elapsed < 0.5
+        for response, operation in (
+            (source, "post"),
+            (save, "save"),
+            (provider, "provider_change"),
+        ):
+            assert response.status_code == 409
+            assert response.json()["type"] == "prompt_operation_conflict"
+            assert response.json()["operation"] == operation
+            assert response.json()["active_cell_ids"] == [cell.id]
+        assert cell.source == "Original prompt"
+    finally:
+        appmod.prompt_cancel_events.pop(f"demo:{cell.id}", None)
         appmod.runtime_registry.clear_runtime(
             "demo", lifecycle=appmod.LifecycleState.STOPPED,
         )

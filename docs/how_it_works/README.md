@@ -26,6 +26,9 @@ Read the documents in numerical order for the best understanding of the system:
 | 17 | [17_editor_cell_transitions.md](17_editor_cell_transitions.md) | Monaco editor lifecycle, cell transitions, scroll preservation, FOUST known issue |
 | 20 | [20_multi_provider_llm_and_codex.md](20_multi_provider_llm_and_codex.md) | Provider inventory, OpenAI Codex transport/OAuth, backend-authoritative model selection |
 | 21 | [21_performance_reliability.md](21_performance_reliability.md) | Runtime registry, revisioned WebSockets, backpressure, atomic persistence, lazy editors, caches, and diagnostics |
+| 22 | [22_browser_e2e_testing.md](22_browser_e2e_testing.md) | Real-server Playwright fixtures, deterministic LLM testing, fault injection, CI, and failure artifacts |
+| 23 | [23_settings_architecture.md](23_settings_architecture.md) | Typed settings, revisions, atomic persistence, runtime activation, live UI updates, and cross-tab conflict handling |
+| 24 | [24_notebook_skill_creation.md](24_notebook_skill_creation.md) | Packaged skills, notebook extraction, staged LLM refinement, preview hashes, and atomic installation |
 
 ## Purpose
 
@@ -81,6 +84,9 @@ These documents are intended for developers who want to:
 | Diagnose performance or reconnect behavior | [21_performance_reliability.md](21_performance_reliability.md) |
 | Configure atomic saves or optional autosave | [21_performance_reliability.md](21_performance_reliability.md) (Persistence section) |
 | Understand runtime revisions and recovery | [21_performance_reliability.md](21_performance_reliability.md) (WebSocket section) |
+| Run or debug browser E2E tests | [22_browser_e2e_testing.md](22_browser_e2e_testing.md) |
+| Understand or extend settings | [23_settings_architecture.md](23_settings_architecture.md) |
+| Create or extend notebook-derived skills | [24_notebook_skill_creation.md](24_notebook_skill_creation.md) |
 
 ## Related Documentation
 

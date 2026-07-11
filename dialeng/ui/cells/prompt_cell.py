@@ -9,6 +9,44 @@ from ..base import get_collapse_class, get_cell_state_classes
 from .base import CellHeader
 
 
+def _execution_diagnostics(cell):
+    execution = getattr(cell, "llm_execution", None) or {}
+    if not execution:
+        return Details(
+            id=f"prompt-diagnostics-{cell.id}",
+            cls="prompt-diagnostics",
+            hidden=True,
+        )
+    usage = execution.get("usage") or {}
+    total = int(usage.get("total_tokens") or 0)
+    duration = execution.get("duration_ms")
+    summary = " · ".join(filter(None, [
+        execution.get("model"),
+        f"{duration / 1000:.1f}s" if isinstance(duration, (int, float)) else None,
+        f"{total:,} tokens" if total else None,
+        execution.get("status"),
+    ]))
+    detail = [
+        ("Operation", execution.get("operation_id")),
+        ("Provider", execution.get("provider")),
+        ("Transport", execution.get("transport")),
+        ("First token", f"{execution['ttft_ms']:.1f} ms" if isinstance(execution.get("ttft_ms"), (int, float)) else None),
+        ("Retries", execution.get("retry_count")),
+        ("Input / cached / output", f"{usage.get('input_tokens', 0):,} / {usage.get('cached_tokens', 0):,} / {usage.get('output_tokens', 0):,}"),
+        ("Tool steps", execution.get("tool_steps")),
+    ]
+    return Details(
+        Summary(summary or "Execution details"),
+        Div(*[
+            Div(Span(label), Code(str(value)), cls="prompt-diagnostic-row")
+            for label, value in detail if value is not None
+        ], cls="prompt-diagnostic-grid"),
+        id=f"prompt-diagnostics-{cell.id}",
+        cls="prompt-diagnostics",
+        data_operation_id=execution.get("operation_id") or "",
+    )
+
+
 def PromptCellView(cell, notebook_id: str):
     """Render a prompt cell with user input and AI response.
 
@@ -56,6 +94,7 @@ def PromptCellView(cell, notebook_id: str):
             ),
             cls="prompt-section"
         ),
+        _execution_diagnostics(cell),
         cls="cell-body"
     )
 

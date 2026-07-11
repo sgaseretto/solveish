@@ -12,11 +12,28 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
+SUPPORTED_MODEL_PROVIDERS = {"bedrock", "openai_codex"}
+REMOVED_PROVIDER_KEYS = {
+    "anthropic" + "_api",
+    "claude" + "_agent_sdk",
+    "claude" + "_code_subscription",
+    "anthropic" + "_api_map",
+    "claude" + "_code_map",
+}
+
+
+class ConfigValidationError(ValueError):
+    """Raised when provider configuration cannot be applied safely."""
+
+    def __init__(self, errors: List[str]):
+        self.errors = errors
+        super().__init__("Invalid Dialeng provider configuration:\n- " + "\n- ".join(errors))
 
 # Default configuration - used when creating new config file
 DEFAULT_CONFIG = {
@@ -26,28 +43,18 @@ DEFAULT_CONFIG = {
     },
     "models": {
         "available": [
-            {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "providers": ["anthropic_api", "bedrock", "claude_code_subscription"], "capabilities": ["tools", "images", "thinking", "usage"]},
-            {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "providers": ["anthropic_api", "bedrock", "claude_code_subscription"], "capabilities": ["tools", "images", "thinking", "usage"]},
-            {"id": "claude-3-5-sonnet", "name": "Claude 3.5 Sonnet", "providers": ["anthropic_api", "bedrock", "claude_code_subscription"], "capabilities": ["tools", "images", "usage"]},
-            {"id": "claude-3-5-haiku", "name": "Claude 3.5 Haiku", "providers": ["anthropic_api", "bedrock", "claude_code_subscription"], "capabilities": ["tools", "images", "usage"]},
+            {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "providers": ["bedrock"], "capabilities": ["tools", "images", "thinking", "usage"]},
+            {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "providers": ["bedrock"], "capabilities": ["tools", "images", "thinking", "usage"]},
+            {"id": "claude-3-5-sonnet", "name": "Claude 3.5 Sonnet", "providers": ["bedrock"], "capabilities": ["tools", "images", "usage"]},
+            {"id": "claude-3-5-haiku", "name": "Claude 3.5 Haiku", "providers": ["bedrock"], "capabilities": ["tools", "images", "usage"]},
             {"id": "gpt-5.4", "name": "GPT-5.4", "providers": ["openai_codex"], "capabilities": ["tools", "images", "thinking", "skills", "usage"]},
             {"id": "gpt-5.4-mini", "name": "GPT-5.4 Mini", "providers": ["openai_codex"], "capabilities": ["tools", "images", "thinking", "skills", "usage"]},
             {"id": "gpt-5.3-codex", "name": "GPT-5.3 Codex", "providers": ["openai_codex"], "capabilities": ["tools", "images", "thinking", "skills", "usage"]}
         ],
         "defaults": {
             "bedrock": "claude-haiku-4-5",
-            "anthropic_api": "claude-sonnet-4-5",
-            "claude_code_subscription": "claude-sonnet-4-5",
             "openai_codex": "gpt-5.4",
-            "fallback": "claude-sonnet-4-5",
-            "comment": "Default model per provider. bedrock=AWS Bedrock, anthropic_api=direct API, claude_code_subscription=Claude Code CLI. fallback is used when provider is unknown."
-        },
-        "anthropic_api_map": {
-            "claude-haiku-4-5": "claude-haiku-4-5-20251001",
-            "claude-sonnet-4-5": "claude-sonnet-4-5-20250514",
-            "claude-3-5-sonnet": "claude-3-5-sonnet-20241022",
-            "claude-3-5-haiku": "claude-3-5-haiku-20241022",
-            "comment": "Model IDs for direct Anthropic API (with date suffix)"
+            "comment": "Default model for each supported provider."
         },
         "bedrock_map": {
             "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
@@ -55,13 +62,6 @@ DEFAULT_CONFIG = {
             "claude-3-5-sonnet": "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
             "claude-3-5-haiku": "us.anthropic.claude-3-5-haiku-20241022-v1:0",
             "comment": "Model IDs for AWS Bedrock with cross-region inference. Format: us.anthropic.{model}-{date}-v{n}:{profile}"
-        },
-        "claude_code_map": {
-            "claude-haiku-4-5": "haiku",
-            "claude-sonnet-4-5": "sonnet",
-            "claude-3-5-sonnet": "sonnet",
-            "claude-3-5-haiku": "haiku",
-            "comment": "Model IDs for Claude Code subscription - uses simple names (sonnet, haiku, opus)"
         },
         "openai_codex_map": {
             "gpt-5.4": "gpt-5.4",
@@ -76,7 +76,7 @@ DEFAULT_CONFIG = {
     },
     "thinking": {
         "max_tokens": 10000,
-        "comment": "Maximum tokens for extended thinking. Set to 0 to disable. Requires thinking-capable model (Claude Sonnet 3.7+, Sonnet 4+, Opus 4+)"
+        "comment": "Maximum tokens for provider-supported reasoning. Set to 0 to disable."
     },
     "llm": {
         "debug_mode": False,
@@ -87,7 +87,9 @@ DEFAULT_CONFIG = {
     },
     "skills": {
         "enabled": True,
-        "comment": "Load project-scoped OpenAI Codex skills from .dialeng/skills."
+        "creator_enabled": True,
+        "max_source_bytes": 2097152,
+        "comment": "Load project skills and allow reviewable notebook-to-skill creation."
     },
     "persistence": {
         "atomic_explicit_save": True,
@@ -146,9 +148,7 @@ class DialengConfig:
     available_models: List[ModelConfig] = field(default_factory=list)
 
     # Model ID mappings for different backends
-    anthropic_api_map: Dict[str, str] = field(default_factory=dict)
     bedrock_map: Dict[str, str] = field(default_factory=dict)
-    claude_code_map: Dict[str, str] = field(default_factory=dict)
     openai_codex_map: Dict[str, str] = field(default_factory=dict)
 
     # Provider-specific default models
@@ -168,6 +168,8 @@ class DialengConfig:
 
     # Project-scoped skill settings
     skills_enabled: bool = True
+    skills_creator_enabled: bool = True
+    skills_max_source_bytes: int = 2 * 1024 * 1024
 
     # Persistence. Autosave remains opt-in.
     persistence_atomic_explicit_save: bool = True
@@ -204,8 +206,7 @@ class DialengConfig:
         """Get the default model ID for a given backend.
 
         Args:
-            backend: The provider backend - "bedrock", "anthropic_api", "claude_code_subscription",
-                    or None to use fallback.
+            backend: The provider backend - "bedrock", "openai_codex", or None.
 
         Returns:
             The default model ID for the specified backend.
@@ -215,16 +216,15 @@ class DialengConfig:
             return self.default_models[backend]
 
         # Use fallback if backend not found or not specified
-        fallback = self.default_models.get("fallback", "claude-sonnet-4-5")
+        fallback = self.default_models.get("fallback", "gpt-5.4")
         return fallback
 
     @staticmethod
     def provider_backend(provider: Optional[str]) -> Optional[str]:
         """Normalize a provider selection key to its model-config backend."""
         aliases = {
-            "claudette:anthropic_api": "anthropic_api",
+            "e2e_fake": "e2e_fake",
             "claudette:bedrock": "bedrock",
-            "claude_agent_sdk": "claude_code_subscription",
             "openai_codex": "openai_codex",
         }
         return aliases.get(provider or "", provider)
@@ -255,20 +255,19 @@ class DialengConfig:
 
         Args:
             model_id: The UI model ID (e.g., "claude-sonnet-4-5")
-            backend: "anthropic_api", "bedrock", or "claude_code_subscription"
+            backend: "bedrock" or "openai_codex"
 
         Returns:
             The appropriate model name for the API
         """
         backend = self.provider_backend(backend)
+        if backend == "e2e_fake":
+            return model_id
         if backend == "bedrock":
             return self.bedrock_map.get(model_id, model_id)
-        elif backend == "claude_code_subscription":
-            return self.claude_code_map.get(model_id, model_id)
         elif backend == "openai_codex":
             return self.openai_codex_map.get(model_id, model_id)
-        else:
-            return self.anthropic_api_map.get(model_id, model_id)
+        raise ValueError(f"Unsupported LLM backend: {backend}")
 
 
 # Module-level cached config
@@ -278,6 +277,7 @@ _config_path: Optional[Path] = None
 
 def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
     """Parse raw JSON config into DialengConfig."""
+    _validate_provider_config(raw)
     config = DialengConfig(raw_config=raw)
 
     # AWS settings
@@ -295,7 +295,7 @@ def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
             name=m.get("name", m.get("id", "")),
             providers=list(m.get("providers") or (
                 ["openai_codex"] if str(m.get("id", "")).startswith("gpt-")
-                else ["anthropic_api", "bedrock", "claude_code_subscription"]
+                else ["bedrock"]
             )),
             capabilities=list(m.get("capabilities", [])),
         )
@@ -311,38 +311,14 @@ def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
     }
 
     # Model mappings (skip "comment" keys)
-    config.anthropic_api_map = {
-        k: v for k, v in models.get("anthropic_api_map", {}).items()
-        if k != "comment"
-    }
     config.bedrock_map = {
         k: v for k, v in models.get("bedrock_map", {}).items()
-        if k != "comment"
-    }
-    config.claude_code_map = {
-        k: v for k, v in models.get("claude_code_map", {}).items()
         if k != "comment"
     }
     config.openai_codex_map = {
         k: v for k, v in models.get("openai_codex_map", {}).items()
         if k != "comment"
     }
-
-    # Existing configs predate provider-qualified model entries. Add the
-    # built-in Codex catalog in memory without rewriting the user's file.
-    if not any("openai_codex" in m.providers for m in config.available_models):
-        for raw_model in DEFAULT_CONFIG["models"]["available"]:
-            if "openai_codex" not in raw_model.get("providers", []):
-                continue
-            config.available_models.append(ModelConfig(
-                id=raw_model["id"],
-                name=raw_model["name"],
-                providers=list(raw_model["providers"]),
-                capabilities=list(raw_model.get("capabilities", [])),
-            ))
-        config.default_models.setdefault("openai_codex", "gpt-5.4")
-        config.openai_codex_map = dict(DEFAULT_CONFIG["models"]["openai_codex_map"])
-        config.openai_codex_map.pop("comment", None)
 
     # Modes
     modes = raw.get("modes", {})
@@ -364,6 +340,11 @@ def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
 
     skills = raw.get("skills", {})
     config.skills_enabled = bool(skills.get("enabled", True))
+    config.skills_creator_enabled = bool(skills.get("creator_enabled", True))
+    config.skills_max_source_bytes = max(
+        64 * 1024,
+        min(int(skills.get("max_source_bytes", 2 * 1024 * 1024)), 20 * 1024 * 1024),
+    )
 
     persistence = raw.get("persistence", {})
     autosave = persistence.get("autosave", {})
@@ -423,6 +404,44 @@ def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
     return config
 
 
+def _validate_provider_config(raw: Dict[str, Any]) -> None:
+    """Reject removed or unknown provider keys instead of silently ignoring them."""
+    errors: List[str] = []
+    models = raw.get("models") or {}
+    llm = raw.get("llm") or {}
+
+    for key in sorted(REMOVED_PROVIDER_KEYS & (set(raw) | set(models) | set(llm))):
+        errors.append(
+            f"{key!r} was removed. Supported LLM providers are openai_codex and bedrock."
+        )
+
+    supported = set(SUPPORTED_MODEL_PROVIDERS)
+    if os.environ.get("DIALENG_E2E") == "1":
+        supported.add("e2e_fake")
+    defaults = models.get("defaults") or {}
+    unknown_defaults = set(defaults) - supported - {"comment"}
+    for key in sorted(unknown_defaults):
+        errors.append(
+            f"models.defaults.{key} is unsupported; use 'bedrock' or 'openai_codex'."
+        )
+
+    for index, model in enumerate(models.get("available") or []):
+        providers = set(model.get("providers") or [])
+        if not providers:
+            errors.append(
+                f"models.available[{index}].providers is required; choose bedrock or openai_codex."
+            )
+        unknown = providers - supported
+        if unknown:
+            errors.append(
+                f"models.available[{index}].providers contains unsupported values: "
+                f"{', '.join(sorted(unknown))}."
+            )
+
+    if errors:
+        raise ConfigValidationError(errors)
+
+
 def _create_default_config(config_path: Path) -> Dict[str, Any]:
     """Create default config file and return the config dict."""
     logger.info(f"Creating default dialeng_config.json at {config_path}")
@@ -431,7 +450,7 @@ def _create_default_config(config_path: Path) -> Dict[str, Any]:
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(DEFAULT_CONFIG, f, indent=2)
 
-    print(f"   Created dialeng_config.json with defaults")
+    print("   Created dialeng_config.json with defaults")
     return DEFAULT_CONFIG
 
 
@@ -451,6 +470,17 @@ def load_config(config_path: Optional[Path] = None, force_reload: bool = False,
         Parsed DialengConfig
     """
     global _config, _config_path
+
+    # Import-time callers do not yet know the CLI project root. Reading a
+    # coincidental config from the process CWD can validate or cache the wrong
+    # project, so bootstrap from defaults until an explicit path is supplied.
+    if (
+        config_path is None
+        and not create_if_missing
+        and not os.environ.get("DIALENG_CONFIG_PATH")
+        and _config_path is None
+    ):
+        return _parse_config(DEFAULT_CONFIG)
 
     if config_path is None:
         # Priority: env var > cached path from previous load > CWD fallback
@@ -481,7 +511,7 @@ def load_config(config_path: Optional[Path] = None, force_reload: bool = False,
             logger.info(f"Loaded dialeng_config.json from {config_path}")
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse dialeng_config.json: {e}")
-            print(f"   Warning: Invalid dialeng_config.json, using defaults")
+            print("   Warning: Invalid dialeng_config.json, using defaults")
             raw = DEFAULT_CONFIG
         except Exception as e:
             logger.error(f"Failed to load dialeng_config.json: {e}")
@@ -543,8 +573,26 @@ def save_config(config_dict: Dict[str, Any], config_path: Optional[Path] = None)
 
     logger.info(f"Saving config to {config_path}")
 
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(config_dict, f, indent=2)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=config_path.parent,
+            prefix=f".{config_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as f:
+            temp_path = Path(f.name)
+            json.dump(config_dict, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, config_path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink(missing_ok=True)
 
     # Reload the config to update cache
     _config = _parse_config(config_dict)
@@ -618,24 +666,24 @@ def print_config_status(config: DialengConfig, detected_backend: Optional[str] =
         detected_backend: The detected backend from credential detection (for showing active default)
     """
     models = ", ".join(m.name for m in config.available_models)
-    print(f"   Config: dialeng_config.json")
+    print("   Config: dialeng_config.json")
     print(f"      AWS Region:     {config.aws_region}")
     print(f"      Models:         {models}")
 
     # Show default models per provider
     bedrock_default = config.get_default_model("bedrock")
-    claude_code_default = config.get_default_model("claude_code_subscription")
+    codex_default = config.get_default_model("openai_codex")
 
     # Highlight the active default based on detected backend
     if detected_backend == "bedrock":
         print(f"      Default Model:  {bedrock_default} (Bedrock) ← active")
-        print(f"                      {claude_code_default} (Claude Code)")
-    elif detected_backend == "claude_code_subscription":
+        print(f"                      {codex_default} (OpenAI Codex)")
+    elif detected_backend == "openai_codex":
         print(f"      Default Model:  {bedrock_default} (Bedrock)")
-        print(f"                      {claude_code_default} (Claude Code) ← active")
+        print(f"                      {codex_default} (OpenAI Codex) ← active")
     else:
         print(f"      Default Model:  {bedrock_default} (Bedrock)")
-        print(f"                      {claude_code_default} (Claude Code)")
+        print(f"                      {codex_default} (OpenAI Codex)")
 
     print(f"      Default Mode:   {config.default_mode}")
     if config.debug_mode:

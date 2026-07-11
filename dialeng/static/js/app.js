@@ -775,6 +775,19 @@ function clickCellRunButton(cell, {advance = true} = {}) {
     return true;
 }
 
+// Prompt execution is an HTTP request whose response arrives only after the
+// stream has been persisted. Defer navigation until the matching terminal
+// WebSocket event so a trailing-cell add cannot race the active prompt.
+const pendingPromptAdvances = new Set();
+
+function completePromptAdvance(cellId, status) {
+    if (!pendingPromptAdvances.delete(cellId) || status === 'cancelled') return;
+    requestAnimationFrame(() => {
+        const cell = document.getElementById(`cell-${cellId}`);
+        if (cell) moveToNextCell(cell);
+    });
+}
+
 function createNewCellAtEnd() {
     // Count current cells to determine position
     const cells = document.querySelectorAll('#cells .cell');
@@ -1105,7 +1118,7 @@ document.addEventListener('keydown', e => {
         }
         const sidebar = document.getElementById('settings-sidebar');
         if (sidebar && sidebar.classList.contains('open')) {
-            toggleSettings();
+            closeSettings();
             return;
         }
         const outlineSidebar = document.getElementById('outline-sidebar');
@@ -2646,6 +2659,13 @@ document.addEventListener('htmx:responseError', (e) => {
         if (conflict.type === 'external_file_changed') {
             setNotebookSaveState('failed');
             showExternalSaveConflict(conflict);
+        } else if (conflict.type === 'prompt_operation_conflict') {
+            if (conflict.operation === 'save') setNotebookSaveState('modified');
+            showKernelStatusMessage(
+                conflict.message || 'A prompt is still running. Wait or cancel it before changing the notebook.',
+                'warning',
+                7000,
+            );
         } else {
             recoverNotebookState('backend revision conflict');
             showKernelStatusMessage('The notebook changed in another tab. Resynchronizing…', 'warning', 5000);
@@ -3008,6 +3028,9 @@ window.addEventListener('message', function(event) {
 // Listen for localStorage event from popup (reliable cross-origin fallback)
 window.addEventListener('storage', function(event) {
     if (event.key === 'colab-auth-event') onColabAuthenticated();
+    if (event.key === 'dialeng-settings-changed') {
+        refreshSettings({preserveDirty: true});
+    }
 });
 
 // ==================== Kernel Type Management ====================
@@ -3067,16 +3090,427 @@ function handleKernelTypeChanged(kernelType) {
     }
 }
 
-// ==================== Settings Sidebar Toggle ====================
+// ==================== Notebook-to-skill creator ====================
+const skillCreatorState = {
+    buildId: '',
+    buildHash: '',
+    files: {},
+    loading: false,
+};
+
+function setSkillCreatorStatus(message = '', tone = '') {
+    const status = document.getElementById('skill-creator-status');
+    if (!status) return;
+    status.textContent = message;
+    status.className = `skill-creator-status${tone ? ` ${tone}` : ''}`;
+}
+
+async function openSkillCreator() {
+    const overlay = document.getElementById('skill-creator-overlay');
+    if (!overlay) return;
+    overlay.classList.add('visible');
+    document.body.classList.add('modal-open');
+    setSkillCreatorStatus('Loading project sources...', 'pending');
+    try {
+        const response = await fetch('/dialeng/skills', {headers: {'Accept': 'application/json'}});
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || `Skill request failed (${response.status})`);
+        const sources = document.getElementById('skill-creator-sources');
+        if (sources) {
+            sources.replaceChildren();
+            const projectSources = [
+                ...(payload.notebooks || []).map(path => ({path, kind: 'Notebook'})),
+                ...(payload.source_files || []).map(path => ({path, kind: 'File'})),
+            ];
+            if (!projectSources.length) {
+                const empty = document.createElement('p');
+                empty.textContent = 'No supported project sources were found.';
+                sources.appendChild(empty);
+            } else {
+                projectSources.forEach(({path, kind}) => {
+                    const label = document.createElement('label');
+                    label.className = 'skill-source-option';
+                    const checkbox = document.createElement('input');
+                    checkbox.type = 'checkbox';
+                    checkbox.value = path;
+                    checkbox.name = 'skill-source';
+                    const text = document.createElement('span');
+                    text.textContent = path;
+                    text.title = kind;
+                    label.append(checkbox, text);
+                    sources.appendChild(label);
+                });
+            }
+        }
+        setSkillCreatorStatus('Select project sources, add optional web pages, and generate a reviewable draft.');
+        requestAnimationFrame(() => document.getElementById('skill-creator-name')?.focus());
+    } catch (error) {
+        setSkillCreatorStatus(error.message || 'Could not load project skills.', 'error');
+    }
+}
+
+function closeSkillCreator() {
+    document.getElementById('skill-creator-overlay')?.classList.remove('visible');
+    document.body.classList.remove('modal-open');
+}
+
+function showSkillPreviewFile(path) {
+    const preview = document.getElementById('skill-creator-preview');
+    if (preview) preview.textContent = skillCreatorState.files[path] || '';
+    document.querySelectorAll('.skill-preview-file').forEach(button => {
+        button.classList.toggle('active', button.dataset.path === path);
+    });
+}
+
+function renderSkillPreviewFiles(files = {}) {
+    skillCreatorState.files = files;
+    const container = document.getElementById('skill-creator-files');
+    if (!container) return;
+    container.replaceChildren();
+    Object.keys(files).sort((a, b) => (a === 'SKILL.md' ? -1 : b === 'SKILL.md' ? 1 : a.localeCompare(b))).forEach(path => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'skill-preview-file';
+        button.dataset.path = path;
+        button.textContent = path;
+        button.addEventListener('click', () => showSkillPreviewFile(path));
+        container.appendChild(button);
+    });
+    showSkillPreviewFile(files['SKILL.md'] !== undefined ? 'SKILL.md' : Object.keys(files)[0]);
+}
+
+async function generateSkillDraft() {
+    if (skillCreatorState.loading) return;
+    const name = document.getElementById('skill-creator-name')?.value.trim() || '';
+    const description = document.getElementById('skill-creator-description')?.value.trim() || '';
+    const instructions = document.getElementById('skill-creator-instructions')?.value.trim() || '';
+    const sources = Array.from(document.querySelectorAll('input[name="skill-source"]:checked')).map(input => input.value);
+    const urls = (document.getElementById('skill-creator-urls')?.value || '')
+        .split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+    sources.push(...urls);
+    if (!name || !description || !sources.length) {
+        setSkillCreatorStatus('Provide a name, description, and at least one project file or web page.', 'error');
+        return;
+    }
+    skillCreatorState.loading = true;
+    document.getElementById('skill-generate-btn')?.setAttribute('disabled', '');
+    document.getElementById('skill-install-btn')?.setAttribute('disabled', '');
+    setSkillCreatorStatus('Extracting sources with provenance and generating the staged draft...', 'pending');
+    try {
+        const response = await fetch('/dialeng/skills/build', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            body: JSON.stringify({
+                name,
+                description,
+                instructions,
+                sources,
+                include_outputs: Boolean(document.getElementById('skill-creator-outputs')?.checked),
+                use_llm: Boolean(document.getElementById('skill-creator-use-llm')?.checked),
+                provider: document.getElementById('provider-select')?.value || '',
+                model: document.getElementById('model-select')?.value || '',
+            }),
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || `Skill generation failed (${response.status})`);
+        skillCreatorState.buildId = payload.build_id;
+        skillCreatorState.buildHash = payload.build_hash;
+        renderSkillPreviewFiles(payload.files || {});
+        const label = document.getElementById('skill-creator-build-label');
+        if (label) label.textContent = `${payload.target} · ${payload.sources.length} source(s)`;
+        const warnings = [...(payload.warnings || [])];
+        if (payload.refinement_error) warnings.push(`LLM refinement skipped: ${payload.refinement_error}`);
+        if (payload.validation_errors?.length) {
+            setSkillCreatorStatus(payload.validation_errors.join(' '), 'error');
+        } else {
+            setSkillCreatorStatus(warnings.join(' ') || 'Draft validated. Review it before installing.', warnings.length ? 'warning' : 'success');
+            document.getElementById('skill-install-btn')?.removeAttribute('disabled');
+        }
+    } catch (error) {
+        setSkillCreatorStatus(error.message || 'Could not generate the skill.', 'error');
+    } finally {
+        skillCreatorState.loading = false;
+        document.getElementById('skill-generate-btn')?.removeAttribute('disabled');
+    }
+}
+
+async function installSkillDraft() {
+    if (!skillCreatorState.buildId || !skillCreatorState.buildHash || skillCreatorState.loading) return;
+    if (!window.confirm('Install this reviewed skill into .dialeng/skills?')) return;
+    skillCreatorState.loading = true;
+    document.getElementById('skill-install-btn')?.setAttribute('disabled', '');
+    setSkillCreatorStatus('Installing skill atomically...', 'pending');
+    try {
+        const response = await fetch(`/dialeng/skills/build/${encodeURIComponent(skillCreatorState.buildId)}/commit`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            body: JSON.stringify({expected_hash: skillCreatorState.buildHash}),
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || `Skill installation failed (${response.status})`);
+        setSkillCreatorStatus(`Installed ${payload.name}. It is available on the next Codex prompt.`, 'success');
+        window.DialengNotifications?.show(`Installed skill ${payload.name}`, 'success', 3500);
+        skillCreatorState.buildId = '';
+        skillCreatorState.buildHash = '';
+    } catch (error) {
+        setSkillCreatorStatus(error.message || 'Could not install the skill.', 'error');
+        document.getElementById('skill-install-btn')?.removeAttribute('disabled');
+    } finally {
+        skillCreatorState.loading = false;
+    }
+}
+
+// ==================== Backend-authoritative Settings ====================
+const settingsState = {
+    revision: '',
+    baseline: new Map(),
+    dirty: new Set(),
+    lastSnapshot: null,
+    initialized: false,
+    saving: false,
+};
+
+function getSettingControl(path) {
+    const row = document.querySelector(`.setting-row[data-setting-path="${CSS.escape(path)}"]`);
+    return row?.querySelector('input[type="checkbox"], select, input[type="number"], input[type="range"], input[type="text"]') || null;
+}
+
+function readSettingControl(control) {
+    if (!control) return undefined;
+    if (control.type === 'checkbox') return Boolean(control.checked);
+    if (control.type === 'number' || control.type === 'range') return Number(control.value);
+    return control.value;
+}
+
+function writeSettingControl(control, value) {
+    if (!control) return;
+    if (control.type === 'checkbox') control.checked = Boolean(value);
+    else control.value = value ?? '';
+    if (control.type === 'range') {
+        const valueEl = document.getElementById(`${control.id}-value`);
+        if (valueEl) valueEl.textContent = control.value;
+    }
+}
+
+function setSettingsStatus(message = '', tone = '') {
+    const status = document.getElementById('settings-status');
+    if (!status) return;
+    status.textContent = message;
+    status.className = `settings-status${tone ? ` ${tone}` : ''}`;
+}
+
+function clearSettingErrors() {
+    document.querySelectorAll('[data-setting-error]').forEach(el => {
+        el.textContent = '';
+        el.closest('.setting-row')?.classList.remove('invalid');
+    });
+}
+
+function showSettingErrors(errors = {}) {
+    clearSettingErrors();
+    Object.entries(errors).forEach(([path, message]) => {
+        const error = document.querySelector(`[data-setting-error="${CSS.escape(path)}"]`);
+        if (error) {
+            error.textContent = message;
+            error.closest('.setting-row')?.classList.add('invalid');
+            error.closest('.settings-group')?.setAttribute('open', '');
+        }
+    });
+}
+
+function updateSettingsDirtyState() {
+    settingsState.dirty.clear();
+    document.querySelectorAll('.setting-row[data-setting-path]').forEach(row => {
+        const path = row.dataset.settingPath;
+        const control = getSettingControl(path);
+        if (!control || control.disabled) return;
+        const dirty = JSON.stringify(readSettingControl(control)) !== JSON.stringify(settingsState.baseline.get(path));
+        row.classList.toggle('dirty', dirty);
+        if (dirty) settingsState.dirty.add(path);
+    });
+    const count = settingsState.dirty.size;
+    const summary = document.getElementById('settings-change-summary');
+    if (summary) summary.textContent = count ? `${count} unsaved change${count === 1 ? '' : 's'}` : 'No unsaved changes';
+    const save = document.getElementById('settings-save-btn');
+    const revert = document.getElementById('settings-revert-btn');
+    if (save) save.disabled = count === 0 || settingsState.saving;
+    if (revert) revert.disabled = count === 0 || settingsState.saving;
+}
+
+function applyDisplaySettings(display = {}) {
+    const root = document.documentElement.style;
+    const size = display.button_size || 'normal';
+    const padding = {compact: '3px 6px', normal: '5px 10px', large: '8px 14px'}[size] || '5px 10px';
+    const font = {compact: '0.75rem', normal: '0.8rem', large: '0.9rem'}[size] || '0.8rem';
+    const smallPadding = {compact: '2px 5px', normal: '4px 8px', large: '6px 12px'}[size] || '4px 8px';
+    if (display.notebook_width) root.setProperty('--notebook-width', `${display.notebook_width}px`);
+    if (display.font_size) root.setProperty('--base-font-size', `${display.font_size}px`);
+    root.setProperty('--btn-padding', padding);
+    root.setProperty('--btn-font-size', font);
+    root.setProperty('--btn-sm-padding', smallPadding);
+}
+
+function applySettingsSnapshot(snapshot, {preserveDirty = false} = {}) {
+    if (!snapshot?.fields) return;
+    const previousDirty = new Set(settingsState.dirty);
+    settingsState.revision = snapshot.revision || settingsState.revision;
+    settingsState.lastSnapshot = snapshot;
+    const revision = document.getElementById('settings-revision');
+    if (revision) revision.value = settingsState.revision;
+
+    Object.entries(snapshot.fields).forEach(([path, field]) => {
+        const control = getSettingControl(path);
+        if (!control) return;
+        if (!(preserveDirty && previousDirty.has(path))) writeSettingControl(control, field.value);
+        settingsState.baseline.set(path, field.value);
+        control.disabled = Boolean(field.managed);
+        const source = document.querySelector(`[data-setting-source="${CSS.escape(path)}"]`);
+        if (source) {
+            source.textContent = field.source || '';
+            source.className = `setting-source-badge ${field.source || ''}`;
+            source.title = field.diagnostic
+                ? `${field.env_var}: ${field.diagnostic}`
+                : field.managed && field.env_var
+                    ? `Managed by ${field.env_var}`
+                    : `Value source: ${field.source || 'project'}`;
+        }
+    });
+    applyDisplaySettings(snapshot.display);
+    const autosave = snapshot.fields['persistence.autosave.enabled'];
+    if (autosave) window.AUTOSAVE_ENABLED = Boolean(autosave.effective_value);
+    updateSettingsDirtyState();
+
+    const activation = snapshot.activation || {};
+    if (activation.status === 'validating' || activation.status === 'pending') {
+        setSettingsStatus(activation.message || 'Settings saved. Validating runtime...', 'pending');
+    } else if (activation.status === 'failed') {
+        setSettingsStatus(`${activation.message || 'Activation failed'} ${activation.error || ''}`.trim(), 'error');
+    } else if (!settingsState.dirty.size) {
+        setSettingsStatus(activation.message || 'Settings are current.', activation.message ? 'success' : '');
+    } else {
+        setSettingsStatus('Settings loaded. Review the unsaved changes.', 'pending');
+    }
+}
+
+function requestSettingsSnapshot() {
+    return new Promise((resolve, reject) => {
+        const request = new XMLHttpRequest();
+        request.open('GET', '/settings', true);
+        request.responseType = 'json';
+        request.timeout = 10000;
+        request.setRequestHeader('Accept', 'application/json');
+        request.onload = () => {
+            if (request.status >= 200 && request.status < 300) resolve(request.response);
+            else reject(new Error(`Settings request failed (${request.status})`));
+        };
+        request.onerror = () => reject(new Error('Could not load settings.'));
+        request.ontimeout = () => reject(new Error('Loading settings timed out.'));
+        request.send();
+    });
+}
+
+async function refreshSettings({preserveDirty = false} = {}) {
+    setSettingsStatus('Loading current settings...', 'pending');
+    try {
+        const snapshot = await requestSettingsSnapshot();
+        applySettingsSnapshot(snapshot, {preserveDirty});
+    } catch (error) {
+        setSettingsStatus(error.message || 'Could not load settings.', 'error');
+    }
+}
+
+function initializeSettingsForm() {
+    if (settingsState.initialized) return;
+    const form = document.getElementById('settings-form');
+    if (!form) return;
+    settingsState.initialized = true;
+    form.addEventListener('input', event => {
+        event.target.closest('.setting-row')?.classList.remove('invalid');
+        updateSettingsDirtyState();
+    });
+    form.addEventListener('change', updateSettingsDirtyState);
+}
+
 function toggleSettings() {
     const sidebar = document.getElementById('settings-sidebar');
     const overlay = document.getElementById('settings-overlay');
-
-    if (sidebar) {
-        sidebar.classList.toggle('open');
+    if (!sidebar) return;
+    if (sidebar.classList.contains('open')) {
+        closeSettings();
+        return;
     }
-    if (overlay) {
-        overlay.classList.toggle('open');
+    initializeSettingsForm();
+    sidebar.classList.add('open');
+    overlay?.classList.add('open');
+    refreshSettings({preserveDirty: false});
+    requestAnimationFrame(() => document.getElementById('settings-search')?.focus());
+}
+
+function closeSettings(force = false) {
+    if (!force && settingsState.dirty.size && !window.confirm('Discard unsaved settings changes?')) return false;
+    if (settingsState.dirty.size) revertSettings();
+    document.getElementById('settings-sidebar')?.classList.remove('open');
+    document.getElementById('settings-overlay')?.classList.remove('open');
+    return true;
+}
+
+function revertSettings() {
+    settingsState.baseline.forEach((value, path) => writeSettingControl(getSettingControl(path), value));
+    clearSettingErrors();
+    updateSettingsDirtyState();
+    setSettingsStatus('Unsaved changes reverted.', '');
+}
+
+function filterSettings(query) {
+    const normalized = String(query || '').trim().toLowerCase();
+    document.querySelectorAll('.settings-group').forEach(group => {
+        const matches = !normalized || group.textContent.toLowerCase().includes(normalized);
+        group.hidden = !matches;
+        if (normalized && matches) group.open = true;
+    });
+}
+
+async function saveSettings(event) {
+    event?.preventDefault();
+    if (!settingsState.dirty.size || settingsState.saving) return;
+    settingsState.saving = true;
+    updateSettingsDirtyState();
+    clearSettingErrors();
+    setSettingsStatus('Saving...', 'pending');
+    const changes = {};
+    settingsState.dirty.forEach(path => {
+        changes[path] = readSettingControl(getSettingControl(path));
+    });
+    try {
+        const response = await fetch('/settings', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            body: JSON.stringify({revision: settingsState.revision, changes}),
+        });
+        const payload = await response.json();
+        if (response.status === 409) {
+            applySettingsSnapshot(payload.snapshot, {preserveDirty: true});
+            setSettingsStatus('Settings changed elsewhere. Your edits were kept; review and save again.', 'error');
+            return;
+        }
+        if (response.status === 422) {
+            showSettingErrors(payload.errors);
+            setSettingsStatus('Fix the highlighted settings before saving.', 'error');
+            return;
+        }
+        if (!response.ok) throw new Error(payload.message || `Settings save failed (${response.status})`);
+        applySettingsSnapshot(payload);
+        const modes = payload.apply_modes || [];
+        const suffix = modes.includes('server_restart')
+            ? ' Restart Dialeng to apply the marked settings.'
+            : modes.includes('new_kernel') ? ' New-kernel defaults apply on the next attachment.' : '';
+        setSettingsStatus(`Settings saved.${suffix}`, modes.includes('server_restart') ? 'pending' : 'success');
+        try { localStorage.setItem('dialeng-settings-changed', `${Date.now()}:${payload.revision}`); } catch (_) {}
+    } catch (error) {
+        setSettingsStatus(error.message || 'Could not save settings.', 'error');
+    } finally {
+        settingsState.saving = false;
+        updateSettingsDirtyState();
     }
 }
 
@@ -3405,6 +3839,72 @@ function armStatusToastDismiss(target) {
 
 function showKernelStatusMessage(message, tone = 'warning', persistMs = 5000) {
     window.DialengNotifications.show(message, tone, persistMs);
+}
+
+function showLlmFailureAction(data) {
+    showKernelStatusMessage(data.message || 'The prompt failed.', data.tone || 'error', data.persist_ms || 10000);
+    if (!data.action || !data.action_label) return;
+    const toast = document.querySelector('#status .status');
+    if (!toast) return;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'status-action';
+    button.textContent = data.action_label;
+    button.addEventListener('click', () => {
+        if (data.action === 'connect') {
+            if (!document.getElementById('settings-sidebar')?.classList.contains('open')) toggleSettings();
+            startOpenAICodexLogin();
+        } else if (data.action === 'choose_model') {
+            document.getElementById('model-select')?.focus();
+        } else if (data.action === 'retry' && data.cell_id) {
+            const cell = document.getElementById(`cell-${data.cell_id}`);
+            if (cell) clickCellRunButton(cell, {advance: false});
+        }
+    });
+    toast.appendChild(button);
+    window.DialengNotifications.schedule(toast.textContent.trim(), data.persist_ms || 10000);
+}
+
+function renderPromptExecution(cellId, execution = {}, notebookUsage = null) {
+    let panel = document.getElementById(`prompt-diagnostics-${cellId}`);
+    if (panel) {
+        if (panel.tagName !== 'DETAILS') {
+            const details = document.createElement('details');
+            details.id = panel.id;
+            details.className = panel.className;
+            panel.replaceWith(details);
+            panel = details;
+        }
+        const usage = execution.usage || {};
+        const total = Number(usage.total_tokens || 0);
+        const duration = Number(execution.duration_ms);
+        const summary = [
+            execution.model,
+            Number.isFinite(duration) ? `${(duration / 1000).toFixed(1)}s` : '',
+            total ? `${total.toLocaleString()} tokens` : '',
+            execution.status,
+        ].filter(Boolean).join(' · ') || 'Execution details';
+        const rows = [
+            ['Operation', execution.operation_id],
+            ['Provider', execution.provider],
+            ['Transport', execution.transport],
+            ['First token', execution.ttft_ms == null ? null : `${Number(execution.ttft_ms).toFixed(1)} ms`],
+            ['Retries', execution.retry_count],
+            ['Input / cached / output', `${usage.input_tokens || 0} / ${usage.cached_tokens || 0} / ${usage.output_tokens || 0}`],
+            ['Tool steps', execution.tool_steps],
+        ].filter(([, value]) => value !== null && value !== undefined);
+        const previousOperationId = panel.dataset.operationId || '';
+        const operationId = String(execution.operation_id || '');
+        panel.hidden = false;
+        panel.innerHTML = `<summary>${escapeHtml(summary)}</summary><div class="prompt-diagnostic-grid">${rows.map(([label, value]) => `<div class="prompt-diagnostic-row"><span>${escapeHtml(label)}</span><code>${escapeHtml(value)}</code></div>`).join('')}</div>`;
+        panel.dataset.operationId = operationId;
+        if (!previousOperationId || previousOperationId !== operationId) panel.open = false;
+    }
+    if (notebookUsage) {
+        const total = Number(notebookUsage.total_tokens || 0);
+        const label = document.getElementById('notebook-llm-usage');
+        if (label) label.textContent = `${total.toLocaleString()} tok`;
+    }
 }
 
 function setNotebookSaveState(state) {
@@ -3853,7 +4353,10 @@ function connectWebSocket(notebookId) {
         debugWebSocket('[WS] Received message:', data.type, 'cell_id:', data.cell_id || 'none');
         if (window.dialengEvents?.dispatch(data)) return;
 
-        if (data.type === 'heartbeat_ack') {
+        if (data.type === 'e2e_force_disconnect') {
+            ws.close(4001, 'E2E forced disconnect');
+            return;
+        } else if (data.type === 'heartbeat_ack') {
             wsLastHeartbeatAck = Date.now();
             if (wsHeartbeatDeadlineId) clearTimeout(wsHeartbeatDeadlineId);
             wsHeartbeatDeadlineId = null;
@@ -3881,19 +4384,33 @@ function connectWebSocket(notebookId) {
                 refreshFileExplorer();
             }
         } else if (data.type === 'status_message') {
-            showKernelStatusMessage(data.message || 'Dialeng status changed.', data.tone || 'warning', data.persist_ms || 7000);
+            if (data.action) showLlmFailureAction(data);
+            else showKernelStatusMessage(data.message || 'Dialeng status changed.', data.tone || 'warning', data.persist_ms || 7000);
         } else if (data.type === 'stream_chunk') {
             // Skip if cancelled
             if (cancelledCells.has(data.cell_id)) return;
             appendToResponse(data.cell_id, data.chunk, data.thinking);
             // Reset streaming timeout on activity
             resetStreamingTimeout();
+        } else if (data.type === 'prompt_run_terminal') {
+            console.log('[WS] prompt_run_terminal received for cell:', data.cell_id, data.status);
+            cancelledCells.delete(data.cell_id);
+            finishStreaming(data.cell_id);
+            if (data.version != null) updateCellVersion(data.cell_id, data.version);
+            completePromptAdvance(data.cell_id, data.status);
+            document.body.dispatchEvent(new CustomEvent('prompt-run-terminal', {detail: data}));
+        } else if (data.type === 'prompt_execution_update') {
+            renderPromptExecution(data.cell_id, data.execution, data.notebook_usage);
         } else if (data.type === 'stream_end') {
             console.log('[WS] stream_end received for cell:', data.cell_id);
             cancelledCells.delete(data.cell_id);
             finishStreaming(data.cell_id);
         } else if (data.type === 'prompt_output_update') {
             console.log('[WS] prompt_output_update received for cell:', data.cell_id, 'version:', data.version);
+            // The backend payload is authoritative. Discard any chunk queued
+            // for a later animation frame or finishStreaming() can append the
+            // final delta a second time after this replacement.
+            promptChunkBatcher.clear(data.cell_id);
             const result = applyPromptOutputUpdate(data.cell_id, data.output);
             if (result?.safeVersion !== false) updateCellVersion(data.cell_id, data.version);
         } else if (data.type === 'prompt_stream_start') {
@@ -4176,11 +4693,13 @@ if (window.dialengEvents) {
         };
         syncLlmSelectors(data, notebook);
     });
+    window.dialengEvents.register('settings_changed', data => {
+        applySettingsSnapshot(data, {preserveDirty: true});
+    });
     window.dialengEvents.register('status_message', data => {
-        showKernelStatusMessage(
-            data.message || 'Dialeng status changed.',
-            data.tone || 'warning',
-            data.persist_ms || 7000,
+        if (data.action) showLlmFailureAction(data);
+        else showKernelStatusMessage(
+            data.message || 'Dialeng status changed.', data.tone || 'warning', data.persist_ms || 7000,
         );
     });
     window.dialengEvents.register('notebook_saved', () => setNotebookSaveState('saved'));
@@ -4360,7 +4879,7 @@ const ANSI_COLORS = {
 };
 
 function escapeHtml(text) {
-    return text
+    return String(text)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
@@ -5560,13 +6079,17 @@ document.addEventListener('htmx:beforeRequest', function(e) {
         // Disable only after HTMX has accepted the request. Disabling from the
         // inline click handler can make HTMX discard reruns on a replaced header.
         if (elt?.classList?.contains('btn-run')) elt.disabled = true;
-        if (advance && cellId) {
+        const cell = cellId ? document.getElementById(`cell-${cellId}`) : null;
+        const isPrompt = cell?.dataset.type === 'prompt';
+        if (advance && cellId && isPrompt) {
+            pendingPromptAdvances.add(cellId);
+        } else if (advance && cellId) {
             // Let the originating click finish bubbling first. Otherwise the
             // cell click listener can re-select the run cell after focus has
             // already moved to the next editor.
             requestAnimationFrame(() => {
-                const cell = document.getElementById(`cell-${cellId}`);
-                if (cell) moveToNextCell(cell);
+                const currentCell = document.getElementById(`cell-${cellId}`);
+                if (currentCell) moveToNextCell(currentCell);
             });
         }
         return;
@@ -5574,6 +6097,7 @@ document.addEventListener('htmx:beforeRequest', function(e) {
 
     // Cancel the HTMX request
     e.preventDefault();
+    if (cellId) pendingPromptAdvances.delete(cellId);
 
     // Revert UI state that was set by prepareCodeRun() or startStreaming()
     if (cellId) {

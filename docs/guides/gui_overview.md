@@ -388,6 +388,11 @@ The outline auto-refreshes when cells are executed or modified.
 
 Click the **settings** button (gear icon) in the toolbar to open the settings panel. It slides in from the right with a semi-transparent overlay behind it (click the overlay to close).
 
+The panel fetches a fresh backend snapshot every time it opens. Use the search
+field to filter groups. Changed fields are marked, **Revert** restores the last
+backend values, and closing with unsaved changes asks for confirmation. Source
+badges distinguish project values, defaults, and environment-managed values.
+
 Settings are organized in collapsible groups:
 
 ### Dialeng Display Settings
@@ -401,13 +406,20 @@ Settings are organized in collapsible groups:
 
 ### Model Defaults
 - **Bedrock Model**: Default model for Bedrock-based calls.
-- **Claude Code Model**: Model used for code-related tasks.
+- **OpenAI Codex Model**: Default model for Codex prompt cells.
 - **OpenAI Codex Model**: Default model for the OpenAI Codex subscription provider.
 - **Default Dialog Mode**: Which mode new notebooks start in (Mock, Learning, Concise, Standard).
 
 ### OpenAI Codex
 - **Connect OpenAI / Disconnect**: Manage the server-global Codex subscription OAuth session.
 - **Enable project skills**: Discover Codex skills from `.dialeng/skills/`.
+- **Enable skill creator**: Show the toolbar sparkles button and dedicated staged creator tools.
+- **Skill source limit**: Bound notebook context extracted into one generated skill.
+
+The toolbar sparkles button opens the notebook-to-skill workflow. Select source
+notebooks, generate a deterministic or LLM-refined draft, inspect every staged
+file, then explicitly install it into `.dialeng/skills/`. Installation remains
+disabled until backend validation succeeds.
 
 ### Tool Settings
 - **Max Tool Steps**: Slider (1-10) controlling how many tool-use rounds the AI can perform per prompt.
@@ -417,16 +429,28 @@ Settings are organized in collapsible groups:
 ### Shell Settings
 - **Enable Shell Cells**: Toggle shell cell type availability. Requires app restart.
 
+### Persistence
+- **Atomic explicit saves**: Preserve the previous notebook if a write fails.
+- **Enable autosave**: Opt into debounced background saves. This remains off by default.
+- **Autosave debounce / idle only**: Control when optional autosaves run.
+- **Recovery snapshots / retention**: Keep bounded recovery copies in `.dialeng/recovery/`.
+
 ### Google Colab
-- **Enable Colab**: Toggle Colab kernel integration. Requires app restart.
+- **Enable Colab**: Start or stop Colab integration after background validation.
+- **Auth Provider**: Select local OAuth, remote OAuth, or ADC. Changing it is restart-bound so active runtimes are not destroyed by saving settings.
+- **Default Runtime / Accelerator**: Defaults for newly attached Colab kernels.
 
 ### Advanced
 - **Thinking Max Tokens**: Maximum tokens for AI thinking/reasoning (0-50000).
-- **Use SDK Directly**: Bypass the service layer and call the Claude SDK directly. Requires restart.
 - **Debug Mode**: Enable verbose logging.
 - **Debug Log Directory**: Path where debug logs are written.
 
-Click **Save Settings** at the bottom to apply changes. Display settings (width, button size, font size) take effect on the next page load.
+Click **Save Settings** to send only changed fields. Display settings apply
+immediately. Badges identify settings that affect only new kernels or require a
+Dialeng restart. Provider validation continues in the background and the panel
+reports whether the saved configuration is validating, active, or failed to
+activate. A stale tab preserves its local edits and asks the user to review and
+save them against the latest backend revision.
 
 ---
 

@@ -27,26 +27,29 @@ def _status(provider_id, provider, authenticated=True):
     )
 
 
-def test_inventory_keeps_valid_providers_when_another_probe_fails(monkeypatch, tmp_path):
+def test_inventory_keeps_codex_when_bedrock_probe_fails(monkeypatch, tmp_path):
     import dialeng.services.credential_service as credentials
-    import dialeng.services.openai_codex_auth as codex_auth
 
-    monkeypatch.setattr(credentials, "_check_claudette_available", lambda: True)
-    monkeypatch.setattr(credentials, "_find_anthropic_api_key", lambda _path: ("key", "test"))
-    monkeypatch.setattr(credentials, "_check_anthropic_sdk_with_api_key", lambda _key: (False, "bad key"))
-    monkeypatch.setattr(credentials, "_resolve_aws_credentials", lambda: None)
-    monkeypatch.setattr(credentials, "_check_claude_agent_sdk_credentials", lambda: (True, "ok"))
+    monkeypatch.setattr(
+        credentials,
+        "_probe_openai_codex_provider",
+        lambda _path: _status("openai_codex", "openai_codex"),
+    )
+    monkeypatch.setattr(
+        credentials,
+        "_probe_bedrock_provider",
+        lambda _path: _status("claudette:bedrock", "claudette", False),
+    )
     monkeypatch.setattr(credentials, "_provider_models", lambda _provider: [])
-    monkeypatch.setattr(codex_auth.get_openai_codex_auth_service(), "status", lambda: {
-        "authenticated": True, "source": "stored", "error": None,
-    })
 
     reset_credential_cache()
     inventory = detect_credential_inventory(tmp_path / ".env", force=True)
-    assert inventory.get("claudette:anthropic_api").authenticated is False
-    assert inventory.get("claude_agent_sdk").authenticated is True
     assert inventory.get("openai_codex").authenticated is True
-    assert inventory.default_provider() == "claude_agent_sdk"
+    assert inventory.get("claudette:bedrock").authenticated is False
+    assert inventory.default_provider() == "openai_codex"
+    assert set(inventory.providers) == {
+        "openai_codex", "claudette:bedrock", "mock_only",
+    }
     reset_credential_cache()
 
 
@@ -80,28 +83,17 @@ def test_initial_inventory_uses_local_hints_without_remote_probes(monkeypatch, t
     import dialeng.services.openai_codex_auth as codex_auth
 
     monkeypatch.setattr(credentials, "_check_claudette_available", lambda: True)
-    monkeypatch.setattr(credentials, "_find_anthropic_api_key", lambda _path: ("key", "env"))
-    monkeypatch.setattr(credentials, "_resolve_aws_credentials", lambda: (_ for _ in ()).throw(
-        AssertionError("AWS resolution must not run during local inventory")
-    ))
-    monkeypatch.setattr(credentials, "_check_claude_agent_sdk_credentials", lambda: (_ for _ in ()).throw(
-        AssertionError("Claude SDK probe must not run during local inventory")
-    ))
-    monkeypatch.setattr(credentials, "_check_anthropic_sdk_with_api_key", lambda _key: (_ for _ in ()).throw(
-        AssertionError("Anthropic probe must not run during local inventory")
-    ))
-    monkeypatch.setattr(credentials, "_find_claude_cli_path", lambda: ("/tmp/claude", "path"))
+    monkeypatch.setenv("AWS_PROFILE", "dialeng-test")
     monkeypatch.setattr(credentials, "_provider_models", lambda _provider: [])
     monkeypatch.setattr(codex_auth.get_openai_codex_auth_service(), "status", lambda: {
-        "authenticated": False, "source": None, "error": None,
+        "authenticated": True, "source": "stored", "error": None,
     })
 
     inventory = build_initial_credential_inventory(tmp_path / ".env")
 
-    assert inventory.get("claudette:anthropic_api").validation_state == "validating"
-    assert inventory.get("claude_agent_sdk").validation_state == "validating"
-    assert inventory.default_provider() == "claudette:anthropic_api"
-    assert inventory.available is False
+    assert inventory.get("openai_codex").authenticated is True
+    assert inventory.get("claudette:bedrock").validation_state == "validating"
+    assert inventory.default_provider() == "openai_codex"
 
 
 def test_async_inventory_probes_concurrently_and_isolates_failures(monkeypatch, tmp_path):
@@ -109,10 +101,8 @@ def test_async_inventory_probes_concurrently_and_isolates_failures(monkeypatch, 
 
     monkeypatch.setattr(credentials, "_load_dotenv_if_present", lambda _path: (False, "none"))
     monkeypatch.setattr(credentials, "build_initial_credential_inventory", lambda _path: CredentialInventory({
-        "claudette:anthropic_api": _status("claudette:anthropic_api", "claudette", False),
-        "claudette:bedrock": _status("claudette:bedrock", "claudette", False),
-        "claude_agent_sdk": _status("claude_agent_sdk", "claude_agent_sdk", False),
         "openai_codex": _status("openai_codex", "openai_codex", False),
+        "claudette:bedrock": _status("claudette:bedrock", "claudette", False),
         "mock_only": _status("mock_only", "mock_only", True),
     }))
 
@@ -124,17 +114,14 @@ def test_async_inventory_probes_concurrently_and_isolates_failures(monkeypatch, 
             return _status(provider_id, provider_id, True)
         return probe
 
-    monkeypatch.setattr(credentials, "_probe_anthropic_provider", delayed("claudette:anthropic_api"))
     monkeypatch.setattr(credentials, "_probe_bedrock_provider", delayed("claudette:bedrock"))
-    monkeypatch.setattr(credentials, "_probe_claude_agent_provider", delayed("claude_agent_sdk"))
     monkeypatch.setattr(credentials, "_probe_openai_codex_provider", delayed("openai_codex"))
 
     started_at = time.perf_counter()
     inventory = asyncio.run(refresh_credential_inventory_async(tmp_path / ".env"))
     elapsed = time.perf_counter() - started_at
 
-    assert elapsed < 0.15
-    assert inventory.get("claudette:anthropic_api").authenticated is True
+    assert elapsed < 0.12
     assert inventory.get("claudette:bedrock").authenticated is False
     assert inventory.get("claudette:bedrock").validation_state == "unavailable"
     assert inventory.get("openai_codex").authenticated is True

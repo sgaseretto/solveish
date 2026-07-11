@@ -50,8 +50,8 @@ class KernelRegistration:
 @dataclass
 class ProviderRegistration:
     """Registration for an LLM provider."""
-    name: str               # "claudette", "claude_agent_sdk", "openai"
-    label: str              # "Anthropic API", "Claude Code"
+    name: str               # "claudette", "openai_codex"
+    label: str              # "AWS Bedrock", "OpenAI Codex"
     factory: Callable       # () -> BaseLLMProvider
     credential_checker: Optional[Callable] = None  # () -> Optional[CredentialInfo]
     priority: int = 0       # Higher = preferred when multiple match

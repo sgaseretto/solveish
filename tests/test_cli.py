@@ -38,6 +38,17 @@ class TestParseArgs:
         assert args.path == "./projects"
         assert args.port == 3000
 
+    def test_skill_create_parsing(self):
+        from dialeng.cli import parse_args
+        args = parse_args([
+            "skill", "create", "lesson-helper", "--from", "one.ipynb", "two.ipynb",
+            "--description", "Use for lessons", "--no-llm", "--yes",
+        ])
+        assert args.subcommand == "skill"
+        assert args.skill_action == "create"
+        assert args.sources == ["one.ipynb", "two.ipynb"]
+        assert args.no_llm is True
+
 
 class TestResolveRootDir:
     """Test directory resolution logic."""

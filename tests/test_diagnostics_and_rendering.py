@@ -10,6 +10,7 @@ from starlette.testclient import TestClient
 import dialeng.app as appmod
 from dialeng.document.cell import Cell
 from dialeng.ui.cells.base import CellHeader
+from dialeng.ui.cells.prompt_cell import _execution_diagnostics
 from dialeng.ui.mime import render_mime_bundle
 
 
@@ -112,3 +113,28 @@ def test_run_button_reads_live_source_at_request_time():
     assert "getCellSourceForRequest('fresh-source')" in rendered
     assert "syncMonacoToTextarea('fresh-source')" in rendered
     assert "onpointerdown=" in rendered
+
+
+def test_prompt_execution_diagnostics_are_collapsed_by_default():
+    cell = Cell(id="prompt-stats", cell_type="prompt", llm_execution={
+        "operation_id": "prompt-run-123",
+        "provider": "openai_codex",
+        "model": "gpt-5.4",
+        "duration_ms": 4600,
+        "status": "completed",
+        "usage": {"total_tokens": 2545},
+    })
+
+    rendered = to_xml(_execution_diagnostics(cell))
+
+    assert rendered.startswith("<details")
+    assert "<summary>gpt-5.4 · 4.6s · 2,545 tokens · completed</summary>" in rendered
+    assert " open" not in rendered
+    assert 'data-operation-id="prompt-run-123"' in rendered
+
+
+def test_prompt_execution_diagnostics_placeholder_is_details():
+    rendered = to_xml(_execution_diagnostics(Cell(id="prompt-empty", cell_type="prompt")))
+
+    assert rendered.startswith("<details")
+    assert "hidden" in rendered
