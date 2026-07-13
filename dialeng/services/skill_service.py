@@ -75,6 +75,11 @@ class SkillService:
     def _directory_signature(self) -> tuple:
         entries = []
         roots = [("builtin", self.builtin_skills_root)]
+        try:
+            from dialeng.extensions.resources import bundle_roots
+            roots.extend((f"extension:{extension_id}", root) for extension_id, root in bundle_roots("skills"))
+        except Exception:
+            pass
         if not self._root_error:
             roots.append(("project", self.skills_root))
         for source, root in roots:
@@ -113,8 +118,8 @@ class SkillService:
                 name = skill.name
                 if name in self._skills:
                     previous_source = skill_sources[name]
-                    if previous_source == "builtin" and source == "project":
-                        logger.info("Project skill overrides built-in skill: %s", name)
+                    if source == "project" and previous_source != "project":
+                        logger.info("Project skill overrides %s skill: %s", previous_source, name)
                     else:
                         raise ValueError(f"duplicate skill name '{name}'")
                 self._skills[name] = skill
@@ -250,12 +255,26 @@ def set_skill_root(project_root: Path) -> SkillService:
         set_skill_creation_root,
         update_skill_build,
     )
+    from dialeng.services.extension_project_service import (
+        build_extension,
+        create_extension,
+        inspect_extension_api,
+        list_extension_templates,
+        read_extension,
+        request_extension_activation,
+        run_extension_tests,
+        set_extension_project_root,
+        show_extension_diagnostics,
+        update_extension_file,
+        validate_extension,
+    )
     try:
         from dialeng.services.dialeng_config import get_config
         max_source_bytes = get_config().skills_max_source_bytes
     except Exception:
         max_source_bytes = 2 * 1024 * 1024
     set_skill_creation_root(project_root, max_source_bytes=max_source_bytes)
+    set_extension_project_root(project_root)
     tool_registry = get_tool_registry()
     tool_registry.register_builtin(_skill_service.read_skill, name="read_skill")
     tool_registry.register_builtin(build_skill_from_notebooks, name="build_skill_from_notebooks")
@@ -263,6 +282,16 @@ def set_skill_root(project_root: Path) -> SkillService:
     tool_registry.register_builtin(update_skill_build, name="update_skill_build")
     tool_registry.register_builtin(refresh_skill_build_sources, name="refresh_skill_build_sources")
     tool_registry.register_builtin(commit_skill_build, name="commit_skill_build")
+    tool_registry.register_builtin(inspect_extension_api, name="inspect_extension_api")
+    tool_registry.register_builtin(list_extension_templates, name="list_extension_templates")
+    tool_registry.register_builtin(create_extension, name="create_extension")
+    tool_registry.register_builtin(read_extension, name="read_extension")
+    tool_registry.register_builtin(update_extension_file, name="update_extension_file")
+    tool_registry.register_builtin(build_extension, name="build_extension")
+    tool_registry.register_builtin(validate_extension, name="validate_extension")
+    tool_registry.register_builtin(run_extension_tests, name="run_extension_tests")
+    tool_registry.register_builtin(show_extension_diagnostics, name="show_extension_diagnostics")
+    tool_registry.register_builtin(request_extension_activation, name="request_extension_activation")
     return _skill_service
 
 

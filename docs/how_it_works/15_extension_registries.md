@@ -1,5 +1,10 @@
 # Extension Registries
 
+> These registries are implementation details behind the stable facade. New
+> extension code should use the API in
+> [Building Dialeng Extensions](../guides/extensions.md), which adds ownership,
+> transactional unload, trust, diagnostics, and compatibility validation.
+
 How kernel types, LLM providers, toolbar items, and settings sections are registered and discovered through the central registry.
 
 ## Table of Contents

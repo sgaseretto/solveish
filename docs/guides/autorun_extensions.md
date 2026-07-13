@@ -1,5 +1,11 @@
 # Writing AUTORUN Extensions
 
+> **Legacy workflow:** AUTORUN registration remains supported through a
+> transactional synthetic-owner adapter, but new server extensions should use
+> [manifest extensions and Extension Studio](extensions.md). See the
+> [migration guide](migrating_autorun_extensions.md). AUTORUN remains the correct
+> mechanism for background notebooks.
+
 A step-by-step guide to creating extensions that register toolbar buttons, settings sections, custom actions, and more — all from a notebook in the `AUTORUN/` folder.
 
 ## Table of Contents

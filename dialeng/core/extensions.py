@@ -44,6 +44,7 @@ Example Extension File:
 from __future__ import annotations
 import importlib
 import importlib.util
+import inspect
 import sys
 import logging
 from pathlib import Path
@@ -52,6 +53,18 @@ from typing import List, Optional
 from .registry import registry
 
 logger = logging.getLogger(__name__)
+
+BUILTIN_EXTENSION_MODULES = frozenset({"craft_init", "example_callbacks", "shell_cell"})
+_builtin_contribution_store = None
+_builtin_contexts = {}
+
+
+def get_builtin_contribution_store():
+    global _builtin_contribution_store
+    if _builtin_contribution_store is None:
+        from dialeng.extensions.contributions import ContributionStore
+        _builtin_contribution_store = ContributionStore()
+    return _builtin_contribution_store
 
 
 def load_extensions(
@@ -72,6 +85,7 @@ def load_extensions(
     Returns:
         List of loaded extension module names.
     """
+    builtin_directory = extensions_dir is None
     if extensions_dir is None:
         # Default to extensions/ relative to this file's parent (project root)
         project_root = Path(__file__).parent.parent
@@ -101,6 +115,8 @@ def load_extensions(
             continue
 
         module_name = py_file.stem
+        if builtin_directory and module_name not in BUILTIN_EXTENSION_MODULES:
+            continue
 
         # Check if already loaded
         if registry.is_extension_loaded(module_name):
@@ -114,9 +130,32 @@ def load_extensions(
                 logger.warning(f"Could not load extension: {py_file}")
                 continue
 
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = module
-            spec.loader.exec_module(module)
+            if builtin_directory:
+                from dialeng.extensions.api import ExtensionAPI, ExtensionContext
+                from dialeng.extensions.context import RegistrationScope, registration_scope
+                owner = f"builtin.{module_name}"
+                scope = RegistrationScope(owner)
+                context = ExtensionContext(
+                    owner,
+                    Path.cwd(),
+                    source_root=py_file.parent,
+                    scope="builtin",
+                )
+                with registration_scope(scope):
+                    module = importlib.util.module_from_spec(spec)
+                    sys.modules[module_name] = module
+                    spec.loader.exec_module(module)
+                    setup = getattr(module, "setup", None)
+                    if setup is not None:
+                        result = setup(ExtensionAPI(context), context)
+                        if inspect.isawaitable(result):
+                            raise TypeError("Built-in extension setup must be synchronous")
+                get_builtin_contribution_store().replace(owner, scope.contributions)
+                _builtin_contexts[owner] = context
+            else:
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                spec.loader.exec_module(module)
 
             registry.mark_extension_loaded(module_name)
             loaded.append(module_name)
@@ -261,6 +300,7 @@ def list_extensions(extensions_dir: Optional[Path] = None) -> List[dict]:
     Returns:
         List of dicts with name, path, loaded status.
     """
+    builtin_directory = extensions_dir is None
     if extensions_dir is None:
         project_root = Path(__file__).parent.parent
         extensions_dir = project_root / "extensions"
@@ -276,6 +316,8 @@ def list_extensions(extensions_dir: Optional[Path] = None) -> List[dict]:
             continue
 
         name = py_file.stem
+        if builtin_directory and name not in BUILTIN_EXTENSION_MODULES:
+            continue
         result.append({
             "name": name,
             "path": str(py_file),

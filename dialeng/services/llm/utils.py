@@ -16,18 +16,50 @@ logger = logging.getLogger(__name__)
 async def execute_tool(tool_name: str, tool_input: dict, kernel, notebook_id: str, registry) -> dict:
     """Execute a tool (builtin or kernel function)."""
     logger.info(f"Executing tool: {tool_name} with input: {tool_input}")
+    from dialeng.extensions.events import event_bus
 
-    if registry.is_builtin(tool_name):
-        return await registry.execute_builtin(tool_name, tool_input)
+    before = await event_bus.emit("tool.before_call", {
+        "notebook_id": notebook_id,
+        "tool_name": tool_name,
+        "input": dict(tool_input or {}),
+    })
+    if before.blocked:
+        return {"status": "error", "error": before.reason or "Tool call blocked by extension"}
+    tool_name = str(before.payload.get("tool_name", tool_name))
+    tool_input = before.payload.get("input", tool_input)
+    if not isinstance(tool_input, dict):
+        return {"status": "error", "error": "Tool input transform must return an object"}
 
-    if kernel:
-        target_name = registry.resolve_dynamic_tool_name(notebook_id, tool_name)
-        return await kernel.execute_tool(target_name, tool_input)
-
-    return {
-        "status": "error",
-        "error": f"Tool '{tool_name}' not found and no kernel available"
-    }
+    try:
+        if registry.is_builtin(tool_name):
+            result = await registry.execute_builtin(tool_name, tool_input)
+        elif kernel:
+            target_name = registry.resolve_dynamic_tool_name(notebook_id, tool_name)
+            result = await kernel.execute_tool(target_name, tool_input)
+        else:
+            result = {
+                "status": "error",
+                "error": f"Tool '{tool_name}' not found and no kernel available"
+            }
+        event_name = "tool.failed" if result.get("status") == "error" else "tool.after_call"
+        outcome = await event_bus.emit(event_name, {
+            "notebook_id": notebook_id,
+            "tool_name": tool_name,
+            "input": tool_input,
+            "result": result,
+        })
+        replacement = outcome.payload.get("result", result)
+        if not isinstance(replacement, dict):
+            raise TypeError(f"{event_name} result transform must return an object")
+        return replacement
+    except Exception as exc:
+        await event_bus.emit("tool.failed", {
+            "notebook_id": notebook_id,
+            "tool_name": tool_name,
+            "input": tool_input,
+            "error": f"{type(exc).__name__}: {exc}",
+        })
+        raise
 
 
 def format_tool_result_for_llm(result: dict) -> str:

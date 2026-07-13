@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+#### Owner-Aware Extension Platform
+- Added manifest-only discovery for project, user, development-path, and installed-package extensions with deterministic precedence, API compatibility checks, source hashing, malformed diagnostics, and trust-before-import
+- Added staged owner-attributed registration and transactional load/reload/unload across registries, dispatch, callbacks, settings, events, commands, actions, tools, UI surfaces, assets, kernels, and providers, including managed task cleanup and failed-update rollback
+- Added the public `ExtensionAPI`/`ExtensionContext`, typed observe/transform/guard lifecycle events, cancellable commands with progress and availability, typed namespaced actions, dynamic settings, provider-neutral tools, complete custom-cell bundles, and a constrained browser facade
+- Added backend-authoritative Extension Manager and Studio workflows for review, one-session/version/project trust, enable/disable/reload, diagnostics, resource filtering, notebook-first scaffolding, deterministic export, isolated activation, tests, stale-build protection, and explicit user-confirmed activation
+- Added package entry-point discovery, local install/remove, independently enabled skill/template/CRAFT resources, optional nbdev verification, repeatable `--extension PATH` development sources, and non-destructive AUTORUN migration
+- Migrated Dialeng's CRAFT, execution timing, and shell built-ins through the public owner-aware API and exposed legacy AUTORUN registrations as synthetic diagnostic owners
+- Added the packaged `extension-creator` skill and constrained authoring/build/test/diagnostic tools that cannot activate generated server code without user confirmation
+- Added four disabled reference extensions plus unit, 100-reload stress, fault, real-kernel guard, isolated wheel, multi-tab, Studio, custom-cell, asset-cleanup, rollback, and Playwright acceptance coverage
+- Added extension authoring, AUTORUN migration, internal architecture, compatibility, security, and reproducible verification documentation
+
 ## [0.11.0] - 2026-07-11
 
 ### Changed

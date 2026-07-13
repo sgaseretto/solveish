@@ -14,6 +14,7 @@ from .settings import SettingsSidebar, SettingsOverlay
 from .outline import OutlineSidebar, OutlineToggleButton
 from .kernel_modal import KernelToolbarButton, KernelModal
 from .skill_creator import SkillCreatorButton, SkillCreatorModal
+from .extensions import ExtensionManagerButton, ExtensionManagerModal
 from .file_explorer import FileExplorerSidebar, NewItemModal, DeleteConfirmModal
 from .icons import sprites as icon_sprites
 from dialeng.services.dialeng_config import DialengConfig
@@ -145,6 +146,8 @@ def WorkspacePage(root: Path, config: Optional[DialengConfig] = None,
                             onclick="toggleSettings()",
                             title="Settings",
                         ),
+                        ExtensionManagerButton(),
+                        Div(id="extension-toolbar-items", cls="extension-toolbar-items"),
                         SkillCreatorButton(bool(config and config.skills_enabled and config.skills_creator_enabled)),
                         Button(
                             icon_sprites('sun', sz=16),
@@ -157,6 +160,7 @@ def WorkspacePage(root: Path, config: Optional[DialengConfig] = None,
                     ),
                     cls="toolbar-container",
                 ),
+                Div(id="extension-status-items", cls="extension-status-items"),
                 Div(
                     Div(icon_sprites('notebook-text', sz=34), cls="workspace-empty-icon"),
                     H2(title),
@@ -174,11 +178,13 @@ def WorkspacePage(root: Path, config: Optional[DialengConfig] = None,
             ),
             cls="main-layout",
         ),
+        Div(id="extension-panel-host", cls="extension-panel-host"),
         NewItemModal(),
         DeleteConfirmModal(),
         SettingsOverlay() if config else None,
         SettingsSidebar(config) if config else None,
         SkillCreatorModal() if config and config.skills_enabled and config.skills_creator_enabled else None,
+        ExtensionManagerModal(),
     )
 
 
@@ -255,6 +261,7 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                     Div(
                         # Right group: controls
                         SkillCreatorButton(bool(config and config.skills_enabled and config.skills_creator_enabled)),
+                        ExtensionManagerButton(),
                         Button(icon_sprites('settings', sz=16), cls="btn btn-sm settings-btn", id="settings-btn",
                                onclick="toggleSettings()", title="Settings"),
                         Button(icon_sprites('sun', sz=16), cls="theme-toggle", id="theme-toggle",
@@ -304,12 +311,14 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                         Button(icon_sprites('keyboard', sz=14), cls="btn btn-sm",
                                onclick="toggleKeyboardShortcuts()", title="Keyboard shortcuts (?)"),
                         # Extension toolbar items
+                        Div(id="extension-toolbar-items", cls="extension-toolbar-items"),
                         *[reg.renderer(nb, config)
                           for reg in sorted(registry.toolbar_items.values(), key=lambda r: r.order)],
                         cls="toolbar-right"
                     ),
                     cls="toolbar-container"
                 ),
+                Div(id="extension-status-items", cls="extension-status-items"),
                 Div(id="status", aria_live="polite", aria_atomic="true"),
                 AllCells(nb),
                 Script(f"""
@@ -338,6 +347,7 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
             ),
             cls="main-layout"
         ),
+        Div(id="extension-panel-host", cls="extension-panel-host"),
         # New item modal (for file explorer)
         NewItemModal(),
         # Delete confirmation modal (for file explorer)
@@ -350,4 +360,5 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
         SettingsOverlay() if config else None,
         SettingsSidebar(config) if config else None,
         SkillCreatorModal() if config and config.skills_enabled and config.skills_creator_enabled else None,
+        ExtensionManagerModal(),
     )

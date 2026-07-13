@@ -1,0 +1,20 @@
+schema_version = 1
+id = "dev.dialeng.execution-guard"
+name = "Execution Guard"
+version = "0.1.0"
+description = "Reference extension for guards, transforms, observations, tasks, and cleanup."
+entrypoint = "extension:setup"
+dialeng_api = ">=1,<2"
+scope = "project"
+
+[permissions]
+filesystem_read = []
+filesystem_write = []
+network = false
+subprocess = false
+browser_assets = false
+
+[contributes]
+events = true
+settings = true
+status = true

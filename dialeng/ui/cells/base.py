@@ -107,7 +107,7 @@ def CellHeader(cell, notebook_id: str, collapse_controls: list = None):
 
 def _run_button(cell, notebook_id: str):
     """Create run button based on cell type."""
-    if cell.cell_type == "note":
+    if str(cell.cell_type) not in {"code", "prompt", "shell"}:
         return None
 
     if cell.cell_type == "prompt":

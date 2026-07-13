@@ -69,6 +69,7 @@ def _setting_badges(name: str, definition: SettingDefinition):
     apply_labels = {
         "new_kernel": "new kernels",
         "reload": "reload",
+        "extension_reload": "extension reload",
         "server_restart": "restart",
     }
     return (
@@ -262,6 +263,73 @@ def SettingText(label: str, name: str, current: str, help_text: str = None):
         cls="setting-row",
         **_setting_row_attrs(name, definition),
     )
+
+
+def _raw_setting(config: DialengConfig, path: str, default: Any) -> Any:
+    value: Any = config.raw_config
+    for key in path.split("."):
+        if not isinstance(value, dict) or key not in value:
+            return default
+        value = value[key]
+    return value
+
+
+def _extension_setting_groups(config: DialengConfig):
+    grouped: dict[str, list[SettingDefinition]] = {}
+    for definition in get_setting_definitions(config).values():
+        if not definition.path.startswith("extensions."):
+            continue
+        grouped.setdefault(definition.group or "Extensions", []).append(definition)
+
+    rendered = []
+    for group, definitions in sorted(grouped.items()):
+        rows = []
+        for definition in sorted(definitions, key=lambda item: (item.order, item.path)):
+            value = _raw_setting(config, definition.path, definition.default)
+            label = definition.label or definition.path.rsplit(".", 1)[-1].replace("_", " ").title()
+            help_text = definition.description or f"Apply mode: {definition.apply_mode.replace('_', ' ')}"
+            if definition.kind == "bool":
+                row = SettingToggle(label, definition.path, bool(value), help_text=help_text)
+            elif definition.kind == "int":
+                row = SettingNumber(
+                    label,
+                    definition.path,
+                    int(value),
+                    int(definition.minimum if definition.minimum is not None else 0),
+                    int(definition.maximum if definition.maximum is not None else 1000000),
+                    1,
+                    help_text,
+                )
+            elif definition.choices:
+                row = SettingSelect(
+                    label,
+                    definition.path,
+                    [(choice, choice) for choice in definition.choices],
+                    str(value),
+                    help_text,
+                )
+            elif definition.secret:
+                row = Div(
+                    Div(Label(label, fr=definition.path, cls="setting-label"), *_setting_badges(definition.path, definition), cls="setting-label-row"),
+                    Input(
+                        type="password",
+                        name=definition.path,
+                        id=definition.path.replace(".", "-"),
+                        value="",
+                        placeholder="Configured - enter a new value to replace" if value else "Not configured",
+                        cls="setting-text",
+                        autocomplete="new-password",
+                    ),
+                    Small(help_text, cls="setting-help"),
+                    Div("", cls="setting-field-error", data_setting_error=definition.path),
+                    cls="setting-row",
+                    **_setting_row_attrs(definition.path, definition),
+                )
+            else:
+                row = SettingText(label, definition.path, str(value), help_text)
+            rows.append(row)
+        rendered.append(SettingsGroup(group, *rows, open=False))
+    return rendered
 
 
 def SettingsSidebar(config: DialengConfig):
@@ -526,6 +594,7 @@ def SettingsSidebar(config: DialengConfig):
                 ),
 
                 # Extension settings sections
+                *_extension_setting_groups(config),
                 *[reg.renderer(config)
                   for reg in sorted(
                       _get_extension_settings_sections(),

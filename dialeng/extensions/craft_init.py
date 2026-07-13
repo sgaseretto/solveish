@@ -8,8 +8,6 @@ craft_init_service for the actual initialization logic.
 
 import logging
 
-from dialeng.core.registry import register_action, register_toolbar_item_decorator
-
 logger = logging.getLogger(__name__)
 
 
@@ -19,7 +17,6 @@ def _get_notebooks_dir():
     return NOTEBOOKS_DIR
 
 
-@register_action("craft_init_detect")
 def craft_init_detect(nb_id: str, **kwargs):
     """Detect existing package name from pyproject.toml for pre-filling the prompt."""
     from dialeng.services.craft_init_service import detect_pkg_name
@@ -30,7 +27,6 @@ def craft_init_detect(nb_id: str, **kwargs):
     }
 
 
-@register_action("init_craft")
 def init_craft_action(nb_id: str, pkg_name: str = "", **kwargs):
     """Create/update CRAFT.ipynb and pyproject.toml with the given package name."""
     if not pkg_name:
@@ -39,7 +35,6 @@ def init_craft_action(nb_id: str, pkg_name: str = "", **kwargs):
     return init_craft(_get_notebooks_dir(), pkg_name)
 
 
-@register_toolbar_item_decorator("craft_init_button", position="right", order=85)
 def render_craft_init_button(notebook, config):
     """Toolbar button to initialize a package-aware CRAFT.ipynb."""
     from fasthtml.common import Button, Script, Div, NotStr
@@ -49,7 +44,7 @@ def render_craft_init_button(notebook, config):
     js = """
     async function initCraftPackage() {
         // Detect existing config to pre-fill prompt
-        const detectResp = await fetch(`${nbApiPath()}/ext/craft_init_detect`, {
+        const detectResp = await fetch(`${nbApiPath()}/extensions/builtin.craft_init/actions/craft_init_detect`, {
             method: 'POST',
             headers: {'Content-Type': 'application/x-www-form-urlencoded'},
             body: ''
@@ -65,7 +60,7 @@ def render_craft_init_button(notebook, config):
         if (!name) return;
 
         const params = new URLSearchParams({pkg_name: name});
-        const resp = await fetch(`${nbApiPath()}/ext/init_craft`, {
+        const resp = await fetch(`${nbApiPath()}/extensions/builtin.craft_init/actions/init_craft`, {
             method: 'POST',
             headers: {'Content-Type': 'application/x-www-form-urlencoded'},
             body: params.toString()
@@ -86,4 +81,11 @@ def render_craft_init_button(notebook, config):
     )
 
 
-logger.info("CRAFT init extension loaded")
+def setup(api, ctx):
+    """Register the CRAFT contribution bundle through the stable facade."""
+    api.register_action("craft_init_detect", craft_init_detect)
+    api.register_action("init_craft", init_craft_action)
+    api.register_toolbar_item(
+        "craft_init_button", render_craft_init_button, position="right", order=85,
+    )
+    ctx.logger.info("CRAFT init extension loaded")

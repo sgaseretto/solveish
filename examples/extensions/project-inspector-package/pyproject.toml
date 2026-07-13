@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dialeng-project-inspector-extension"
+version = "0.1.0"
+description = "Reference installable Dialeng extension."
+requires-python = ">=3.11"
+dependencies = ["dialeng>=0.11"]
+
+[project.entry-points."dialeng.extensions"]
+"dev.dialeng.project-inspector" = "dialeng_project_inspector:setup"
+
+[tool.setuptools]
+py-modules = ["dialeng_project_inspector"]
+
+[tool.setuptools.data-files]
+"dialeng-extension-manifests/project-inspector" = ["extension.toml"]
+"dialeng-extension-manifests/project-inspector/resources/skills/project-inspector" = ["resources/skills/project-inspector/SKILL.md"]
+"dialeng-extension-manifests/project-inspector/resources/templates" = ["resources/templates/PROJECT_INSPECTION.md"]

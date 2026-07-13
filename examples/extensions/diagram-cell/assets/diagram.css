@@ -1,0 +1,5 @@
+.diagram-cell { border-color: #49a8a1; }
+.diagram-cell-body { display: grid; grid-template-columns: minmax(240px, 1fr) minmax(240px, 1fr); gap: 14px; padding: 14px; }
+.diagram-label { grid-column: 1 / -1; margin: 0; color: var(--text-muted); font-size: .75rem; }
+.diagram-source, .diagram-preview { min-height: 160px; margin: 0; padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-primary); color: var(--text-primary); white-space: pre-wrap; }
+@media (max-width: 720px) { .diagram-cell-body { grid-template-columns: 1fr; } }

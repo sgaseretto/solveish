@@ -1,0 +1,27 @@
+schema_version = 1
+id = "dev.dialeng.project-inspector"
+name = "Project Inspector"
+version = "0.1.0"
+description = "Installable reference package with a command, read-only tool, panel, skill, and template."
+entrypoint = "dialeng_project_inspector:setup"
+dialeng_api = ">=1,<2"
+scope = "package"
+
+[permissions]
+filesystem_read = ["project"]
+filesystem_write = []
+network = false
+subprocess = false
+browser_assets = false
+
+[contributes]
+commands = true
+tools = true
+panels = true
+toolbar = true
+skills = true
+templates = true
+
+[resources]
+skills = ["resources/skills/project-inspector"]
+templates = ["resources/templates"]

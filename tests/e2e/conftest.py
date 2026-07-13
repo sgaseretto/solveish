@@ -47,6 +47,8 @@ def e2e_server(e2e_project: E2EProject, tmp_path: Path):
     base_url = f"http://127.0.0.1:{port}"
     log_path = tmp_path / "dialeng-server.log"
     env = os.environ.copy()
+    isolated_home = tmp_path / "home"
+    isolated_home.mkdir()
     for name in (
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
@@ -60,6 +62,7 @@ def e2e_server(e2e_project: E2EProject, tmp_path: Path):
         {
             "DIALENG_E2E": "1",
             "DIALENG_NOTEBOOKS_DIR": str(e2e_project.root),
+            "HOME": str(isolated_home),
             "PYTHONUNBUFFERED": "1",
         }
     )

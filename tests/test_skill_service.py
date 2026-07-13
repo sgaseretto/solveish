@@ -74,6 +74,15 @@ def test_builtin_skill_creator_is_available_and_project_can_override_it(tmp_path
     assert creator.description == "Project-specific creator"
 
 
+def test_builtin_extension_creator_documents_constrained_activation(tmp_path):
+    service = SkillService(tmp_path)
+    creator = next(skill for skill in service.all_skills if skill.name == "extension-creator")
+
+    assert creator.source == "builtin"
+    assert "request_extension_activation" in service.read_skill("extension-creator")
+    assert "cannot trust or activate code" in service.read_skill("extension-creator")
+
+
 def test_builtin_skill_creator_can_be_hidden_without_hiding_project_skills(tmp_path):
     _write_skill(tmp_path, "testing")
     prompt = SkillService(tmp_path).augment_system_prompt("system", include_creator=False)

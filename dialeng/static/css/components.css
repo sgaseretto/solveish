@@ -2875,6 +2875,204 @@ button, select { font-size: var(--btn-font-size, inherit); }
 .skill-creator-status.warning { color: var(--warning-color, #e3ab39); }
 .skill-creator-status.success { color: var(--success-color, #43c46b); }
 
+.extension-manager-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 12500;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: color-mix(in srgb, var(--bg-primary, #0b1118) 78%, transparent);
+    backdrop-filter: blur(8px);
+}
+
+.extension-manager-overlay.visible { display: flex; }
+
+.extension-manager-dialog {
+    width: min(980px, 96vw);
+    max-height: min(840px, 92vh);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid var(--border, #303945);
+    border-radius: 18px;
+    background: var(--bg-secondary, #151c25);
+    box-shadow: 0 28px 90px rgba(0, 0, 0, 0.48);
+}
+
+.extension-manager-header,
+.extension-manager-title,
+.extension-manager-card-header,
+.extension-manager-actions,
+.extension-manager-badges {
+    display: flex;
+    align-items: center;
+}
+
+.extension-manager-header {
+    justify-content: space-between;
+    gap: 20px;
+    padding: 18px 20px;
+    border-bottom: 1px solid var(--border, #303945);
+}
+
+.extension-manager-title { gap: 12px; }
+.extension-manager-heading h2,
+.extension-manager-heading p { margin: 0; }
+.extension-manager-heading p {
+    margin-top: 3px;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+}
+
+.extension-manager-close {
+    border: 0;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 1.2rem;
+    cursor: pointer;
+}
+
+.extension-manager-body {
+    min-height: 0;
+    padding: 18px 20px 24px;
+    overflow: auto;
+}
+
+.extension-studio-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    margin-bottom: 12px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--accent-blue) 7%, var(--bg-primary));
+}
+.extension-studio-summary h3,
+.extension-studio-summary p { margin: 0; }
+.extension-studio-summary p { margin-top: 3px; color: var(--text-muted); font-size: 0.76rem; }
+.extension-studio-form {
+    display: grid;
+    grid-template-columns: 1fr 1.4fr 1fr auto;
+    gap: 10px;
+    align-items: end;
+    margin-bottom: 16px;
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg-primary);
+}
+.extension-studio-form[hidden] { display: none; }
+.extension-studio-form label { display: grid; gap: 5px; color: var(--text-muted); font-size: 0.72rem; }
+.extension-studio-form input,
+.extension-studio-form select {
+    min-width: 0;
+    padding: 8px 9px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-primary);
+    background: var(--bg-secondary);
+}
+.extension-studio-form .extension-manager-status,
+.extension-studio-output { grid-column: 1 / -1; }
+.extension-studio-output {
+    max-height: 220px;
+    margin: 0;
+    padding: 10px;
+    overflow: auto;
+    border-radius: 8px;
+    color: var(--text-muted);
+    background: color-mix(in srgb, #000 24%, var(--bg-secondary));
+    font-size: 0.7rem;
+    white-space: pre-wrap;
+}
+
+.extension-manager-status {
+    margin-bottom: 12px;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+}
+.extension-manager-status.error { color: var(--accent-red); }
+
+.extension-manager-list { display: grid; gap: 12px; }
+.extension-manager-card {
+    padding: 14px 15px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg-primary);
+}
+.extension-manager-card.failed { border-color: var(--accent-red); }
+.extension-manager-card.active { border-color: var(--accent-green); }
+.extension-manager-card.blocked { border-color: var(--accent-yellow); }
+.extension-manager-card-header { justify-content: space-between; gap: 14px; }
+.extension-manager-card h3 { margin: 0; font-size: 0.96rem; }
+.extension-manager-card p { margin: 7px 0; color: var(--text-muted); }
+.extension-manager-meta { font-size: 0.72rem; overflow-wrap: anywhere; }
+.extension-manager-badges { flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.extension-manager-badge {
+    padding: 2px 7px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-muted);
+    font-size: 0.68rem;
+}
+.extension-manager-actions { flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+.extension-manager-error {
+    padding: 8px 10px;
+    border-radius: 8px;
+    color: var(--accent-red);
+    background: color-mix(in srgb, var(--accent-red) 10%, transparent);
+    font: 0.72rem monospace;
+    overflow-wrap: anywhere;
+}
+.extension-manager-diagnostics { margin-top: 14px; }
+
+.extension-toolbar-items,
+.extension-status-items {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+}
+.extension-status-items {
+    justify-content: flex-end;
+    min-height: 0;
+    padding: 0 8px;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+}
+.extension-panel-host { pointer-events: none; }
+.extension-panel {
+    position: fixed;
+    z-index: 8200;
+    pointer-events: auto;
+    max-width: min(440px, 92vw);
+    max-height: min(680px, 80vh);
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--bg-secondary);
+    box-shadow: 0 18px 52px rgba(0, 0, 0, 0.36);
+}
+.extension-panel.right { top: 92px; right: 18px; }
+.extension-panel.left { top: 92px; left: 18px; }
+.extension-panel.bottom { right: 18px; bottom: 18px; left: 18px; max-width: none; max-height: 38vh; }
+.extension-panel.modal { inset: 14vh auto auto 50%; transform: translateX(-50%); }
+.unsupported-extension-cell { border-color: var(--accent-yellow); }
+.unsupported-cell-body { padding: 18px; }
+.unsupported-cell-message { margin: 0 0 12px; color: var(--accent-yellow); }
+.unsupported-cell-source { overflow: auto; white-space: pre-wrap; color: var(--text-muted); }
+
+@media (max-width: 640px) {
+    .extension-manager-overlay { padding: 6px; }
+    .extension-manager-dialog { max-height: 97vh; }
+    .extension-manager-card-header { align-items: flex-start; flex-direction: column; }
+    .extension-studio-summary { align-items: flex-start; flex-direction: column; }
+    .extension-studio-form { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 800px) {
     .skill-creator-overlay { padding: 8px; }
     .skill-creator-dialog { max-height: 96vh; }

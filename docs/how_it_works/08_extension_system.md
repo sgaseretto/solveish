@@ -1,5 +1,10 @@
 # Extension System
 
+> This document explains the low-level dispatch and callback primitives. The
+> stable owner-aware runtime is documented in
+> [25_extension_platform.md](25_extension_platform.md); third-party extensions
+> should use `ExtensionAPI` instead of direct global registry mutation.
+
 Dialeng includes an extensibility framework inspired by fastai/fastcore patterns, enabling:
 
 - **Type dispatch** for cell operations (rendering, serialization, LLM conversion)

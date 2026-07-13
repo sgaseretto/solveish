@@ -1,0 +1,23 @@
+schema_version = 1
+id = "dev.dialeng.diagram-cell"
+name = "Diagram Cell"
+version = "0.1.0"
+description = "Reference custom cell with safe persistence, LLM context, and declared assets."
+entrypoint = "extension:setup"
+dialeng_api = ">=1,<2"
+scope = "project"
+
+[permissions]
+filesystem_read = []
+filesystem_write = []
+network = false
+subprocess = false
+browser_assets = true
+
+[contributes]
+cell_types = true
+commands = true
+
+[assets]
+css = ["assets/diagram.css"]
+js = ["assets/diagram.js"]

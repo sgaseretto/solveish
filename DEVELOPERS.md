@@ -331,6 +331,12 @@ function handleCellUpdated(cellId, html) {
 
 ## Extension Points
 
+> The supported path for third-party extensibility is the owner-aware
+> [`ExtensionAPI`](docs/guides/extensions.md). Direct registry examples below are
+> useful for understanding internals but bypass manifests, trust, transactional
+> reload, cleanup, diagnostics, and compatibility checks. See
+> [Extension Platform Internals](docs/how_it_works/25_extension_platform.md).
+
 ### 1. LLM Provider Interface
 
 Create an abstract base class for LLM providers:

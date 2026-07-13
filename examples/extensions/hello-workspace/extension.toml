@@ -1,0 +1,23 @@
+schema_version = 1
+id = "dev.dialeng.hello-workspace"
+name = "Hello Workspace"
+version = "0.1.0"
+description = "Reference extension for commands, actions, settings, toolbar, status, and shortcuts."
+entrypoint = "extension:setup"
+dialeng_api = ">=1,<2"
+scope = "project"
+
+[permissions]
+filesystem_read = []
+filesystem_write = []
+network = false
+subprocess = false
+browser_assets = false
+
+[contributes]
+commands = true
+actions = true
+toolbar = true
+shortcuts = true
+settings = true
+status = true

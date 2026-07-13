@@ -48,7 +48,7 @@ def test_skill_provenance_stays_local_instead_of_entering_transport_body(tmp_pat
     provider = OpenAICodexProvider()
     provider._capture_skill_metadata()
     assert {item["name"] for item in provider.last_skill_metadata} == {
-        "skill-creator", "local-skill"
+        "extension-creator", "skill-creator", "local-skill"
     }
     body = provider._request_body(
         model="gpt-5.4", system_prompt="system", input_items=[], tools=[], use_thinking=False,

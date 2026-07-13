@@ -35,6 +35,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Dict, List, Callable, Any, Optional
 import logging
 
+from dialeng.extensions.context import capture_registration
+
 if TYPE_CHECKING:
     from dialeng.document.cell import Cell, CellOutput
 
@@ -76,6 +78,8 @@ def register_renderer(cell_type: str):
             return Div(...)
     """
     def decorator(func: Callable) -> Callable:
+        if capture_registration("dispatch.renderer", cell_type, func):
+            return func
         _renderers[cell_type] = func
         logger.debug(f"Registered renderer for cell type: {cell_type}")
         return func
@@ -94,6 +98,8 @@ def register_jupyter_serializer(cell_type: str):
             return {"cell_type": "markdown", "source": cell.source, ...}
     """
     def decorator(func: Callable) -> Callable:
+        if capture_registration("dispatch.serializer", cell_type, func):
+            return func
         _jupyter_serializers[cell_type] = func
         logger.debug(f"Registered Jupyter serializer for cell type: {cell_type}")
         return func
@@ -114,7 +120,9 @@ def register_jupyter_deserializer(func: Callable) -> Callable:
                 return DiagramCell(...)
             return None
     """
-    _jupyter_deserializers.append(func)
+    name = f"{func.__module__}.{func.__qualname__}"
+    if not capture_registration("dispatch.deserializer", name, func):
+        _jupyter_deserializers.append(func)
     return func
 
 
@@ -131,6 +139,8 @@ def register_llm_converter(cell_type: str):
             return [{"role": "user", "content": f"[Diagram]\\n{cell.source}"}]
     """
     def decorator(func: Callable) -> Callable:
+        if capture_registration("dispatch.llm_converter", cell_type, func):
+            return func
         _llm_converters[cell_type] = func
         logger.debug(f"Registered LLM converter for cell type: {cell_type}")
         return func
@@ -168,9 +178,27 @@ def render_cell(cell: 'Cell', notebook_id: str) -> Any:
     elif cell_type == "prompt":
         return _default_prompt_renderer(cell, notebook_id)
 
-    # Unknown type - use code renderer as fallback
-    logger.warning(f"No renderer for cell type '{cell_type}', using code renderer")
-    return _default_code_renderer(cell, notebook_id)
+    # Preserve and expose unsupported extension cells without pretending they
+    # are executable code. The normal header still permits move/delete/convert.
+    logger.warning(f"No renderer for cell type '{cell_type}', using unsupported-cell fallback")
+    from fasthtml.common import Div, P, Pre
+    from dialeng.ui.cells.base import CellHeader
+    return Div(
+        CellHeader(cell, notebook_id, collapse_controls=[]),
+        Div(
+            P(
+                f"The extension that renders '{cell_type}' cells is disabled or unavailable. "
+                "The source and notebook metadata will be preserved.",
+                cls="unsupported-cell-message",
+            ),
+            Pre(cell.source, cls="unsupported-cell-source"),
+            cls="cell-body unsupported-cell-body",
+        ),
+        id=f"cell-{cell.id}",
+        cls="cell unsupported-extension-cell",
+        data_cell_id=cell.id,
+        data_cell_type=cell_type,
+    )
 
 
 def cell_to_jupyter(cell: 'Cell') -> dict:

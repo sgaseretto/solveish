@@ -11,6 +11,7 @@ from fasthtml.common import *
 from .file_explorer import FileExplorerSidebar, NewItemModal, DeleteConfirmModal
 from .icons import sprites as icon_sprites
 from .settings import SettingsOverlay, SettingsSidebar
+from .extensions import ExtensionManagerButton, ExtensionManagerModal
 from dialeng.services.dialeng_config import DialengConfig
 from dialeng.services.file_editor_service import FileOpenResult
 
@@ -114,6 +115,7 @@ def FileEditorPage(
                         cls="toolbar-left"
                     ),
                     Div(
+                        ExtensionManagerButton(),
                         Button(icon_sprites("settings", sz=16), cls="btn btn-sm settings-btn", id="settings-btn",
                                onclick="toggleSettings()", title="Settings"),
                         Button(icon_sprites("sun", sz=16), cls="theme-toggle", id="theme-toggle",
@@ -149,4 +151,5 @@ def FileEditorPage(
         DeleteConfirmModal(),
         SettingsOverlay() if config else None,
         SettingsSidebar(config) if config else None,
+        ExtensionManagerModal(),
     )

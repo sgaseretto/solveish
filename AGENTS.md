@@ -22,6 +22,10 @@
     - NBDev:
         - repo: https://github.com/AnswerDotAI/nbdev
         - docs: https://nbdev.fast.ai/getting_started.html
+    - Dialeng extension authoring:
+        - guide: docs/guides/extensions.md
+        - internals: docs/how_it_works/25_extension_platform.md
+        - verification: docs/how_it_works/26_extension_verification.md
     - ContextKit:
         - repo: https://github.com/AnswerDotAI/ContextKit
     - nbs2ctx notebook context reference:

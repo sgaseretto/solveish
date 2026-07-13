@@ -10,6 +10,7 @@ def test_project_init_is_idempotent_and_preserves_custom_craft_cells(tmp_path):
     assert (project / "dialeng_config.json").exists()
     assert (project / ".dialeng" / "skills" / "README.md").exists()
     assert ".dialeng/recovery/" in (project / ".gitignore").read_text(encoding="utf-8")
+    assert ".dialeng/extension-builds/" in (project / ".gitignore").read_text(encoding="utf-8")
 
     craft_path = project / "CRAFT.ipynb"
     notebook = json.loads(craft_path.read_text(encoding="utf-8"))
@@ -23,6 +24,7 @@ def test_project_init_is_idempotent_and_preserves_custom_craft_cells(tmp_path):
     assert sum("Custom content" in "".join(cell.get("source", [])) for cell in rerun["cells"]) == 1
     assert (project / "dialeng_config.json").read_text(encoding="utf-8") == config_before
     assert (project / ".gitignore").read_text(encoding="utf-8").count(".dialeng/recovery/") == 1
+    assert (project / ".gitignore").read_text(encoding="utf-8").count(".dialeng/extension-builds/") == 1
 
 
 def test_cli_init_parsing():

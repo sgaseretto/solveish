@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Type, Callable, Any, Optional
 import logging
 
+from dialeng.extensions.context import capture_registration
+
 if TYPE_CHECKING:
     from dialeng.document.cell import Cell
     from .callbacks import Callback, CallbackHandler
@@ -127,6 +129,8 @@ class ExtensionRegistry:
         a duplicate will log a warning and overwrite.
         """
         cell_type = registration.cell_type
+        if capture_registration("registry.cell_type", cell_type, registration):
+            return
         if cell_type in self.cell_types:
             logger.warning(f"Overwriting existing cell type: {cell_type}")
         self.cell_types[cell_type] = registration
@@ -138,6 +142,9 @@ class ExtensionRegistry:
 
         Callbacks are sorted by order when building the CallbackHandler.
         """
+        name = getattr(callback, "name", callback.__class__.__name__)
+        if capture_registration("registry.callback", name, callback):
+            return
         self.callbacks.append(callback)
         self.callbacks.sort(key=lambda c: c.order)
         logger.info(f"Registered callback: {callback.name} (order={callback.order})")
@@ -164,6 +171,8 @@ class ExtensionRegistry:
 
         Services can be LLM providers, storage backends, custom kernels, etc.
         """
+        if capture_registration("registry.service", name, service):
+            return
         if name in self.services:
             logger.warning(f"Overwriting existing service: {name}")
         self.services[name] = service
@@ -185,6 +194,8 @@ class ExtensionRegistry:
     def register_kernel_type(self, registration: KernelRegistration) -> None:
         """Register a kernel backend."""
         name = registration.name
+        if capture_registration("registry.kernel", name, registration):
+            return
         if name in self.kernels:
             logger.warning(f"Overwriting existing kernel: {name}")
         self.kernels[name] = registration
@@ -193,6 +204,8 @@ class ExtensionRegistry:
     def register_provider(self, registration: ProviderRegistration) -> None:
         """Register an LLM provider."""
         name = registration.name
+        if capture_registration("registry.provider", name, registration):
+            return
         if name in self.providers:
             logger.warning(f"Overwriting existing provider: {name}")
         self.providers[name] = registration
@@ -201,6 +214,8 @@ class ExtensionRegistry:
     def register_toolbar_item(self, registration: ToolbarItemRegistration) -> None:
         """Register a custom toolbar item."""
         name = registration.name
+        if capture_registration("registry.toolbar", name, registration):
+            return
         if name in self.toolbar_items:
             logger.warning(f"Overwriting existing toolbar item: {name}")
         self.toolbar_items[name] = registration
@@ -209,6 +224,8 @@ class ExtensionRegistry:
     def register_settings_section(self, registration: SettingsSectionRegistration) -> None:
         """Register a custom settings section."""
         name = registration.name
+        if capture_registration("registry.settings_section", name, registration):
+            return
         if name in self.settings_sections:
             logger.warning(f"Overwriting existing settings section: {name}")
         self.settings_sections[name] = registration
@@ -220,6 +237,8 @@ class ExtensionRegistry:
         Action handlers are called via POST /dialeng/{nb_id}/ext/{name}.
         Handler signature: async def handler(nb_id: str, **kwargs) -> dict
         """
+        if capture_registration("registry.action", name, handler):
+            return
         if name in self.actions:
             logger.warning(f"Overwriting existing action: {name}")
         self.actions[name] = handler

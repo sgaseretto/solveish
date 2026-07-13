@@ -12,7 +12,10 @@ Hot-reload:
     POST /dialeng/reload-extensions or `from dialeng.dev import reload_extensions`.
 """
 import asyncio
+import importlib.util
 import logging
+import sys
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -22,6 +25,66 @@ CACHE_DIR = Path(".autorun_modules")
 
 # Set by process_autorun() at startup, used by reload_autorun_extensions()
 _autorun_dir: Optional[Path] = None
+_contribution_store = None
+_legacy_modules: dict[str, str] = {}
+
+
+def set_autorun_contribution_store(store) -> None:
+    """Use the main extension ownership ledger for legacy registrations."""
+    global _contribution_store
+    _contribution_store = store
+
+
+def _owner_for(path: Path, source_kind: str) -> str:
+    return f"legacy.autorun.{source_kind}.{path.stem}"
+
+
+def _load_owned(path: Path, source_kind: str) -> str:
+    """Import one legacy module transactionally into a synthetic owner scope."""
+    from dialeng.extensions.context import RegistrationScope, registration_scope
+    from dialeng.extensions.contributions import ContributionStore
+
+    global _contribution_store
+    if _contribution_store is None:
+        _contribution_store = ContributionStore()
+    owner = _owner_for(path, source_kind)
+    scope = RegistrationScope(owner)
+    module_name = f"_dialeng_{owner.replace('.', '_')}_{uuid.uuid4().hex[:8]}"
+    try:
+        with registration_scope(scope):
+            spec = importlib.util.spec_from_file_location(module_name, path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Could not load legacy extension: {path}")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+        _contribution_store.replace(owner, scope.contributions)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    previous = _legacy_modules.get(owner)
+    _legacy_modules[owner] = module_name
+    if previous:
+        sys.modules.pop(previous, None)
+    return owner
+
+
+def _sync_owned_modules(paths: list[tuple[Path, str]]) -> tuple[list[str], list[str]]:
+    loaded: list[str] = []
+    errors: list[str] = []
+    expected = {_owner_for(path, kind) for path, kind in paths}
+    for owner in set(_legacy_modules) - expected:
+        if _contribution_store is not None:
+            _contribution_store.remove(owner)
+        sys.modules.pop(_legacy_modules.pop(owner), None)
+    for path, kind in paths:
+        try:
+            _load_owned(path, kind)
+            loaded.append(path.stem)
+        except Exception as exc:
+            errors.append(f"Load {path.name}: {exc}")
+            logger.exception("AUTORUN legacy extension failed (path=%s)", path)
+    return loaded, errors
 
 
 async def process_autorun(kernel_service, notebooks_dir: Path = None) -> None:
@@ -38,7 +101,7 @@ async def process_autorun(kernel_service, notebooks_dir: Path = None) -> None:
         logger.info("No AUTORUN/ directory found, skipping")
         return
 
-    from dialeng.core.extensions import load_extensions, extract_extension
+    from dialeng.core.extensions import extract_extension
 
     # Phase 1b: Export #| export cells from notebooks → .autorun_modules/
     CACHE_DIR.mkdir(exist_ok=True)
@@ -55,8 +118,15 @@ async def process_autorun(kernel_service, notebooks_dir: Path = None) -> None:
             logger.error(f"AUTORUN: Failed to extract from {nb_path.name}: {e}")
 
     # Phase 1c: Load .py extensions from AUTORUN/ and .autorun_modules/
-    autorun_exts = load_extensions(_autorun_dir, silent=True)
-    cache_exts = load_extensions(CACHE_DIR, silent=True)
+    paths = [
+        *((path, "source") for path in sorted(_autorun_dir.glob("*.py")) if not path.name.startswith("_")),
+        *((path, "notebook") for path in sorted(CACHE_DIR.glob("*.py")) if not path.name.startswith("_")),
+    ]
+    loaded, errors = _sync_owned_modules(paths)
+    autorun_exts = [path.stem for path, kind in paths if kind == "source" and path.stem in loaded]
+    cache_exts = [path.stem for path, kind in paths if kind == "notebook" and path.stem in loaded]
+    for error in errors:
+        logger.error("AUTORUN: %s", error)
     if autorun_exts:
         logger.info(f"AUTORUN: Loaded {len(autorun_exts)} extension(s) from AUTORUN/: {autorun_exts}")
     if cache_exts:
@@ -77,7 +147,7 @@ def reload_autorun_extensions() -> Dict[str, List[str]]:
         dict with 'extracted' (notebook names), 'loaded' (module names),
         and 'errors' (error descriptions).
     """
-    from dialeng.core.extensions import extract_extension, reload_extension
+    from dialeng.core.extensions import extract_extension
 
     result: Dict[str, List[str]] = {"extracted": [], "loaded": [], "errors": []}
 
@@ -99,17 +169,13 @@ def reload_autorun_extensions() -> Dict[str, List[str]]:
             logger.error(f"AUTORUN reload: Failed to extract from {nb_path.name}: {e}")
 
     # Phase 1c: Reload .py extensions from AUTORUN/ and .autorun_modules/
-    for ext_dir in [_autorun_dir, CACHE_DIR]:
-        for py_file in sorted(ext_dir.glob("*.py")):
-            if py_file.name.startswith("_"):
-                continue
-            name = py_file.stem
-            try:
-                if reload_extension(name, extensions_dir=ext_dir):
-                    result["loaded"].append(name)
-            except Exception as e:
-                result["errors"].append(f"Reload {name}: {e}")
-                logger.error(f"AUTORUN reload: Failed to reload {name}: {e}")
+    paths = [
+        *((path, "source") for path in sorted(_autorun_dir.glob("*.py")) if not path.name.startswith("_")),
+        *((path, "notebook") for path in sorted(CACHE_DIR.glob("*.py")) if not path.name.startswith("_")),
+    ]
+    loaded, errors = _sync_owned_modules(paths)
+    result["loaded"].extend(loaded)
+    result["errors"].extend(errors)
 
     logger.info(f"AUTORUN reload: {len(result['loaded'])} loaded, {len(result['errors'])} errors")
     return result

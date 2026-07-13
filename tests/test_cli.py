@@ -38,6 +38,15 @@ class TestParseArgs:
         assert args.path == "./projects"
         assert args.port == 3000
 
+    def test_repeatable_development_extension_paths(self):
+        from dialeng.cli import parse_args
+
+        args = parse_args([
+            "./projects", "--extension", "./one", "--extension", "./two",
+        ])
+
+        assert args.extension_paths == ["./one", "./two"]
+
     def test_skill_create_parsing(self):
         from dialeng.cli import parse_args
         args = parse_args([
@@ -48,6 +57,44 @@ class TestParseArgs:
         assert args.skill_action == "create"
         assert args.sources == ["one.ipynb", "two.ipynb"]
         assert args.no_llm is True
+
+    def test_extension_create_parsing(self):
+        from dialeng.cli import parse_args
+
+        args = parse_args([
+            "extension", "create", "hello-workspace", "--template", "basic",
+            "--id", "examples.hello-workspace", "--path", "/tmp/project",
+        ])
+
+        assert args.subcommand == "extension"
+        assert args.extension_action == "create"
+        assert args.extension_id == "examples.hello-workspace"
+        assert args.template == "basic"
+
+    def test_extension_prepare_parsing(self):
+        from dialeng.cli import parse_args
+
+        args = parse_args(["extension", "prepare", "/tmp/extension", "--path", "/tmp/project"])
+
+        assert args.extension_action == "prepare"
+        assert args.extension_path == "/tmp/extension"
+
+    @pytest.mark.parametrize("action", ["package", "install", "migrate"])
+    def test_extension_source_commands_parse(self, action):
+        from dialeng.cli import parse_args
+
+        args = parse_args(["extension", action, "/tmp/extension", "--path", "/tmp/project"])
+
+        assert args.extension_action == action
+        assert args.extension_path == "/tmp/extension"
+
+    def test_extension_remove_parsing(self):
+        from dialeng.cli import parse_args
+
+        args = parse_args(["extension", "remove", "dev.example.extension", "--path", "/tmp/project"])
+
+        assert args.extension_action == "remove"
+        assert args.extension_id == "dev.example.extension"
 
 
 class TestResolveRootDir:

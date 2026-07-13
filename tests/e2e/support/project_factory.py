@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -209,6 +210,25 @@ class E2EProject:
                 CellSpec("code", "third = 3", "mut00003"),
             ],
         )
+        self.write_notebook(
+            "extensions",
+            [
+                CellSpec("code", "print('extension baseline')", "ext00001"),
+                CellSpec("note", "## Extension playground", "ext00002"),
+            ],
+        )
+        fixture_root = Path(__file__).parents[3] / "examples" / "extensions"
+        destination = self.root / ".dialeng" / "extensions"
+        destination.mkdir(parents=True, exist_ok=True)
+        for name in (
+            "hello-workspace", "execution-guard", "diagram-cell",
+            "project-inspector-package",
+        ):
+            shutil.copytree(
+                fixture_root / name,
+                destination / name,
+                ignore=shutil.ignore_patterns("__pycache__", "*.egg-info", "dist", "build"),
+            )
         self.write_notebook(
             "providers",
             [CellSpec("prompt", "Describe deterministic testing.", "pro00001")],

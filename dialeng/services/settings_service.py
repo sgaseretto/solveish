@@ -16,6 +16,7 @@ from dialeng.services.dialeng_config import (
     load_config,
     save_config,
 )
+from dialeng.extensions.context import capture_registration
 
 
 class SettingsError(ValueError):
@@ -48,6 +49,11 @@ class SettingDefinition:
     maximum: Optional[float] = None
     choices: tuple[str, ...] = ()
     env_var: Optional[str] = None
+    label: str = ""
+    description: str = ""
+    group: str = "Extension"
+    order: int = 50
+    secret: bool = False
 
     def public(self) -> dict[str, Any]:
         result = asdict(self)
@@ -94,6 +100,8 @@ _SETTINGS_LOCK = threading.RLock()
 
 def register_dynamic_setting(definition: SettingDefinition) -> None:
     """Register a setting rendered by an extension's settings section."""
+    if capture_registration("settings.definition", definition.path, definition):
+        return
     if definition.path not in {item.path for item in _CORE_DEFINITIONS}:
         _DYNAMIC_DEFINITIONS[definition.path] = definition
 
@@ -238,11 +246,17 @@ def settings_snapshot(
                 diagnostic = next(iter(exc.errors.values()), "Invalid environment value.")
             source = "environment"
             managed = True
+        public_configured = configured
+        public_effective = effective
+        if definition.secret:
+            public_configured = "" if not configured else "********"
+            public_effective = "" if not effective else "********"
         fields[path] = {
             **definition.public(),
-            "configured_value": configured,
-            "effective_value": effective,
-            "value": effective if managed else configured,
+            "configured_value": public_configured,
+            "effective_value": public_effective,
+            "value": public_effective if managed else public_configured,
+            "is_set": bool(configured),
             "source": source,
             "managed": managed,
             "diagnostic": diagnostic,
@@ -294,6 +308,6 @@ def commit_settings(
 
 def apply_modes_for(paths: Iterable[str], config: Optional[DialengConfig] = None) -> list[str]:
     definitions = get_setting_definitions(config)
-    order = {"live": 0, "new_kernel": 1, "reload": 2, "server_restart": 3}
+    order = {"live": 0, "new_kernel": 1, "extension_reload": 2, "reload": 2, "server_restart": 3}
     modes = {definitions[path].apply_mode for path in paths if path in definitions}
     return sorted(modes, key=lambda item: order.get(item, 99))

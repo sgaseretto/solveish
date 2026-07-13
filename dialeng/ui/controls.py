@@ -30,13 +30,22 @@ def TypeSelect(cell_id: str, current: str, nb_id: str):
         Select element that changes cell type on selection
     """
     shell_enabled = _shell_cells_enabled()
-    options = [
-        Option("code", value="code", selected=current == "code"),
-        Option("note", value="note", selected=current == "note"),
-        Option("prompt", value="prompt", selected=current == "prompt"),
-    ]
+    from dialeng.core.registry import registry
+    choices = registry.get_cell_type_choices()
     if shell_enabled:
-        options.append(Option("shell", value="shell", selected=current == "shell"))
+        choices.append(("shell", "Shell"))
+    known = {value for value, _label in choices}
+    options = [
+        Option(label, value=value, selected=current == value)
+        for value, label in choices
+    ]
+    if current not in known:
+        options.append(Option(
+            f"{current} (extension unavailable)",
+            value=current,
+            selected=True,
+            disabled=True,
+        ))
 
     return Select(
         *options,

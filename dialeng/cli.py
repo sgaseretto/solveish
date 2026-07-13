@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 # Subcommand names that should not be treated as path arguments
-_SUBCOMMANDS = {"init", "package", "skill"}
+_SUBCOMMANDS = {"init", "package", "skill", "extension"}
 
 
 def parse_args(argv=None):
@@ -87,6 +87,14 @@ phases:
     parser.add_argument("--init", nargs="?", const=True, default=False, metavar="PKG_NAME",
                         help="Initialize reuse CRAFT.ipynb on startup. "
                              "Optionally provide a package name (default: auto-detect or directory name)")
+    parser.add_argument(
+        "--extension",
+        dest="extension_paths",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Add a development extension path for this server session (repeatable)",
+    )
 
     args = parser.parse_args(argv)
     args.subcommand = None
@@ -148,6 +156,28 @@ def _parse_subcommand(argv):
     validate_skill = skill_sub.add_parser("validate", help="Validate discovered skills")
     validate_skill.add_argument("--path", default=".", help="Dialeng project directory")
 
+    # --- `dialeng extension ...` ---
+    extension_parser = subparsers.add_parser("extension", help="Create and manage Dialeng extensions")
+    extension_sub = extension_parser.add_subparsers(dest="extension_action")
+    extension_create = extension_sub.add_parser("create", help="Create a notebook-authored extension")
+    extension_create.add_argument("name")
+    extension_create.add_argument("--template", choices=("basic", "tool", "cell", "lifecycle", "provider", "package"), default="basic")
+    extension_create.add_argument("--id", dest="extension_id", default=None)
+    extension_create.add_argument("--path", default=".")
+    for action in ("list", "doctor"):
+        command = extension_sub.add_parser(action, help=f"{action.title()} project extensions")
+        command.add_argument("--path", default=".")
+    for action in ("inspect", "trust", "enable", "disable", "reload", "remove"):
+        command = extension_sub.add_parser(action, help=f"{action.title()} one extension")
+        command.add_argument("extension_id")
+        command.add_argument("--path", default=".")
+    for action in ("build", "validate", "test", "prepare", "package", "install", "migrate"):
+        command = extension_sub.add_parser(action, help=f"{action.title()} an extension source")
+        command.add_argument("extension_path")
+        command.add_argument("--path", default=".")
+        if action == "test":
+            command.add_argument("--browser", action="store_true")
+
     return parser.parse_args(argv)
 
 
@@ -197,8 +227,15 @@ def cli(argv=None):
     if args.subcommand == "skill":
         return _run_skill_command(args)
 
+    if args.subcommand == "extension":
+        return _run_extension_command(args)
+
     # Default: start the server
     root_dir = resolve_root_dir(args.path)
+    if args.extension_paths:
+        os.environ["DIALENG_EXTENSION_PATHS"] = os.pathsep.join(
+            str(Path(path).expanduser().resolve()) for path in args.extension_paths
+        )
 
     # --init: create CRAFT.ipynb before starting the server
     if args.init is not False:
@@ -292,3 +329,66 @@ def _run_skill_command(args):
         overwrite=args.skill_action == "update",
     )
     print(f"Installed {result['name']} at {result['path']}")
+
+
+def _run_extension_command(args):
+    """Execute extension authoring and static management commands."""
+    import json
+
+    from dialeng.extensions.discovery import discover_extensions
+    from dialeng.extensions.state import ExtensionStateStore
+    from dialeng.extensions.trust import ExtensionTrustStore
+    from dialeng.services.extension_project_service import ExtensionProjectService
+
+    if not args.extension_action:
+        print("Usage: dialeng extension {create,list,inspect,trust,enable,disable,reload,build,validate,test,prepare,package,install,remove,migrate,doctor}")
+        return
+    root = resolve_root_dir(args.path, respect_env=False)
+    service = ExtensionProjectService(root)
+    action = args.extension_action
+    if action == "create":
+        result = service.create(args.name, template=args.template, extension_id=args.extension_id)
+    elif action in {"build", "validate", "test", "prepare", "package", "install", "migrate"}:
+        source = Path(args.extension_path).resolve()
+        if action == "build":
+            result = service.build(source)
+        elif action == "validate":
+            result = service.validate(source, isolated=True)
+        elif action == "test":
+            result = service.test(source, browser=args.browser)
+        elif action == "package":
+            result = service.package(source)
+        elif action == "install":
+            result = service.install_local(source)
+        elif action == "migrate":
+            result = service.migrate_autorun(source)
+        else:
+            result = service.prepare(source)
+    else:
+        discovery = discover_extensions(root, user_root=root / ".no-user-extensions")
+        if action in {"list", "doctor"}:
+            result = discovery.public()
+            if action == "doctor":
+                result["ok"] = not result["diagnostics"]
+        else:
+            source = discovery.active.get(args.extension_id)
+            if source is None:
+                raise SystemExit(f"Unknown extension: {args.extension_id}")
+            if action == "inspect":
+                result = source.public()
+            elif action == "trust":
+                ExtensionTrustStore().trust(source, "version")
+                result = {"ok": True, "trusted": source.manifest.id}
+            elif action == "remove":
+                ExtensionStateStore().set_enabled(root, source.manifest.id, False)
+                result = service.remove_local(source.manifest.id)
+            elif action == "reload":
+                result = service.prepare(source.root)
+                result["message"] = "Validation passed. A running server reload must be requested from the Extension Manager."
+            else:
+                enabled = action == "enable"
+                ExtensionStateStore().set_enabled(root, source.manifest.id, enabled)
+                result = {"ok": True, "extension_id": source.manifest.id, "enabled": enabled}
+    print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    if isinstance(result, dict) and result.get("ok") is False:
+        raise SystemExit(1)

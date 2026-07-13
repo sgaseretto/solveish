@@ -28,7 +28,11 @@ Dialeng also ships a built-in `skill-creator`. Use the toolbar workflow or
 def _ensure_recovery_ignored(root: Path) -> bool:
     """Ignore private runtime context without ignoring installed project skills."""
     gitignore = root / ".gitignore"
-    entries = (".dialeng/recovery/", ".dialeng/skill-builds/")
+    entries = (
+        ".dialeng/recovery/",
+        ".dialeng/skill-builds/",
+        ".dialeng/extension-builds/",
+    )
     existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
     existing_lines = {line.strip() for line in existing.splitlines()}
     missing = [entry for entry in entries if entry not in existing_lines]

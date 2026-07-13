@@ -25,6 +25,7 @@ from dialeng.core.callbacks import (
     CancelCellException,
     CancelQueueException,
 )
+from dialeng.extensions.events import event_bus
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,14 @@ class ExecutionQueue:
 
         # Update cell state to QUEUED
         cell.state = CellState.QUEUED
+
+        asyncio.create_task(event_bus.emit("execution.queued", {
+            "notebook_id": notebook_id,
+            "cell_id": cell.id,
+            "cell_type": str(cell.cell_type),
+            "source": cell.source,
+            "priority": priority,
+        }))
 
         # Add to queue (with priority handling)
         queue = self._queues[notebook_id]
@@ -316,6 +325,29 @@ class ExecutionQueue:
                     # Run before_execution callbacks (can modify ctx.source)
                     await self.callback_handler.run_before_execution(ctx)
 
+                    event = await event_bus.emit("execution.before_start", {
+                        "notebook_id": notebook_id,
+                        "cell_id": cell.id,
+                        "cell_type": str(cell.cell_type),
+                        "source": ctx.source,
+                    })
+                    if event.blocked:
+                        reason = event.reason or "Execution blocked by extension"
+                        ctx.metadata["extension_block_reason"] = reason
+                        guard_output = CellOutput(
+                            output_type="error",
+                            ename="ExtensionGuard",
+                            evalue=reason,
+                            traceback=[reason],
+                        )
+                        cell.append_output(guard_output)
+                        await self._notify_output(notebook_id, cell, guard_output)
+                        raise CancelCellException(reason)
+                    transformed_source = event.payload.get("source", ctx.source)
+                    if not isinstance(transformed_source, str):
+                        raise TypeError("execution.before_start source transform must remain a string")
+                    ctx.source = transformed_source
+
                     # Check if callbacks want to skip kernel execution
                     if ctx.skip_execution:
                         logger.info(f"Skipping kernel execution for cell {cell.id}")
@@ -334,17 +366,37 @@ class ExecutionQueue:
                         filtered_output = await self.callback_handler.run_on_output(ctx, output)
 
                         if filtered_output is not None:
+                            output_event = await event_bus.emit("execution.output", {
+                                "notebook_id": notebook_id,
+                                "cell_id": cell.id,
+                                "output": filtered_output,
+                            })
+                            replacement = output_event.payload.get("output", filtered_output)
+                            if not isinstance(replacement, CellOutput):
+                                raise TypeError("execution.output transform must return a CellOutput")
+                            filtered_output = replacement
                             ctx.outputs.append(filtered_output)
                             # Notify legacy output callback
                             await self._notify_output(notebook_id, cell, filtered_output)
 
                     # Run after_execution callbacks
                     await self.callback_handler.run_after_execution(ctx, None)
+                    await event_bus.emit("execution.completed", {
+                        "notebook_id": notebook_id,
+                        "cell_id": cell.id,
+                        "status": str(cell.state),
+                        "output_count": len(ctx.outputs),
+                    })
 
                 except CancelCellException:
                     # Cell was cancelled by a callback
                     cell.state = CellState.IDLE
                     logger.info(f"Cell {cell.id} cancelled by callback")
+                    await event_bus.emit("execution.cancelled", {
+                        "notebook_id": notebook_id,
+                        "cell_id": cell.id,
+                        "reason": ctx.metadata.get("extension_block_reason", "cancelled"),
+                    })
 
                 except CancelQueueException:
                     # Queue was cancelled by a callback
@@ -356,6 +408,12 @@ class ExecutionQueue:
                     # Execution failed
                     logger.error(f"Cell {cell.id} execution failed: {e}")
                     await self.callback_handler.run_after_execution(ctx, e)
+                    await event_bus.emit("execution.completed", {
+                        "notebook_id": notebook_id,
+                        "cell_id": cell.id,
+                        "status": "error",
+                        "error": f"{type(e).__name__}: {e}",
+                    })
 
                 finally:
                     # Clear current cell

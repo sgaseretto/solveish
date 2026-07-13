@@ -61,6 +61,7 @@ from dialeng.services.settings_service import (
     SettingsValidationError,
     apply_modes_for,
     commit_settings,
+    get_setting_definitions,
     settings_snapshot,
 )
 from dialeng.services.shell_service import (
@@ -95,6 +96,7 @@ from dialeng.services.skill_service import set_skill_root
 from dialeng.routes import (
     register_diagnostics_routes,
     register_e2e_routes,
+    register_extension_routes,
     register_skill_routes,
     register_websocket_routes,
 )
@@ -107,13 +109,16 @@ from dialeng.ui import (
     ModelSelect, WorkspacePage,
 )
 from dialeng.ui.file_editor import FileEditorPage, FileEditorPane
+from dialeng.ui.settings import SettingsSidebar
 from dialeng.ui.mime import render_mime_bundle
 from dialeng.logging_config import build_log_config
 
 # Extension system
-from dialeng.core.extensions import load_extensions
+from dialeng.core.extensions import load_extensions, get_builtin_contribution_store
 from dialeng.core.registry import registry
 from dialeng.services.autorun_service import process_autorun
+from dialeng.extensions.manager import ExtensionManager
+from dialeng.extensions.events import event_bus
 
 logger = logging.getLogger(__name__)
 
@@ -385,6 +390,17 @@ deleted_notebooks: Dict[str, Dict[str, Any]] = {}
 NOTEBOOKS_DIR = Path(os.environ.get("DIALENG_NOTEBOOKS_DIR", "notebooks"))
 NOTEBOOKS_DIR.mkdir(exist_ok=True)
 file_editor_service = FileEditorService(NOTEBOOKS_DIR)
+extension_manager = ExtensionManager(
+    NOTEBOOKS_DIR,
+    contribution_store=get_builtin_contribution_store(),
+    development_paths=tuple(
+        Path(path).expanduser().resolve()
+        for path in os.environ.get("DIALENG_EXTENSION_PATHS", "").split(os.pathsep)
+        if path
+    ),
+)
+from dialeng.services.autorun_service import set_autorun_contribution_store
+set_autorun_contribution_store(extension_manager.store)
 
 def set_root_dir(root: Path):
     """Set the notebooks root directory. Called by CLI before main().
@@ -399,6 +415,7 @@ def set_root_dir(root: Path):
     NOTEBOOKS_DIR = root
     NOTEBOOKS_DIR.mkdir(exist_ok=True)
     file_editor_service.set_root(NOTEBOOKS_DIR)
+    extension_manager.set_project_root(NOTEBOOKS_DIR)
 
     # Reload config from the project directory
     DIALENG_CONFIG = load_config(config_path=NOTEBOOKS_DIR / "dialeng_config.json", force_reload=True)
@@ -669,6 +686,10 @@ async def _teardown_notebook_runtime(
             logger.exception("Failed to cancel execution queue during notebook teardown (notebook=%s)", nb_id)
     if kernel_service.has_kernel(nb_id):
         await kernel_service.shutdown_async(nb_id)
+        await event_bus.emit("kernel.stopped", {
+            "notebook_id": nb_id,
+            "reason": reason,
+        })
     lifecycle = LifecycleState.DELETED if "delete" in reason else LifecycleState.STOPPED
     runtime_registry.clear_runtime(nb_id, lifecycle=lifecycle)
     outline_cache.invalidate_notebook(nb_id)
@@ -1588,6 +1609,17 @@ async def broadcast_all_json(data: dict):
     await broadcast_manager.broadcast_all_json(data)
 
 
+async def _extension_notify(message: str, *, tone: str = "info", notebook_id: str = "") -> None:
+    payload = {"type": "status_message", "message": message, "tone": tone}
+    if notebook_id:
+        await broadcast_json(notebook_id, payload)
+    else:
+        await broadcast_all_json(payload)
+
+
+extension_manager.context_services["notify"] = _extension_notify
+
+
 def _ordered_cell_ids(nb) -> list[str]:
     """Return the notebook's canonical cell order."""
     return [cell.id for cell in nb.cells]
@@ -1724,6 +1756,40 @@ def _prompt_output_payload(nb_id: str, cell) -> dict:
         "notebook_revision": _get_notebook_revision(nb_id),
         "time_run": cell.time_run,
     }
+
+
+async def _extension_change_cell_type(nb_id: str, cell_id: str, cell_type: str) -> dict:
+    """Public extension mutation adapter with normal revisions and broadcasts."""
+    allowed = {value for value, _label in registry.get_cell_type_choices()}
+    if cell_type not in allowed:
+        raise ValueError(f"Unknown cell type: {cell_type}")
+    async with runtime_registry.mutation(nb_id):
+        nb = get_notebook(nb_id)
+        cell = nb.get_cell(cell_id)
+        if cell is None:
+            raise KeyError(f"Unknown cell: {cell_id}")
+        old_type = str(cell.cell_type)
+        if old_type == cell_type:
+            return {"ok": True, "changed": False, "cell_id": cell_id, "cell_type": cell_type}
+        cell.cell_type = cell_type
+        cell.clear_outputs()
+        cell.version += 1
+        cell.last_modified = datetime.now()
+        nb.modified = True
+        _touch_notebook_revision(nb_id, "extension_cell_type_change")
+        await event_bus.emit("cell.type_changed", {
+            "notebook_id": nb_id,
+            "cell_id": cell_id,
+            "old_type": old_type,
+            "new_type": cell_type,
+            "source": "extension_api",
+        })
+        await broadcast_json(nb_id, _cell_type_payload(nb, nb_id, cell_id))
+        await _mark_outline_dirty(nb_id, reason="extension_cell_type_change")
+        return {"ok": True, "changed": True, "cell_id": cell_id, "cell_type": cell_type}
+
+
+extension_manager.context_services["change_cell_type"] = _extension_change_cell_type
 
 
 async def broadcast_queue_state(nb_id: str):
@@ -1947,6 +2013,7 @@ async def _watch_project_files() -> None:
             except ValueError:
                 continue
         if affected:
+            await event_bus.emit("project.files_changed", {"paths": sorted(affected)})
             await broadcast_all_json({
                 "type": "file_explorer_changed",
                 "paths": sorted(affected),
@@ -1960,11 +2027,17 @@ async def _autorun_startup():
     # Without this, DIALENG_CONFIG has DEFAULT_CONFIG (no extension settings).
     global DIALENG_CONFIG, event_loop_monitor_task, remote_service_init_task, project_file_watch_task
     performance_monitor.record_event("startup.begin")
+    await event_bus.emit("app.starting", {"project_root": str(NOTEBOOKS_DIR)})
     with performance_monitor.measure("startup.config"):
         DIALENG_CONFIG = load_config(config_path=NOTEBOOKS_DIR / "dialeng_config.json", force_reload=True)
         set_skill_root(NOTEBOOKS_DIR)
     with performance_monitor.measure("startup.provider_inventory.local"):
         _load_initial_llm_runtime()
+    with performance_monitor.measure("startup.extensions"):
+        extension_manager.refresh()
+        extension_errors = await extension_manager.activate_enabled()
+        for extension_id, error in extension_errors.items():
+            logger.error("Could not restore extension %s: %s", extension_id, error)
     if remote_service_init_task is None or remote_service_init_task.done():
         remote_service_init_task = asyncio.create_task(
             _initialize_remote_services(),
@@ -1983,11 +2056,14 @@ async def _autorun_startup():
             name="dialeng-project-file-watch",
         )
     performance_monitor.record_event("startup.complete")
+    await event_bus.emit("project.opened", {"project_root": str(NOTEBOOKS_DIR)})
+    await event_bus.emit("app.ready", {"project_root": str(NOTEBOOKS_DIR)})
 
 
 async def _app_shutdown():
     """Release notebook kernels and background tasks on server shutdown."""
     global event_loop_monitor_task, remote_service_init_task, project_file_watch_task
+    await event_bus.emit("app.stopping", {"project_root": str(NOTEBOOKS_DIR)})
     if remote_service_init_task and not remote_service_init_task.done():
         remote_service_init_task.cancel()
         await asyncio.gather(remote_service_init_task, return_exceptions=True)
@@ -2006,6 +2082,7 @@ async def _app_shutdown():
     if _settings_activation_tasks:
         await asyncio.gather(*tuple(_settings_activation_tasks), return_exceptions=True)
         _settings_activation_tasks.clear()
+    await extension_manager.shutdown()
     await autosave_manager.flush_all(timeout_seconds=3.0)
     await _shutdown_server_runtime()
 
@@ -2043,6 +2120,27 @@ register_skill_routes(
     rt,
     project_root=lambda: NOTEBOOKS_DIR,
     config_provider=lambda: DIALENG_CONFIG,
+)
+
+
+def _extension_command_available(expression: str, notebook_id: str) -> bool:
+    """Evaluate the intentionally small public command-availability grammar."""
+    predicates = {
+        "always": True,
+        "workspace": True,
+        "notebook.open": notebook_id in notebooks and notebook_id not in deleted_notebooks,
+        "kernel.optional": True,
+        "kernel.required": kernel_service.kernel_is_alive(notebook_id),
+    }
+    terms = [term.strip() for term in str(expression or "always").split("&&")]
+    return bool(terms) and all(predicates.get(term, False) for term in terms)
+
+
+register_extension_routes(
+    rt,
+    manager_provider=lambda: extension_manager,
+    broadcast_all_json=broadcast_all_json,
+    command_available=_extension_command_available,
 )
 
 if os.environ.get("DIALENG_E2E") == "1":
@@ -2239,6 +2337,16 @@ async def post(path: str = "", active_notebook_id: str = "", active_file_relpath
     if target.exists() and target.is_file():
         if target.suffix == ".ipynb":
             nb_id = _nb_id_from_path(target)
+            before_delete = await event_bus.emit("notebook.before_delete", {
+                "notebook_id": nb_id,
+                "path": path,
+            })
+            if before_delete.blocked:
+                return JSONResponse({
+                    "ok": False,
+                    "type": "extension_guard",
+                    "message": before_delete.reason or "Notebook deletion blocked by extension",
+                }, status_code=409)
             cancelled_prompts = _cancel_active_prompts(nb_id)
             if cancelled_prompts:
                 logger.info(
@@ -2263,6 +2371,10 @@ async def post(path: str = "", active_notebook_id: str = "", active_file_relpath
                         "deleted_at": datetime.now(timezone.utc).isoformat(),
                     }
                     deleted_nb_id = nb_id
+                    await event_bus.emit("notebook.deleted", {
+                        "notebook_id": nb_id,
+                        "path": path,
+                    })
                     await broadcast_json(nb_id, {
                         "type": "notebook_deleted",
                         "notebook_id": nb_id,
@@ -2400,6 +2512,10 @@ def post(path: str = "", client_id: str = ""):
 async def _render_notebook_page(nb_id: str):
     """Render a notebook page by ID (shared by /dialeng/{nb_id} and /dialeng/?name=...)."""
     nb = get_notebook(nb_id)
+    await event_bus.emit("notebook.opened", {
+        "notebook_id": nb_id,
+        "path": str(nb.path) if nb.path else "",
+    })
 
     # Determine notebook path for CRAFT discovery: use nb.path, or find on disk
     nb_path = nb.path
@@ -2454,6 +2570,16 @@ async def get(nb_id: str):
 async def post(nb_id: str, overwrite: bool = False):
     if _active_prompt_cells(nb_id):
         return _prompt_operation_conflict(nb_id, "save")
+    before_save = await event_bus.emit("notebook.before_save", {
+        "notebook_id": nb_id,
+        "overwrite": overwrite,
+    })
+    if before_save.blocked:
+        return JSONResponse({
+            "status": "blocked",
+            "type": "extension_guard",
+            "message": before_save.reason or "Notebook save blocked by extension",
+        }, status_code=409)
     try:
         save_notebook(nb_id, overwrite_external=overwrite)
     except ExternalFileChangedError as exc:
@@ -2465,6 +2591,7 @@ async def post(nb_id: str, overwrite: bool = False):
             "overwrite_url": f"/dialeng/{nb_id}/save?overwrite=true",
         }, status_code=409)
     await broadcast_json(nb_id, {"type": "notebook_saved"})
+    await event_bus.emit("notebook.saved", {"notebook_id": nb_id, "overwrite": overwrite})
     return Div("Saved", cls="status success")
 
 
@@ -2894,6 +3021,12 @@ async def _run_notebook_kernel_setup(
             nb_id, source, generation, kernel_type, runtime_id, (time.perf_counter() - total_start) * 1000,
         )
         await broadcast_kernel_status(nb_id, "connected")
+        await event_bus.emit("kernel.ready", {
+            "notebook_id": nb_id,
+            "kernel_type": kernel_type,
+            "runtime_id": runtime_id,
+            "source": source,
+        })
     except asyncio.CancelledError:
         await _clear_kernel_setup_state(nb_id, expected_generation=generation)
         log_operation(
@@ -2989,6 +3122,10 @@ async def post(nb_id: str, kernel_type: str):
             return Div("Not authenticated with Google. Click 'Connect Colab' first.", cls="status error")
 
     logger.info("Switching kernel type (notebook=%s, kernel_type=%s)", nb_id, kernel_type)
+    await event_bus.emit("kernel.attaching", {
+        "notebook_id": nb_id,
+        "kernel_type": kernel_type,
+    })
     await _invalidate_kernel_background_work(nb_id, reason=f"kernel_type:{kernel_type}")
     nb.kernel_type = kernel_type
     if kernel_type == "colab" and not getattr(nb, "colab_runtime_type", ""):
@@ -3426,6 +3563,12 @@ def get():
     ))
 
 
+@rt("/settings/view")
+def get():
+    """Return the current server-rendered settings surface for targeted refresh."""
+    return SettingsSidebar(DIALENG_CONFIG)
+
+
 async def _broadcast_settings_changed(snapshot: dict[str, Any]) -> None:
     await broadcast_all_json({"type": "settings_changed", **snapshot})
 
@@ -3503,11 +3646,30 @@ async def _activate_settings(revision: str, changed_paths: list[str]) -> None:
                 await broadcast_all_kernel_snapshots()
             await broadcast_all_llm_statuses()
 
+            reload_paths = {
+                path for path in changed_paths
+                if get_setting_definitions(DIALENG_CONFIG).get(path)
+                and get_setting_definitions(DIALENG_CONFIG)[path].apply_mode == "extension_reload"
+            }
+            if reload_paths:
+                for extension_id, owner in extension_manager.store.owners.items():
+                    owned_paths = {
+                        contribution.value.path
+                        for contribution in owner.contributions
+                        if contribution.kind == "settings.definition"
+                    }
+                    if extension_id in extension_manager.active and owned_paths & reload_paths:
+                        await extension_manager.activate(extension_id, require_trust=True)
+
             _settings_activation = {
                 "status": "ready",
                 "revision": revision,
                 "message": "Settings are active.",
             }
+            await event_bus.emit("settings.activation_completed", {
+                "revision": revision,
+                "changed_paths": changed_paths,
+            })
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -3518,6 +3680,11 @@ async def _activate_settings(revision: str, changed_paths: list[str]) -> None:
                 "message": "Settings were saved, but runtime activation failed.",
                 "error": str(exc),
             }
+            await event_bus.emit("settings.activation_failed", {
+                "revision": revision,
+                "changed_paths": changed_paths,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
         finally:
             if settings_snapshot(config_path)["revision"] == revision:
                 await _broadcast_settings_changed(settings_snapshot(
@@ -3571,6 +3738,11 @@ async def post(request):
             snapshot["changed_paths"] = changed_paths
             snapshot["apply_modes"] = modes
             await _broadcast_settings_changed(snapshot)
+            await event_bus.emit("settings.changed", {
+                "revision": snapshot["revision"],
+                "changed_paths": changed_paths,
+                "apply_modes": modes,
+            })
             task = asyncio.create_task(
                 _activate_settings(snapshot["revision"], changed_paths),
                 name=f"settings-activation:{snapshot['revision'][:8]}",
@@ -3618,6 +3790,12 @@ async def post(
         pos = len(nb.cells)
     new_cell = notebook_mutation_service.add(nb, position=pos, cell_type=type)
     _touch_structure_revision(nb_id, "cell_add")
+    await event_bus.emit("cell.added", {
+        "notebook_id": nb_id,
+        "cell_id": new_cell.id,
+        "cell_type": str(new_cell.cell_type),
+        "position": nb.cells.index(new_cell),
+    })
 
     # FOUST fix (FOUST = Flash of Unstyled Text — Monaco renders code white first,
     # then tokenizes async via web worker; destroying/recreating the editor causes a
@@ -3641,6 +3819,17 @@ async def delete(
 ):
     nb = get_notebook(nb_id)
 
+    before_delete = await event_bus.emit("cell.before_delete", {
+        "notebook_id": nb_id,
+        "cell_id": cid,
+    })
+    if before_delete.blocked:
+        return JSONResponse({
+            "status": "blocked",
+            "type": "extension_guard",
+            "message": before_delete.reason or "Cell deletion blocked by extension",
+        }, status_code=409)
+
     # Remove from execution queue if queued
     queue = get_execution_queue(nb_id)
     queue.cancel_queued(nb_id, cid)
@@ -3656,6 +3845,11 @@ async def delete(
     # The client removes just this cell + its adjacent add-row from DOM.
     # Other cells' Monaco editors are completely untouched.
     _touch_structure_revision(nb_id, "cell_delete")
+    await event_bus.emit("cell.deleted", {
+        "notebook_id": nb_id,
+        "cell_id": cid,
+        "cell_type": str(removed.cell_type),
+    })
     await broadcast_json(nb_id, _cell_delete_payload(nb, nb_id, cid))
     await _mark_outline_dirty(nb_id, reason="cell_delete")
 
@@ -3852,6 +4046,12 @@ async def post(
             c.last_modified = datetime.now()
             nb.modified = True
             _touch_notebook_revision(nb_id, "cell_type_change")
+            await event_bus.emit("cell.type_changed", {
+                "notebook_id": nb_id,
+                "cell_id": cid,
+                "old_type": current_type,
+                "new_type": cell_type,
+            })
 
             # Type changes require a full cell replacement, but the event must
             # still participate in the notebook revision stream. Unrevisioned
@@ -3882,6 +4082,12 @@ async def post(
     # Broadcast the backend-authoritative cell order so every client reorders
     # the existing DOM nodes from the same source of truth.
     _touch_structure_revision(nb_id, "cell_move")
+    await event_bus.emit("cell.moved", {
+        "notebook_id": nb_id,
+        "cell_id": cid,
+        "direction": direction,
+        "position": next((i for i, cell in enumerate(nb.cells) if cell.id == cid), -1),
+    })
     await broadcast_json(nb_id, _cell_move_payload(nb, nb_id, cid))
     await _mark_outline_dirty(nb_id, reason="cell_move")
 
@@ -3902,6 +4108,12 @@ async def post(
     new_cell = notebook_mutation_service.duplicate(nb, cid)
     if new_cell is not None:
         _touch_structure_revision(nb_id, "cell_duplicate")
+        await event_bus.emit("cell.duplicated", {
+            "notebook_id": nb_id,
+            "source_cell_id": cid,
+            "cell_id": new_cell.id,
+            "cell_type": str(new_cell.cell_type),
+        })
         await broadcast_json(nb_id, _cell_add_payload(nb, nb_id, new_cell.id))
         await _mark_outline_dirty(nb_id, reason="cell_duplicate")
     return ""
@@ -3943,6 +4155,12 @@ async def post(
     result = notebook_mutation_service.merge_below(nb, cid)
     if result is not None:
         _touch_structure_revision(nb_id, "cell_merge_below")
+        await event_bus.emit("cell.merged", {
+            "notebook_id": nb_id,
+            "cell_id": result.target.id,
+            "removed_cell_id": result.removed.id,
+            "cell_type": str(result.target.cell_type),
+        })
         await broadcast_json(nb_id, _cell_delete_payload(nb, nb_id, result.removed.id))
         cell_type = str(getattr(result.target, "cell_type", ""))
         if cell_type in {"code", "shell"}:
@@ -4199,6 +4417,7 @@ async def post(nb_id: str, cid: str, source: str = None, expected_version: int =
             "status": "running",
         }
         failure_info: Optional[dict[str, Any]] = None
+        prompt_source = c.source
 
         if nb.dialog_mode != "mock":
             selected_provider = CREDENTIAL_INVENTORY.get(nb.llm_provider)
@@ -4234,10 +4453,48 @@ async def post(nb_id: str, cid: str, source: str = None, expected_version: int =
                 elif prev.cell_type == "prompt" and prev.output:
                     context_parts.append(f"User: {prev.source}\n\nAssistant: {prev.output}")
             context = "\n\n".join(context_parts)
-            stream_func = mock_llm_stream(c.source, context, c.use_thinking)
+            context_event = await event_bus.emit("prompt.context_built", {
+                "notebook_id": nb_id,
+                "cell_id": cid,
+                "prompt": prompt_source,
+                "context": context,
+                "provider": "mock",
+                "model": nb.model,
+            })
+            request_event = await event_bus.emit("prompt.before_request", context_event.payload)
+            if request_event.blocked:
+                prompt_cancel_events.pop(cancel_key, None)
+                return JSONResponse({
+                    "status": "blocked",
+                    "type": "extension_guard",
+                    "message": request_event.reason or "Prompt blocked by extension",
+                }, status_code=409)
+            prompt_source = str(request_event.payload.get("prompt", prompt_source))
+            context = str(request_event.payload.get("context", context))
+            stream_func = mock_llm_stream(prompt_source, context, c.use_thinking)
         else:
             # Use real LLM with dialoghelper context building
             context_messages = build_context_messages(nb, cid)
+            context_event = await event_bus.emit("prompt.context_built", {
+                "notebook_id": nb_id,
+                "cell_id": cid,
+                "prompt": prompt_source,
+                "context_messages": context_messages,
+                "provider": nb.llm_provider,
+                "model": nb.model,
+            })
+            request_event = await event_bus.emit("prompt.before_request", context_event.payload)
+            if request_event.blocked:
+                prompt_cancel_events.pop(cancel_key, None)
+                return JSONResponse({
+                    "status": "blocked",
+                    "type": "extension_guard",
+                    "message": request_event.reason or "Prompt blocked by extension",
+                }, status_code=409)
+            prompt_source = str(request_event.payload.get("prompt", prompt_source))
+            context_messages = request_event.payload.get("context_messages", context_messages)
+            if not isinstance(context_messages, list):
+                raise TypeError("prompt context transform must return context_messages as a list")
 
             # Check if prompt contains special syntax ($`var` or &`func`)
             from dialeng.services.prompt_parser import has_special_syntax
@@ -4251,11 +4508,11 @@ async def post(nb_id: str, cid: str, source: str = None, expected_version: int =
                 from dialeng.services.skill_service import get_skill_service
                 codex_skills_available = bool(get_skill_service().model_skills)
 
-            if has_special_syntax(c.source) or include_builtins or codex_skills_available:
+            if has_special_syntax(prompt_source) or include_builtins or codex_skills_available:
                 # Use tool-enabled streaming
                 kernel = kernel_service.get_kernel(nb_id)
                 stream_func = llm_service.stream_response_with_tools(
-                    c.source, context_messages, nb.dialog_mode, nb.model, c.use_thinking,
+                    prompt_source, context_messages, nb.dialog_mode, nb.model, c.use_thinking,
                     kernel=kernel, notebook_id=nb_id, max_steps=max_steps,
                     include_builtins=include_builtins,
                     provider_id=nb.llm_provider, cancel_event=cancel_event,
@@ -4263,7 +4520,7 @@ async def post(nb_id: str, cid: str, source: str = None, expected_version: int =
             else:
                 # Use regular streaming (no tools)
                 stream_func = llm_service.stream_response(
-                    c.source, context_messages, nb.dialog_mode, nb.model, c.use_thinking,
+                    prompt_source, context_messages, nb.dialog_mode, nb.model, c.use_thinking,
                     provider_id=nb.llm_provider, cancel_event=cancel_event,
                 )
 
@@ -4296,6 +4553,11 @@ async def post(nb_id: str, cid: str, source: str = None, expected_version: int =
         try:
             await broadcast_json(nb_id, {"type": "prompt_stream_start", "cell_id": cid})
             async for item in stream_func:
+                await event_bus.emit("prompt.stream_event", {
+                    "notebook_id": nb_id,
+                    "cell_id": cid,
+                    "event": item,
+                })
                 if (
                     item.get("type") in {"chunk", "thinking", "tool_call"}
                     and execution_diagnostics["ttft_ms"] is None
@@ -4565,6 +4827,22 @@ async def post(nb_id: str, cid: str, source: str = None, expected_version: int =
                         "Prompt terminal broadcast failed (notebook=%s, cell=%s, event=%s)",
                         nb_id, cid, payload["type"],
                     )
+            prompt_event = {
+                "notebook_id": nb_id,
+                "cell_id": cid,
+                "provider": nb.llm_provider,
+                "model": nb.model,
+                "status": terminal_status,
+                "duration_ms": execution_diagnostics.get("duration_ms"),
+                "tool_steps": execution_diagnostics.get("tool_steps", 0),
+            }
+            if terminal_status == "completed":
+                await event_bus.emit("prompt.completed", prompt_event)
+            elif terminal_status == "error":
+                await event_bus.emit("prompt.failed", {
+                    **prompt_event,
+                    "error": (failure_info or {}).get("message", "Prompt failed"),
+                })
 
     # Selection and scroll position belong to the initiating browser. Prompt
     # output/header updates already arrive through granular WebSocket events, so
@@ -4576,6 +4854,7 @@ async def post(nb_id: str, cid: str, source: str = None, expected_version: int =
 @serialized_notebook_mutation
 async def post(nb_id: str):
     """Restart the kernel for a specific notebook."""
+    await event_bus.emit("kernel.restarting", {"notebook_id": nb_id})
     await broadcast_kernel_status(nb_id, "restarting")
     logger.info("Kernel restart requested for notebook %s", nb_id)
     await _invalidate_kernel_background_work(nb_id, reason="kernel_restart")

@@ -29,6 +29,8 @@ Read the documents in numerical order for the best understanding of the system:
 | 22 | [22_browser_e2e_testing.md](22_browser_e2e_testing.md) | Real-server Playwright fixtures, deterministic LLM testing, fault injection, CI, and failure artifacts |
 | 23 | [23_settings_architecture.md](23_settings_architecture.md) | Typed settings, revisions, atomic persistence, runtime activation, live UI updates, and cross-tab conflict handling |
 | 24 | [24_notebook_skill_creation.md](24_notebook_skill_creation.md) | Packaged skills, notebook extraction, staged LLM refinement, preview hashes, and atomic installation |
+| 25 | [25_extension_platform.md](25_extension_platform.md) | Manifest discovery, trust, transactional ownership, public APIs, browser surfaces, Studio, and packages |
+| 26 | [26_extension_verification.md](26_extension_verification.md) | Extension unit, stress, isolated, Playwright, package, security, and manual acceptance baseline |
 
 ## Purpose
 
@@ -87,6 +89,9 @@ These documents are intended for developers who want to:
 | Run or debug browser E2E tests | [22_browser_e2e_testing.md](22_browser_e2e_testing.md) |
 | Understand or extend settings | [23_settings_architecture.md](23_settings_architecture.md) |
 | Create or extend notebook-derived skills | [24_notebook_skill_creation.md](24_notebook_skill_creation.md) |
+| Build a supported extension | [Extension guide](../guides/extensions.md) → [25_extension_platform.md](25_extension_platform.md) |
+| Migrate an AUTORUN extension | [AUTORUN migration guide](../guides/migrating_autorun_extensions.md) |
+| Verify extension changes | [26_extension_verification.md](26_extension_verification.md) |
 
 ## Related Documentation
 

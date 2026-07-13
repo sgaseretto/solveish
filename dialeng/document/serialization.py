@@ -78,6 +78,16 @@ def _cell_to_jupyter(cell: Cell) -> dict:
             }
         }
 
+    # Preserve extension cell data even when its serializer is unavailable.
+    if str(cell.cell_type) not in {"code", "note", "prompt", "raw"}:
+        metadata = dict(getattr(cell, "raw_metadata", {}) or {})
+        metadata.update({"id": cell.id, "dialeng_cell_type": str(cell.cell_type)})
+        return {
+            "cell_type": getattr(cell, "raw_jupyter_cell_type", "") or "raw",
+            "source": cell.source,
+            "metadata": metadata,
+        }
+
     # Fallback
     return {
         'cell_type': 'code',
@@ -102,8 +112,12 @@ def _jupyter_to_cell(jcell: dict, index: int = 0) -> Cell:
     if isinstance(source, list):
         source = ''.join(source)
 
-    # Determine cell type
-    if cell_type_str == 'raw':
+    # Determine cell type. Namespaced metadata preserves custom types even when
+    # their extension is disabled, so a save cannot silently convert the cell.
+    extension_cell_type = metadata.get('dialeng_cell_type')
+    if isinstance(extension_cell_type, str) and extension_cell_type:
+        cell_type = extension_cell_type
+    elif cell_type_str == 'raw':
         cell_type = CellType.RAW
     elif cell_type_str == 'code':
         cell_type = CellType.CODE
@@ -180,6 +194,8 @@ def _jupyter_to_cell(jcell: dict, index: int = 0) -> Cell:
         heading_collapsed=metadata.get('heading_collapsed', False),
         bookmark=metadata.get('bookmark', 0),
         llm_execution=dict(metadata.get('dialeng_llm_execution') or {}),
+        raw_metadata=dict(metadata),
+        raw_jupyter_cell_type=cell_type_str,
     )
 
     return cell

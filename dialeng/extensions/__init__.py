@@ -1,21 +1,33 @@
+"""Stable public facade for owner-aware Dialeng extensions.
+
+Third-party extensions expose ``setup(api, ctx)`` through an ``extension.toml``
+manifest. Imports stay lazy here because core registries capture contributions
+without depending on the lifecycle manager during application bootstrap.
 """
-Dialeng Extensions
 
-This directory contains extension files that are automatically loaded on startup.
+__all__ = [
+    "EXTENSION_API_VERSION",
+    "ExtensionAPI",
+    "ExtensionContext",
+    "ExtensionManager",
+    "ExtensionManifest",
+    "ExtensionSource",
+]
 
-Each .py file (except those starting with _) is imported as a module.
-Extensions use decorators from dialeng.core.registry and core.dispatch to register:
-- New cell types
-- Execution callbacks
-- Custom services
 
-Example extension file:
-    # extensions/my_extension.py
-    from dialeng.core.registry import register_callback
-    from dialeng.core.callbacks import Callback
-
-    @register_callback
-    class MyCallback(Callback):
-        def before_execution(self, ctx):
-            print(f"Executing: {ctx.cell.id}")
-"""
+def __getattr__(name):
+    """Load the public facade lazily so core registry imports stay acyclic."""
+    if name in {"ExtensionAPI", "ExtensionContext"}:
+        from .api import ExtensionAPI, ExtensionContext
+        return {"ExtensionAPI": ExtensionAPI, "ExtensionContext": ExtensionContext}[name]
+    if name == "ExtensionManager":
+        from .manager import ExtensionManager
+        return ExtensionManager
+    if name in {"EXTENSION_API_VERSION", "ExtensionManifest", "ExtensionSource"}:
+        from .manifest import EXTENSION_API_VERSION, ExtensionManifest, ExtensionSource
+        return {
+            "EXTENSION_API_VERSION": EXTENSION_API_VERSION,
+            "ExtensionManifest": ExtensionManifest,
+            "ExtensionSource": ExtensionSource,
+        }[name]
+    raise AttributeError(name)

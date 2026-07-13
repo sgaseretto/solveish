@@ -2726,6 +2726,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     setupPreviewEditing();
     if (window.AUTOSAVE_ENABLED) checkNotebookRecovery();
+    if (document.getElementById('extension-manager-btn')) refreshExtensionManager();
 });
 
 document.addEventListener('visibilitychange', () => {
@@ -3272,7 +3273,7 @@ const settingsState = {
 
 function getSettingControl(path) {
     const row = document.querySelector(`.setting-row[data-setting-path="${CSS.escape(path)}"]`);
-    return row?.querySelector('input[type="checkbox"], select, input[type="number"], input[type="range"], input[type="text"]') || null;
+    return row?.querySelector('input[type="checkbox"], select, input[type="number"], input[type="range"], input[type="text"], input[type="password"]') || null;
 }
 
 function readSettingControl(control) {
@@ -3361,8 +3362,9 @@ function applySettingsSnapshot(snapshot, {preserveDirty = false} = {}) {
     Object.entries(snapshot.fields).forEach(([path, field]) => {
         const control = getSettingControl(path);
         if (!control) return;
-        if (!(preserveDirty && previousDirty.has(path))) writeSettingControl(control, field.value);
-        settingsState.baseline.set(path, field.value);
+        const baselineValue = field.secret ? '' : field.value;
+        if (!(preserveDirty && previousDirty.has(path))) writeSettingControl(control, baselineValue);
+        settingsState.baseline.set(path, baselineValue);
         control.disabled = Boolean(field.managed);
         const source = document.querySelector(`[data-setting-source="${CSS.escape(path)}"]`);
         if (source) {
@@ -3840,6 +3842,684 @@ function armStatusToastDismiss(target) {
 function showKernelStatusMessage(message, tone = 'warning', persistMs = 5000) {
     window.DialengNotifications.show(message, tone, persistMs);
 }
+
+// ==================== Extension Manager ====================
+const extensionClientState = {
+    snapshot: null,
+    loadedAssets: new Map(),
+    studioOpen: false,
+    cleanupHooks: new Map(),
+    toolRenderers: new Map(),
+    settingsSignature: '',
+    surfaceGeneration: 0,
+};
+
+function setExtensionManagerStatus(message = '', tone = '') {
+    const status = document.getElementById('extension-manager-status');
+    if (!status) return;
+    status.textContent = message;
+    status.className = `extension-manager-status${tone ? ` ${tone}` : ''}`;
+}
+
+function extensionButton(label, action, extensionId, {primary = false} = {}) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `btn btn-sm${primary ? ' btn-primary' : ''}`;
+    button.textContent = label;
+    button.addEventListener('click', () => mutateExtension(extensionId, action));
+    return button;
+}
+
+function extensionTrustButton(label, extensionId, mode, {primary = false} = {}) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `btn btn-sm${primary ? ' btn-primary' : ''}`;
+    button.textContent = label;
+    button.addEventListener('click', () => mutateExtension(extensionId, 'trust', mode));
+    return button;
+}
+
+function extensionStudioButton(label, action, extensionId) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-sm';
+    button.textContent = label;
+    button.addEventListener('click', () => runExtensionStudioAction(extensionId, action));
+    return button;
+}
+
+function renderExtensionManager(snapshot) {
+    const previousExtensions = new Map(
+        (extensionClientState.snapshot?.extensions || [])
+            .filter(item => item.state === 'active')
+            .map(item => [item.id, item]),
+    );
+    const nextExtensions = new Map(
+        (snapshot.extensions || [])
+            .filter(item => item.state === 'active')
+            .map(item => [item.id, item]),
+    );
+    previousExtensions.forEach((previous, extensionId) => {
+        const next = nextExtensions.get(extensionId);
+        if (!next || next.source_hash !== previous.source_hash) {
+            cleanupExtensionClient(extensionId);
+        }
+    });
+    extensionClientState.snapshot = snapshot;
+    const list = document.getElementById('extension-manager-list');
+    const diagnostics = document.getElementById('extension-manager-diagnostics');
+    if (!list) return;
+    list.replaceChildren();
+    const extensions = snapshot.extensions || [];
+    if (!extensions.length) {
+        const empty = document.createElement('p');
+        empty.textContent = 'No project or user extensions were discovered.';
+        list.appendChild(empty);
+    }
+    extensions.forEach(extension => {
+        const card = document.createElement('section');
+        card.className = `extension-manager-card ${extension.state || 'disabled'}`;
+        card.dataset.extensionId = extension.id;
+
+        const header = document.createElement('div');
+        header.className = 'extension-manager-card-header';
+        const heading = document.createElement('div');
+        const title = document.createElement('h3');
+        title.textContent = extension.name || extension.id;
+        const meta = document.createElement('div');
+        meta.className = 'extension-manager-meta';
+        meta.textContent = `${extension.id} · ${extension.version} · ${extension.origin} · ${extension.state}`;
+        heading.append(title, meta);
+        const actions = document.createElement('div');
+        actions.className = 'extension-manager-actions';
+        if (extension.managed === false) {
+            const managed = document.createElement('span');
+            managed.className = 'extension-manager-meta';
+            managed.textContent = extension.legacy ? 'Migration available' : 'Managed by Dialeng';
+            actions.append(managed);
+        } else if (extension.state === 'blocked') {
+            actions.append(extensionTrustButton('Review & trust', extension.id, 'version', {primary: true}));
+            actions.append(extensionTrustButton('Once', extension.id, 'once'));
+            actions.append(extensionTrustButton('Trust project', extension.id, 'project'));
+        } else if (extension.state === 'active') {
+            if (extension.update_available && !extension.candidate_trusted) {
+                actions.append(extensionTrustButton('Review update', extension.id, 'version', {primary: true}));
+            } else {
+                actions.append(extensionButton(extension.update_available ? 'Apply update' : 'Reload', 'reload', extension.id));
+            }
+            actions.append(extensionButton('Disable', 'disable', extension.id));
+        } else {
+            actions.append(extensionButton('Enable', 'enable', extension.id, {primary: true}));
+        }
+        if (extension.origin === 'project') {
+            actions.append(extensionStudioButton('Build', 'build', extension.id));
+            actions.append(extensionStudioButton('Validate', 'prepare', extension.id));
+            const open = document.createElement('button');
+            open.type = 'button';
+            open.className = 'btn btn-sm';
+            open.textContent = 'Open source';
+            open.addEventListener('click', () => {
+                if (extension.project_path) {
+                    if (extension.has_extension_notebook) {
+                        const path = `${extension.project_path}/extension`;
+                        window.open(`/dialeng/?name=${encodeURIComponent(path)}`, '_blank', 'noopener');
+                    } else {
+                        const path = `${extension.project_path}/${extension.entrypoint_file || 'extension.py'}`;
+                        window.open(`/dialeng/file?path=${encodeURIComponent(path)}`, '_blank', 'noopener');
+                    }
+                }
+            });
+            actions.appendChild(open);
+        }
+        (snapshot.resources?.commands || [])
+            .filter(command => command.name.startsWith(`${extension.id}:`))
+            .forEach(command => {
+                const run = document.createElement('button');
+                run.type = 'button';
+                run.className = 'btn btn-sm';
+                run.textContent = `Run: ${command.title}`;
+                run.title = command.description || command.title;
+                run.addEventListener('click', () => invokeExtensionCommand(command.name).then(result => {
+                    const message = result.message || result.result;
+                    if (message) showKernelStatusMessage(String(message), 'success', 4000);
+                }).catch(error => setExtensionManagerStatus(error.message, 'error')));
+                actions.appendChild(run);
+            });
+        header.append(heading, actions);
+
+        const description = document.createElement('p');
+        description.textContent = extension.update_available
+            ? `${extension.description || ''} Source changed; the active version remains in use until the candidate is reviewed.`
+            : extension.description || '';
+        const badges = document.createElement('div');
+        badges.className = 'extension-manager-badges';
+        const capabilities = Object.entries(extension.contributes || {})
+            .filter(([, enabled]) => enabled).map(([name]) => name);
+        const contributions = (extension.contributions || []).map(item => item.kind.split('.').pop());
+        [...new Set([...capabilities, ...contributions])].sort().forEach(name => {
+            const badge = document.createElement('span');
+            badge.className = 'extension-manager-badge';
+            badge.textContent = name;
+            badges.appendChild(badge);
+        });
+        card.append(header, description, badges);
+        Object.keys(extension.bundled_resources || {}).sort().forEach(kind => {
+            const enabled = (extension.enabled_resources || []).includes(kind);
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'btn btn-sm extension-resource-button';
+            button.textContent = `${enabled ? 'Disable' : 'Enable'} ${kind}`;
+            button.addEventListener('click', async () => {
+                try {
+                    const response = await fetch(
+                        `/dialeng/extensions/${encodeURIComponent(extension.id)}/resources/${encodeURIComponent(kind)}/${enabled ? 'disable' : 'enable'}`,
+                        {method: 'POST', headers: {'Accept': 'application/json'}},
+                    );
+                    const payload = await response.json();
+                    if (!response.ok) throw new Error(payload.error || 'Resource update failed');
+                    renderExtensionManager(payload);
+                } catch (error) {
+                    setExtensionManagerStatus(error.message, 'error');
+                }
+            });
+            actions.appendChild(button);
+        });
+        if (extension.error) {
+            const error = document.createElement('div');
+            error.className = 'extension-manager-error';
+            error.textContent = extension.error;
+            card.appendChild(error);
+        }
+        list.appendChild(card);
+    });
+    if (diagnostics) {
+        diagnostics.replaceChildren();
+        (snapshot.diagnostics || []).forEach(item => {
+            const error = document.createElement('div');
+            error.className = 'extension-manager-error';
+            error.textContent = `${item.path}: ${item.error}`;
+            diagnostics.appendChild(error);
+        });
+    }
+    setExtensionManagerStatus(
+        `${extensions.filter(item => item.state === 'active').length} active · ${extensions.length} discovered`
+    );
+    applyExtensionAssets(extensions);
+    refreshExtensionCellTypeChoices(snapshot);
+    renderExtensionSurfaces(snapshot);
+    refreshExtensionSettingsSurface(snapshot);
+}
+
+async function refreshExtensionSettingsSurface(snapshot) {
+    const signature = JSON.stringify(
+        (snapshot.extensions || []).flatMap(extension =>
+            (extension.contributions || [])
+                .filter(item => item.kind === 'settings.definition' || item.kind === 'registry.settings_section')
+                .map(item => `${extension.id}:${item.kind}:${item.name}`)
+        ).sort()
+    );
+    if (signature === extensionClientState.settingsSignature) return;
+    extensionClientState.settingsSignature = signature;
+    const current = document.getElementById('settings-sidebar');
+    if (!current) return;
+    if (settingsState.dirty.size) {
+        setSettingsStatus('Extensions changed settings while local edits are unsaved. Save or revert before refreshing.', 'warning');
+        return;
+    }
+    const wasOpen = current.classList.contains('open');
+    try {
+        const response = await fetch('/settings/view', {headers: {'Accept': 'text/html'}});
+        if (!response.ok) throw new Error(`Settings view failed (${response.status})`);
+        const documentFragment = new DOMParser().parseFromString(await response.text(), 'text/html');
+        const replacement = documentFragment.getElementById('settings-sidebar');
+        if (!replacement) throw new Error('Settings view did not include the sidebar');
+        current.replaceWith(replacement);
+        htmx.process(replacement);
+        settingsState.initialized = false;
+        settingsState.baseline.clear();
+        settingsState.dirty.clear();
+        initializeSettingsForm();
+        if (wasOpen) {
+            replacement.classList.add('open');
+            await refreshSettings({preserveDirty: false});
+        }
+    } catch (error) {
+        console.warn('[Extensions] Could not refresh settings surface', error);
+    }
+}
+
+function toggleExtensionStudio(force) {
+    const form = document.getElementById('extension-studio-form');
+    if (!form) return;
+    extensionClientState.studioOpen = force ?? !extensionClientState.studioOpen;
+    form.hidden = !extensionClientState.studioOpen;
+    if (extensionClientState.studioOpen) {
+        requestAnimationFrame(() => document.getElementById('extension-studio-name')?.focus());
+    }
+}
+
+function setExtensionStudioStatus(message = '', tone = '') {
+    const status = document.getElementById('extension-studio-status');
+    if (!status) return;
+    status.textContent = message;
+    status.className = `extension-manager-status${tone ? ` ${tone}` : ''}`;
+}
+
+function showExtensionStudioOutput(payload) {
+    const output = document.getElementById('extension-studio-output');
+    if (output) output.textContent = JSON.stringify(payload, null, 2);
+}
+
+async function createExtensionFromStudio() {
+    const name = document.getElementById('extension-studio-name')?.value.trim() || '';
+    const extensionId = document.getElementById('extension-studio-id')?.value.trim() || '';
+    const template = document.getElementById('extension-studio-template')?.value || 'basic';
+    if (!name) {
+        setExtensionStudioStatus('Provide a lowercase extension name.', 'error');
+        return;
+    }
+    setExtensionStudioStatus(`Creating ${name} without activating it...`, 'pending');
+    try {
+        const response = await fetch('/dialeng/extensions/studio/create', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            body: JSON.stringify({name, extension_id: extensionId, template}),
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || `Extension creation failed (${response.status})`);
+        renderExtensionManager(payload);
+        showExtensionStudioOutput(payload.build);
+        setExtensionStudioStatus('Created and statically validated. Review the notebook, then build and validate.', 'success');
+        const notebookName = payload.build?.notebook_name;
+        if (notebookName && window.confirm('Open the generated extension notebook in a new tab?')) {
+            window.open(`/dialeng/?name=${encodeURIComponent(notebookName)}`, '_blank', 'noopener');
+        }
+    } catch (error) {
+        setExtensionStudioStatus(error.message || 'Could not create the extension.', 'error');
+    }
+}
+
+async function runExtensionStudioAction(extensionId, action) {
+    setExtensionStudioStatus(`${action === 'prepare' ? 'Validating' : 'Building'} ${extensionId}...`, 'pending');
+    toggleExtensionStudio(true);
+    try {
+        const response = await fetch(
+            `/dialeng/extensions/studio/${encodeURIComponent(extensionId)}/${action}`,
+            {method: 'POST', headers: {'Accept': 'application/json'}},
+        );
+        const payload = await response.json();
+        if (!response.ok || payload.ok === false) {
+            throw new Error(payload.error || `Extension ${action} failed (${response.status})`);
+        }
+        renderExtensionManager(payload);
+        showExtensionStudioOutput(payload.result || payload.build || payload);
+        setExtensionStudioStatus(
+            action === 'prepare'
+                ? 'Isolated validation and extension tests passed. Trust and activation still require confirmation.'
+                : 'Notebook exported and static validation passed.',
+            'success',
+        );
+    } catch (error) {
+        setExtensionStudioStatus(error.message || `Could not ${action} extension.`, 'error');
+    }
+}
+
+async function refreshExtensionManager() {
+    setExtensionManagerStatus('Refreshing extension inventory...');
+    try {
+        const response = await fetch('/dialeng/extensions', {headers: {'Accept': 'application/json'}});
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || `Extension request failed (${response.status})`);
+        renderExtensionManager(payload);
+    } catch (error) {
+        setExtensionManagerStatus(error.message || 'Could not load extensions.', 'error');
+    }
+}
+
+async function copyExtensionDiagnostics() {
+    const snapshot = extensionClientState.snapshot || {};
+    try {
+        await navigator.clipboard.writeText(JSON.stringify(snapshot, null, 2));
+        setExtensionManagerStatus('Redacted extension diagnostics copied.', 'success');
+    } catch (error) {
+        setExtensionManagerStatus(`Could not copy diagnostics: ${error.message}`, 'error');
+    }
+}
+
+async function mutateExtension(extensionId, action, trustMode = 'version') {
+    const previousExtension = (extensionClientState.snapshot?.extensions || []).find(item => item.id === extensionId);
+    if (action === 'trust') {
+        const extension = (extensionClientState.snapshot?.extensions || []).find(item => item.id === extensionId);
+        const permissions = JSON.stringify(extension?.permissions || {}, null, 2);
+        if (!window.confirm(
+            `Trust ${extension?.name || extensionId} (${trustMode})?\n\nExtensions run Python with the Dialeng server's full process permissions.\n\nDeclared permissions:\n${permissions}`
+        )) return;
+    }
+    setExtensionManagerStatus(`${action[0].toUpperCase()}${action.slice(1)} ${extensionId}...`);
+    try {
+        const response = await fetch(`/dialeng/extensions/${encodeURIComponent(extensionId)}/${action}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            body: action === 'trust' ? JSON.stringify({mode: trustMode}) : '{}',
+        });
+        const payload = await response.json();
+        if (!response.ok || payload.ok === false) {
+            throw new Error(payload.error || `Extension ${action} failed (${response.status})`);
+        }
+        renderExtensionManager(payload);
+        if (action === 'trust') {
+            await mutateExtension(extensionId, 'enable');
+            return;
+        }
+        const changed = (payload.extensions || []).find(item => item.id === extensionId);
+        const contributionSet = [
+            ...(previousExtension?.contributions || []),
+            ...(changed?.contributions || []),
+        ];
+        const customCellTypes = contributionSet
+            .filter(item => item.kind === 'registry.cell_type')
+            .map(item => item.name);
+        const customCellIsRendered = customCellTypes.some(cellType =>
+            document.querySelector(`.cell[data-type="${CSS.escape(cellType)}"], .cell[data-cell-type="${CSS.escape(cellType)}"]`)
+        );
+        const requiresChromeReload = contributionSet.some(item => [
+            'registry.kernel', 'registry.provider',
+        ].includes(item.kind));
+        const updatesActiveCustomCell = customCellIsRendered
+            && (action !== 'enable' || previousExtension?.state === 'active');
+        if (requiresChromeReload || updatesActiveCustomCell) {
+            showKernelStatusMessage('Extension changed server-rendered UI. Reloading the page...', 'info', 1500);
+            setTimeout(() => window.location.reload(), 250);
+        }
+    } catch (error) {
+        setExtensionManagerStatus(error.message || `Could not ${action} extension.`, 'error');
+    }
+}
+
+function refreshExtensionCellTypeChoices(snapshot) {
+    const customTypes = new Set(
+        (snapshot.extensions || [])
+            .filter(extension => extension.state === 'active')
+            .flatMap(extension => extension.contributions || [])
+            .filter(item => item.kind === 'registry.cell_type')
+            .map(item => item.name)
+    );
+    document.querySelectorAll('.type-select').forEach(select => {
+        Array.from(select.options).forEach(option => {
+            if (!['code', 'note', 'prompt', 'shell'].includes(option.value)) option.remove();
+        });
+        customTypes.forEach(cellType => {
+            if (Array.from(select.options).some(option => option.value === cellType)) return;
+            const option = document.createElement('option');
+            option.value = cellType;
+            option.textContent = cellType.replaceAll('-', ' ');
+            option.dataset.extensionCellType = 'true';
+            select.appendChild(option);
+        });
+    });
+}
+
+function openExtensionManager() {
+    document.getElementById('extension-manager-overlay')?.classList.add('visible');
+    document.body.classList.add('modal-open');
+    refreshExtensionManager();
+}
+
+function closeExtensionManager() {
+    document.getElementById('extension-manager-overlay')?.classList.remove('visible');
+    document.body.classList.remove('modal-open');
+}
+
+function cleanupExtensionClient(extensionId) {
+    const hooks = extensionClientState.cleanupHooks.get(extensionId) || [];
+    hooks.splice(0).forEach(cleanup => {
+        try { cleanup(); } catch (error) { console.warn('[Extension cleanup]', extensionId, error); }
+    });
+    extensionClientState.cleanupHooks.delete(extensionId);
+    for (const [toolName, registration] of extensionClientState.toolRenderers) {
+        if (registration.extensionId === extensionId) {
+            extensionClientState.toolRenderers.delete(toolName);
+        }
+    }
+}
+
+function applyExtensionAssets(extensions = []) {
+    const desired = new Map();
+    extensions.filter(item => item.state === 'active').forEach(extension => {
+        Object.entries(extension.assets || {}).forEach(([kind, paths]) => {
+            (paths || []).forEach(path => {
+                const key = `${extension.id}:${kind}:${path}:${extension.source_hash}`;
+                desired.set(key, {extension, kind, path});
+            });
+        });
+    });
+    extensionClientState.loadedAssets.forEach((element, key) => {
+        if (!desired.has(key)) {
+            element.remove();
+            extensionClientState.loadedAssets.delete(key);
+        }
+    });
+    desired.forEach(({extension, kind, path}, key) => {
+        if (extensionClientState.loadedAssets.has(key)) return;
+        const url = `/dialeng/extensions/${encodeURIComponent(extension.id)}/asset?path=${encodeURIComponent(path)}&v=${encodeURIComponent(extension.source_hash || '')}`;
+        const element = kind === 'css' ? document.createElement('link') : document.createElement('script');
+        if (kind === 'css') {
+            element.rel = 'stylesheet';
+            element.href = url;
+        } else {
+            element.type = 'module';
+            element.src = url;
+        }
+        element.dataset.dialengExtensionAsset = key;
+        document.head.appendChild(element);
+        extensionClientState.loadedAssets.set(key, element);
+    });
+}
+
+function extensionNameParts(qualifiedName) {
+    const separator = String(qualifiedName || '').indexOf(':');
+    if (separator < 1) return ['', ''];
+    return [qualifiedName.slice(0, separator), qualifiedName.slice(separator + 1)];
+}
+
+async function loadExtensionSurface(kind, registration) {
+    const [extensionId, localName] = extensionNameParts(registration.name);
+    if (!extensionId || !localName) return null;
+    const notebookId = window.NOTEBOOK_ID || '_workspace';
+    const response = await fetch(
+        `/dialeng/${encodeURIComponent(notebookId)}/extensions/surfaces/${kind}/${encodeURIComponent(extensionId)}/${encodeURIComponent(localName)}`,
+        {headers: {'Accept': 'text/html'}},
+    );
+    if (!response.ok) return null;
+    const wrapper = document.createElement('section');
+    wrapper.className = `extension-surface extension-${kind} ${registration.location || ''}`;
+    wrapper.dataset.extensionSurface = registration.name;
+    wrapper.innerHTML = await response.text();
+    htmx.process(wrapper);
+    return wrapper;
+}
+
+async function renderExtensionSurfaces(snapshot) {
+    const generation = ++extensionClientState.surfaceGeneration;
+    const resources = snapshot?.resources || {};
+    const toolbar = document.getElementById('extension-toolbar-items');
+    if (toolbar) {
+        toolbar.replaceChildren();
+        (resources.toolbar_items || []).forEach(item => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'btn btn-sm extension-toolbar-button';
+            button.textContent = item.title;
+            button.title = item.title;
+            button.dataset.extensionToolbar = item.name;
+            button.addEventListener('click', () => invokeExtensionCommand(item.command).then(result => {
+                const message = result.message || result.result;
+                if (message) showKernelStatusMessage(String(message), 'success', 4000);
+            }).catch(error => showKernelStatusMessage(error.message, 'error', 7000)));
+            toolbar.appendChild(button);
+        });
+    }
+
+    const statusHost = document.getElementById('extension-status-items');
+    if (statusHost) {
+        statusHost.replaceChildren();
+        const statusNodes = await Promise.all((resources.status_items || []).map(item => loadExtensionSurface('status', item)));
+        if (generation === extensionClientState.surfaceGeneration) {
+            statusNodes.filter(Boolean).forEach(node => statusHost.appendChild(node));
+        }
+    }
+
+    const panelHost = document.getElementById('extension-panel-host');
+    if (panelHost) {
+        panelHost.replaceChildren();
+        const panelNodes = await Promise.all((resources.panels || []).map(item => loadExtensionSurface('panel', item)));
+        if (generation === extensionClientState.surfaceGeneration) {
+            panelNodes.filter(Boolean).forEach(node => panelHost.appendChild(node));
+        }
+    }
+}
+
+function invokeExtensionCommand(qualifiedName, args = {}) {
+    const separator = qualifiedName.indexOf(':');
+    if (separator < 1) throw new Error(`Invalid extension command: ${qualifiedName}`);
+    const extensionId = qualifiedName.slice(0, separator);
+    const commandName = qualifiedName.slice(separator + 1);
+    const notebookId = window.NOTEBOOK_ID || '_workspace';
+    const operationId = `ext-command-${crypto.randomUUID().replaceAll('-', '').slice(0, 16)}`;
+    const invocation = fetch(
+        `/dialeng/${encodeURIComponent(notebookId)}/extensions/commands/${encodeURIComponent(extensionId)}/${encodeURIComponent(commandName)}`,
+        {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'X-Dialeng-Operation-Id': operationId},
+            body: JSON.stringify(args),
+        },
+    ).then(async response => {
+        const payload = await response.json();
+        if (!response.ok || payload.ok === false) {
+            throw new Error(payload.error || `Command failed (${response.status})`);
+        }
+        return payload;
+    });
+    invocation.operationId = operationId;
+    invocation.cancel = () => cancelExtensionCommand(operationId);
+    return invocation;
+}
+
+async function cancelExtensionCommand(operationId) {
+    const response = await fetch(
+        `/dialeng/extensions/commands/${encodeURIComponent(operationId)}/cancel`,
+        {method: 'POST', headers: {'Accept': 'application/json'}},
+    );
+    const payload = await response.json();
+    if (!response.ok || payload.ok === false) {
+        throw new Error(payload.error || `Command cancellation failed (${response.status})`);
+    }
+    return payload;
+}
+
+async function invokeExtensionAction(qualifiedName, args = {}) {
+    const [extensionId, actionName] = extensionNameParts(qualifiedName);
+    if (!extensionId || !actionName) throw new Error(`Invalid extension action: ${qualifiedName}`);
+    const notebookId = window.NOTEBOOK_ID || '_workspace';
+    const response = await fetch(
+        `/dialeng/${encodeURIComponent(notebookId)}/extensions/${encodeURIComponent(extensionId)}/actions/${encodeURIComponent(actionName)}`,
+        {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(args)},
+    );
+    const payload = await response.json();
+    if (!response.ok || payload.ok === false) {
+        throw new Error(payload.error || `Extension action failed (${response.status})`);
+    }
+    return payload;
+}
+
+window.DialengExtensions = {
+    openManager: openExtensionManager,
+    refresh: refreshExtensionManager,
+    invokeCommand: invokeExtensionCommand,
+    cancelCommand: cancelExtensionCommand,
+    invokeAction: invokeExtensionAction,
+    snapshot: () => extensionClientState.snapshot,
+    create: createExtensionFromStudio,
+    prepare: extensionId => runExtensionStudioAction(extensionId, 'prepare'),
+    registerCleanup(extensionId, cleanup) {
+        if (typeof cleanup !== 'function') throw new TypeError('Extension cleanup must be a function');
+        const hooks = extensionClientState.cleanupHooks.get(extensionId) || [];
+        hooks.push(cleanup);
+        extensionClientState.cleanupHooks.set(extensionId, hooks);
+    },
+    subscribe(extensionId, eventType, handler) {
+        if (typeof handler !== 'function') throw new TypeError('Extension event handler must be a function');
+        const eventName = `dialeng:${eventType}`;
+        const listener = event => handler(event.detail);
+        window.addEventListener(eventName, listener);
+        this.registerCleanup(extensionId, () => window.removeEventListener(eventName, listener));
+        return () => window.removeEventListener(eventName, listener);
+    },
+    notify(message, tone = 'info', duration = 4000) {
+        showKernelStatusMessage(String(message), tone, duration);
+    },
+    progress(message, {tone = 'info', duration = 2500} = {}) {
+        showKernelStatusMessage(String(message), tone, duration);
+    },
+    async openSurface(qualifiedName, kind = 'panel') {
+        const resources = extensionClientState.snapshot?.resources || {};
+        const collection = kind === 'status' ? resources.status_items : resources.panels;
+        const registration = (collection || []).find(item => item.name === qualifiedName);
+        if (!registration) throw new Error(`Unknown extension ${kind}: ${qualifiedName}`);
+        const surface = await loadExtensionSurface(kind, registration);
+        const host = kind === 'status'
+            ? document.getElementById('extension-status-items')
+            : document.getElementById('extension-panel-host');
+        if (surface && host) host.replaceChildren(surface);
+        return surface;
+    },
+    registerToolRenderer(extensionId, toolName, renderer) {
+        if (!extensionId || !toolName || !renderer || typeof renderer !== 'object') {
+            throw new TypeError('Tool renderer requires extensionId, toolName, and renderer');
+        }
+        if (typeof renderer.renderCall !== 'function' && typeof renderer.renderResult !== 'function') {
+            throw new TypeError('Tool renderer must define renderCall or renderResult');
+        }
+        const registration = {extensionId, ...renderer};
+        extensionClientState.toolRenderers.set(toolName, registration);
+        this.registerCleanup(extensionId, () => {
+            if (extensionClientState.toolRenderers.get(toolName) === registration) {
+                extensionClientState.toolRenderers.delete(toolName);
+            }
+        });
+        return () => extensionClientState.toolRenderers.delete(toolName);
+    },
+    publicState() {
+        return {
+            notebookId: window.NOTEBOOK_ID || '',
+            kernel: window.KERNEL_STATE?.kernel || {},
+            extensionsRevision: extensionClientState.snapshot?.revision || 0,
+        };
+    },
+};
+window.dialeng = window.dialeng || {};
+window.dialeng.extensions = window.DialengExtensions;
+
+function extensionShortcutMatches(event, shortcut) {
+    const parts = String(shortcut || '').toLowerCase().split('+').map(part => part.trim());
+    const key = parts.pop();
+    return Boolean(key)
+        && event.key.toLowerCase() === key.toLowerCase()
+        && event.ctrlKey === parts.includes('ctrl')
+        && event.metaKey === parts.includes('meta')
+        && event.altKey === parts.includes('alt')
+        && event.shiftKey === parts.includes('shift');
+}
+
+document.addEventListener('keydown', event => {
+    const shortcuts = extensionClientState.snapshot?.resources?.shortcuts || [];
+    const match = shortcuts.find(item => extensionShortcutMatches(event, item.shortcut));
+    if (!match) return;
+    event.preventDefault();
+    invokeExtensionCommand(match.command).catch(error => {
+        showKernelStatusMessage(error.message || 'Extension command failed.', 'error', 7000);
+    });
+});
 
 function showLlmFailureAction(data) {
     showKernelStatusMessage(data.message || 'The prompt failed.', data.tone || 'error', data.persist_ms || 10000);
@@ -4350,6 +5030,7 @@ function connectWebSocket(notebookId) {
             return;
         }
         if (!acceptRevisionedEvent(data)) return;
+        window.dispatchEvent(new CustomEvent(`dialeng:${data.type}`, {detail: data}));
         debugWebSocket('[WS] Received message:', data.type, 'cell_id:', data.cell_id || 'none');
         if (window.dialengEvents?.dispatch(data)) return;
 
@@ -4462,9 +5143,14 @@ function connectWebSocket(notebookId) {
             console.log('[WS] queue_update received:', data);
             handleQueueUpdate(data);
         } else if (data.type === 'cell_state_change') {
-            // Cell state change (queued, running, idle)
+            // Terminal state is authoritative even when an extension guard
+            // blocks execution before code_stream_start/code_stream_end.
             console.log('[WS] cell_state_change received:', data.cell_id, data.state);
-            // State changes are now handled via queue_update for consistency
+            if (['idle', 'success', 'error'].includes(data.state)) {
+                clearCellQueueState(data.cell_id);
+            } else if (['queued', 'running'].includes(data.state)) {
+                updateCellQueueState(data.cell_id, data.state, null);
+            }
         } else if (data.type === 'var_substituted') {
             // Variable was substituted in prompt
             console.log('[WS] var_substituted:', data.var_name, '->', data.var_value?.substring?.(0, 50));
@@ -4695,6 +5381,17 @@ if (window.dialengEvents) {
     });
     window.dialengEvents.register('settings_changed', data => {
         applySettingsSnapshot(data, {preserveDirty: true});
+    });
+    window.dialengEvents.register('extension_snapshot', data => {
+        renderExtensionManager(data);
+    });
+    window.dialengEvents.register('extension_command_progress', data => {
+        if (data.message === 'Started') return;
+        showKernelStatusMessage(
+            `${data.command || 'Extension command'}: ${data.message || 'updated'}`,
+            data.message === 'Cancelled' ? 'warning' : 'info',
+            3000,
+        );
     });
     window.dialengEvents.register('status_message', data => {
         if (data.action) showLlmFailureAction(data);
@@ -5756,6 +6453,19 @@ const ToolUI = (function() {
             }
             cellToolCalls.get(cellId).push({ id: toolId, name: toolName, input: toolInput });
 
+            const customRenderer = extensionClientState.toolRenderers.get(toolName);
+            if (customRenderer?.renderCall) {
+                const rendered = customRenderer.renderCall({
+                    cellId, toolId, toolName, input: toolInput, container: toolArea,
+                });
+                if (rendered instanceof Node) {
+                    rendered.id ||= `tool-call-${toolId}`;
+                    rendered.classList.add('tool-call', 'extension-tool-call');
+                    toolArea.appendChild(rendered);
+                    return;
+                }
+            }
+
             const callEl = document.createElement('div');
             callEl.className = 'tool-call';
             callEl.id = `tool-call-${toolId}`;
@@ -5777,6 +6487,17 @@ const ToolUI = (function() {
         showToolResult: function(cellId, toolId, toolName, result, status) {
             const callEl = document.getElementById(`tool-call-${toolId}`);
             if (!callEl) return;
+
+            const customRenderer = extensionClientState.toolRenderers.get(toolName);
+            if (customRenderer?.renderResult) {
+                const rendered = customRenderer.renderResult({
+                    cellId, toolId, toolName, result, status, callElement: callEl,
+                });
+                if (rendered instanceof Node) {
+                    callEl.appendChild(rendered);
+                    return;
+                }
+            }
 
             // Update status
             const statusEl = callEl.querySelector('.tool-call-status');

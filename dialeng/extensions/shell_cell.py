@@ -29,11 +29,9 @@ Usage:
 """
 
 import logging
-from typing import Optional, List, Dict
+from typing import List, Dict
 
-from dialeng.core.registry import register_callback
 from dialeng.core.callbacks import Callback, ExecutionContext
-from dialeng.core.dispatch import register_renderer, register_llm_converter
 from dialeng.document.cell import CellOutput
 
 logger = logging.getLogger(__name__)
@@ -47,7 +45,6 @@ logger = logging.getLogger(__name__)
 # The cell uses cell_type="shell" which is a string, not a CellType enum value.
 
 
-@register_renderer("shell")
 def render_shell_cell(cell, notebook_id: str):
     """Render a shell cell with bash syntax highlighting."""
     from dialeng.ui.cells.shell_cell import ShellCellView
@@ -70,7 +67,6 @@ def render_shell_cell(cell, notebook_id: str):
     return ShellCellView(cell, notebook_id, safe_mode=safe_mode)
 
 
-@register_llm_converter("shell")
 def shell_to_messages(cell) -> List[Dict]:
     """Convert shell cell to LLM message format."""
     content = f"```bash\n{cell.source}\n```"
@@ -83,7 +79,6 @@ def shell_to_messages(cell) -> List[Dict]:
 # Shell Execution Callback
 # ============================================================================
 
-@register_callback
 class ShellExecutionCallback(Callback):
     """
     Execute shell cells using ShellService instead of Python kernel.
@@ -242,4 +237,9 @@ class ShellExecutionCallback(Callback):
         return {}
 
 
-logger.info("Shell cell extension loaded")
+def setup(api, ctx):
+    """Register shell rendering, context conversion, and execution interception."""
+    api.register_renderer("shell", render_shell_cell)
+    api.register_llm_converter("shell", shell_to_messages)
+    api.register_callback(ShellExecutionCallback)
+    ctx.logger.info("Shell cell extension loaded")

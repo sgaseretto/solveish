@@ -46,7 +46,8 @@ TYPE_NAME_MAP = {
 # Tools that modify files (require confirmation when enabled)
 FILE_MODIFYING_TOOLS = {
     'create', 'str_replace', 'strs_replace', 'insert', 'replace_lines',
-    'file_insert_line', 'file_del_lines', 'sed', 'commit_skill_build'
+    'file_insert_line', 'file_del_lines', 'sed', 'commit_skill_build',
+    'create_extension', 'update_extension_file',
 }
 
 
@@ -288,23 +289,32 @@ class ToolRegistry:
 
     def get_builtin_tool(self, name: str) -> Optional[Callable]:
         """Get a built-in tool function by name."""
+        from dialeng.extensions.resources import tools as extension_tools
+        if name in extension_tools:
+            return extension_tools[name].function
         return self._builtin_tools.get(name)
 
     def get_builtin_schemas(self) -> List[dict]:
         """Get Anthropic tool schemas for all built-in tools."""
-        return list(self._builtin_schemas.values())
+        from dialeng.extensions.resources import tools as extension_tools
+        return [*self._builtin_schemas.values(), *(item.schema for item in extension_tools.values())]
 
     def get_builtin_schema(self, name: str) -> Optional[dict]:
         """Get one built-in schema by name."""
+        from dialeng.extensions.resources import tools as extension_tools
+        if name in extension_tools:
+            return extension_tools[name].schema
         return self._builtin_schemas.get(name)
 
     def get_builtin_names(self) -> List[str]:
         """Get names of all registered built-in tools."""
-        return list(self._builtin_tools.keys())
+        from dialeng.extensions.resources import tools as extension_tools
+        return [*self._builtin_tools.keys(), *extension_tools.keys()]
 
     def is_builtin(self, name: str) -> bool:
         """Check if a tool is a built-in."""
-        return name in self._builtin_tools
+        from dialeng.extensions.resources import tools as extension_tools
+        return name in self._builtin_tools or name in extension_tools
 
     def resolve_dynamic_tool_name(self, notebook_id: str, name: str) -> str:
         """Map a provider-safe tool name back to the kernel target name."""

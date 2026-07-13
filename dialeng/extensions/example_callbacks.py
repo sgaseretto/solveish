@@ -14,13 +14,11 @@ Usage:
 
 import time
 import logging
-from dialeng.core.registry import register_callback
 from dialeng.core.callbacks import Callback, ExecutionContext
 
 logger = logging.getLogger(__name__)
 
 
-@register_callback
 class ExecutionTimingCallback(Callback):
     """
     Track and log execution time for all cells.
@@ -116,4 +114,7 @@ class ExecutionTimingCallback(Callback):
 #         return output
 
 
-logger.info("Example callbacks extension loaded")
+def setup(api, ctx):
+    """Register the example timing callback through the stable facade."""
+    api.register_callback(ExecutionTimingCallback)
+    ctx.logger.info("Example callbacks extension loaded")

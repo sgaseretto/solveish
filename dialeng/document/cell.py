@@ -205,6 +205,10 @@ class Cell:
     is_exported: bool = False
     llm_execution: dict = field(default_factory=dict)
 
+    # Preserve unsupported extension cell data while its renderer is unavailable.
+    raw_metadata: dict = field(default_factory=dict)
+    raw_jupyter_cell_type: str = ""
+
     # UI collapse state
     collapsed: bool = False
     input_collapse: CollapseLevel = CollapseLevel.EXPANDED
