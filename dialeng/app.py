@@ -1028,6 +1028,7 @@ def _build_kernel_snapshot(nb_id: str) -> dict:
         "notebook": _build_notebook_snapshot(nb_id),
         "kernel": {
             "selected_type": selected_kernel_type,
+            "generation": _current_kernel_generation(nb_id),
             "exists": kernel_exists,
             "is_alive": kernel_is_alive,
             "is_busy": kernel_is_busy,
@@ -1049,6 +1050,9 @@ def _build_kernel_snapshot(nb_id: str) -> dict:
             "source": setup_payload.get("source"),
             "phase": setup_payload.get("phase"),
             "detail": setup_payload.get("detail"),
+            "generation": setup_payload.get("generation"),
+            "last_generation": runtime_registry.get_or_create(nb_id).setup_last_generation,
+            "last_outcome": runtime_registry.get_or_create(nb_id).setup_last_outcome,
         },
         "outline": {
             "revision": _get_outline_revision(nb_id),
@@ -1139,7 +1143,12 @@ async def _set_kernel_setup_state(
     await broadcast_kernel_snapshot(nb_id)
 
 
-async def _clear_kernel_setup_state(nb_id: str, *, expected_generation: Optional[int] = None) -> None:
+async def _clear_kernel_setup_state(
+    nb_id: str,
+    *,
+    expected_generation: Optional[int] = None,
+    outcome: str = "completed",
+) -> None:
     """Clear tracked notebook setup state and broadcast the fresh snapshot."""
     current = kernel_setup_state.get(nb_id)
     if current and expected_generation is not None and current.get("generation") != expected_generation:
@@ -1149,6 +1158,12 @@ async def _clear_kernel_setup_state(nb_id: str, *, expected_generation: Optional
         )
         return
     if kernel_setup_state.pop(nb_id, None) is not None:
+        runtime = runtime_registry.get_or_create(nb_id)
+        runtime.setup_last_generation = (
+            expected_generation if expected_generation is not None
+            else int(current.get("generation", _current_kernel_generation(nb_id)))
+        )
+        runtime.setup_last_outcome = outcome
         logger.info("Kernel setup state cleared for notebook %s", nb_id)
         await broadcast_kernel_snapshot(nb_id)
 
@@ -3011,7 +3026,11 @@ async def _run_notebook_kernel_setup(
                 nb_id, source, generation, kernel_type, runtime_id, cid, idx, total_craft, (time.perf_counter() - craft_start) * 1000,
             )
 
-        await _clear_kernel_setup_state(nb_id, expected_generation=generation)
+        await _clear_kernel_setup_state(
+            nb_id,
+            expected_generation=generation,
+            outcome="completed",
+        )
         log_operation(
             logger,
             "kernel_setup_complete",
@@ -3035,7 +3054,11 @@ async def _run_notebook_kernel_setup(
             "source": source,
         })
     except asyncio.CancelledError:
-        await _clear_kernel_setup_state(nb_id, expected_generation=generation)
+        await _clear_kernel_setup_state(
+            nb_id,
+            expected_generation=generation,
+            outcome="cancelled",
+        )
         log_operation(
             logger,
             "kernel_setup_cancelled",
@@ -3052,7 +3075,11 @@ async def _run_notebook_kernel_setup(
             nb_id, source, generation, kernel_type, runtime_id,
         )
     except Exception:
-        await _clear_kernel_setup_state(nb_id, expected_generation=generation)
+        await _clear_kernel_setup_state(
+            nb_id,
+            expected_generation=generation,
+            outcome="failed",
+        )
         log_operation(
             logger,
             "kernel_setup_failed",
@@ -3110,13 +3137,29 @@ def _schedule_notebook_kernel_setup(
     )
 
 
+def _schedule_kernel_selection_setup(nb_id: str, *, source: str = "kernel_select") -> None:
+    """Discover and schedule all setup work for the selected kernel."""
+    craft_cells, craft_paths = _collect_craft_cells_for_setup(nb_id, only_unexecuted=True)
+    logger.info(
+        "Scheduling kernel setup after kernel selection (notebook=%s, craft_cells=%s)",
+        nb_id,
+        len(craft_cells),
+    )
+    _schedule_notebook_kernel_setup(
+        nb_id,
+        source=source,
+        craft_cells=craft_cells,
+        craft_paths=craft_paths,
+    )
+
+
 # ============================================================================
 # Kernel Management Routes
 # ============================================================================
 
 @rt("/dialeng/{nb_id}/kernel/type")
 @serialized_notebook_mutation
-async def post(nb_id: str, kernel_type: str):
+async def post(nb_id: str, kernel_type: str, initialize: bool = True):
     """Change the kernel type for a notebook."""
     nb = get_notebook(nb_id)
     reg = registry.kernels.get(kernel_type)
@@ -3151,6 +3194,8 @@ async def post(nb_id: str, kernel_type: str):
 
     await _mark_outline_dirty(nb_id, reason="kernel_type_change", broadcast_snapshot=False)
     await broadcast_kernel_snapshot(nb_id)
+    if initialize:
+        _schedule_kernel_selection_setup(nb_id)
 
     return Div(f"Kernel: {reg.label}", cls="status success")
 
@@ -3182,6 +3227,7 @@ async def post(nb_id: str, runtime_type: str):
     logger.info("Updated Colab runtime type (notebook=%s, runtime_type=%s)", nb_id, runtime_type)
     await _mark_outline_dirty(nb_id, reason="kernel_runtime_change", broadcast_snapshot=False)
     await broadcast_kernel_snapshot(nb_id)
+    _schedule_kernel_selection_setup(nb_id)
 
     labels = {"cpu": "CPU", "gpu": "GPU (T4)", "tpu": "TPU"}
     return Div(f"Runtime: {labels.get(runtime_type, runtime_type)}", cls="status success")
@@ -3267,17 +3313,7 @@ async def post(nb_id: str):
         )
         return ""
 
-    craft_cells, craft_paths = _collect_craft_cells_for_setup(nb_id, only_unexecuted=True)
-    logger.info(
-        "Scheduling kernel setup after kernel selection (notebook=%s, craft_cells=%s)",
-        nb_id, len(craft_cells),
-    )
-    _schedule_notebook_kernel_setup(
-        nb_id,
-        source="kernel_select",
-        craft_cells=craft_cells,
-        craft_paths=craft_paths,
-    )
+    _schedule_kernel_selection_setup(nb_id)
     return ""
 
 # ============================================================================

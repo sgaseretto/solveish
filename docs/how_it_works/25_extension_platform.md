@@ -75,13 +75,18 @@ inventory; only manifest-managed sources expose enable/disable controls.
 Trust records are atomic private JSON under `~/.dialeng`. Exact-version trust
 binds ID, version, source hash, canonical root, origin, and permission fingerprint.
 Project trust omits version/hash but still binds project source and permissions.
-One-session trust is memory-only. Extensions are in-process trusted code, not
-sandboxed code.
+One-session trust is memory-only. RPC-safe extensions run in supervised isolated
+hosts; contributions that require kernel/provider/Python-renderer objects remain
+explicitly privileged in-process trusted code.
 
-Declared network permission gates `ctx.open_http_client`. Project path helpers
-reject traversal. Declared assets/resources are normalized and cannot escape the
-extension root. Diagnostics redact likely tokens, authorization values, cookies,
-and secret settings.
+The isolated host cannot directly read project files, open network connections,
+or spawn processes. It uses a core-side broker that rechecks exact manifest path
+patterns and the `network`, `subprocess`, `notebook`, and `kernel` capabilities.
+Resolved paths reject traversal and symlink escapes. Child audit hooks are
+defense-in-depth; process isolation is not an OS sandbox. Declared
+assets/resources are normalized and cannot escape the extension root.
+Diagnostics redact likely tokens, authorization values, cookies, and secret
+settings.
 
 ## Backend And Browser State
 
@@ -154,6 +159,8 @@ its export/test/clean checks run before Dialeng regenerates the canonical module
 | Kernel/provider registration | Supported, may require browser/server restart |
 | Skills/templates/CRAFT/notebook-template bundles | Supported |
 | AUTORUN decorators | Legacy adapter; migrate for new work |
-| Process isolation | Validation only; active runtime is trusted in-process code |
-| Automatic dependency installation | Not supported |
+| Process isolation | Default for RPC-safe contributions; supervised per-extension host |
+| Privileged mode | Explicit for kernels/providers/custom cells/Python renderers/internal imports |
+| Reproducible environment | `.dialeng/extensions.lock`, `lock`, `sync`, drift `check`, `update` |
+| Automatic dependency installation | Locked Git/package restoration delegated to Git and `uv` |
 | Online marketplace | Not supported |

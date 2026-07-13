@@ -17,7 +17,7 @@ An open-source Solveit-like notebook built entirely with **FastHTML**. Features 
 - **Editable AI responses**: Both user prompts AND AI responses are fully editable
 - **Source-derived skills**: Generate, review, refresh, and install reusable Codex skills from notebooks, local text/code files, and web2md-converted pages
 - **Prompt observability**: Inspect per-run latency, transport, retries, tool steps, status, and token usage without adding diagnostics to model context
-- **Self-extensible platform**: Create, validate, trust, reload, and package owner-aware extensions from notebooks or Python
+- **Self-extensible platform**: Create notebook-native extensions with a command palette, reproducible lockfiles, transactional registration, and supervised per-extension hosts
 - **Solveit-compatible**: Standard `.ipynb` format with Solveit metadata conventions
 - **Pure Python**: Built with FastHTML, no JavaScript frameworks
 - **Mock LLM included**: Works out of the box without API keys
@@ -73,9 +73,11 @@ uv run dialeng extension create notebook-audit --template basic
 uv run dialeng extension prepare .dialeng/extensions/notebook-audit
 uv run dialeng extension check .dialeng/extensions/notebook-audit
 uv run dialeng extension doctor --path .
+uv run dialeng extension lock --path .
 ```
 
-Then open **Extensions** in Dialeng to review, trust, and enable it. See the
+Then open **Extensions** in Dialeng to preview, review, trust, and activate the
+reviewed build. Press `Cmd/Ctrl+Shift+P` to find every core and extension command. See the
 [extension guide](docs/guides/extensions.md).
 
 ---

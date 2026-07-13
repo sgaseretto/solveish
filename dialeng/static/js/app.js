@@ -86,6 +86,19 @@ const runIntentTracker = new window.DialengRunIntentTracker();
 const setCellRunControlState = window.DialengSetCellRunControlState;
 let monacoReady = false;
 let monacoLoadPromise = null;
+let kernelSelectionSetupPending = false;
+let kernelSelectionSetupObserved = false;
+let kernelSelectionSetupScheduled = false;
+let kernelSetupPageClosing = false;
+let kernelSetupPollTimerId = null;
+
+window.addEventListener('pagehide', () => {
+    kernelSetupPageClosing = true;
+    if (kernelSetupPollTimerId) {
+        clearTimeout(kernelSetupPollTimerId);
+        kernelSetupPollTimerId = null;
+    }
+});
 
 function configureMonaco() {
     // Register kernel-backed completion provider for Python once.
@@ -134,6 +147,48 @@ function configureMonaco() {
                 }, 150);
             });
         }
+    });
+    const extensionCompletions = {
+        api: [
+            ['register_command', 'register_command("${1:name}", title="${2:Title}", description="${3:Description}", handler=${4:handler})', 'Register a namespaced, cancellable command.'],
+            ['register_tool', 'register_tool("${1:name}", ${2:function})', 'Expose a typed Python function to prompt-cell tool calling.'],
+            ['register_panel', 'register_panel("${1:name}", title="${2:Title}", renderer=${3:renderer})', 'Register a declarative extension panel.'],
+            ['register_setting', 'register_setting(${1:definition})', 'Register a validated project setting.'],
+            ['register_asset', 'register_asset("${1:name}", kind="${2|css,js|}", path="${3:path}")', 'Register a manifest-declared browser asset.'],
+            ['on', 'on("${1:notebook.saved}", ${2:handler}, name="${3:handler}")', 'Subscribe to a versioned Dialeng event with managed cleanup.'],
+        ],
+        ctx: [
+            ['state', 'state', 'Extension-private persistent state mapping.'],
+            ['logger', 'logger', 'Extension-scoped structured logger.'],
+            ['extension_id', 'extension_id', 'The manifest extension ID.'],
+            ['project_root', 'project_root', 'Canonical project root path.'],
+            ['source_root', 'source_root', 'Canonical extension source root path.'],
+        ],
+    };
+    monaco.languages.registerCompletionItemProvider('python', {
+        triggerCharacters: ['.'],
+        provideCompletionItems(model, position) {
+            const prefix = model.getLineContent(position.lineNumber).slice(0, position.column - 1);
+            const match = prefix.match(/\b(api|ctx)\.([A-Za-z_]*)$/);
+            if (!match) return {suggestions: []};
+            const startColumn = position.column - match[2].length;
+            return {
+                suggestions: extensionCompletions[match[1]].map(([label, insertText, documentation]) => ({
+                    label,
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText,
+                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    documentation: {value: `${documentation}\n\n[Extension authoring guide](/docs/guides/extensions.md)`},
+                    range: {
+                        startLineNumber: position.lineNumber,
+                        startColumn,
+                        endLineNumber: position.lineNumber,
+                        endColumn: position.column,
+                    },
+                    sortText: `0-${label}`,
+                })),
+            };
+        },
     });
 }
 
@@ -701,7 +756,14 @@ async function focusCellWithoutScroll(cellId, preserveY = window.scrollY) {
             cellId,
             cell.dataset.type === 'shell' ? 'sh' : 'python',
         );
-        editor?.focus();
+        const activeElement = document.activeElement;
+        const userIsEditingElsewhere = activeElement && activeElement !== document.body && (
+            activeElement.matches?.('input, textarea, select, [contenteditable="true"]')
+            || activeElement.closest?.('[role="dialog"]')
+        ) && !cell.contains(activeElement);
+        // Monaco may finish loading seconds after the navigation request. Do not
+        // steal focus if the user selected another cell or started editing a form.
+        if (focusedCellId === cellId && !userIsEditingElsewhere) editor?.focus();
     } else if (cell.dataset.type === 'prompt') {
         // For prompt cells, focus the prompt textarea if visible
         const promptTextarea = cell.querySelector('.prompt-content[name="prompt_source"]');
@@ -2106,18 +2168,30 @@ function renderMarkdown(text) {
 
 // Server-side markdown rendering via mistlefoot for full-fidelity output
 // (subscript, superscript, emoji, highlighting, footnotes, task lists, etc.)
+const markdownRenderControllers = new WeakMap();
+
 async function renderMarkdownServer(text, targetEl) {
     const renderVersion = String(Number(targetEl.dataset.renderVersion || '0') + 1);
     targetEl.dataset.renderVersion = renderVersion;
+    markdownRenderControllers.get(targetEl)?.abort();
     if (!text || !text.trim()) {
+        markdownRenderControllers.delete(targetEl);
         targetEl.innerHTML = '<p style="color: var(--text-muted);">Click to edit...</p>';
         return;
     }
+    const controller = new AbortController();
+    markdownRenderControllers.set(targetEl, controller);
     try {
+        // Prompt streaming can update a preview many times per second. Coalesce
+        // those updates so obsolete renders never occupy the browser's request
+        // pool or delay notebook mutations.
+        await new Promise(resolve => setTimeout(resolve, 75));
+        if (controller.signal.aborted) return;
         const resp = await fetch('/render-markdown', {
             method: 'POST',
             headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            body: 'text=' + encodeURIComponent(text)
+            body: 'text=' + encodeURIComponent(text),
+            signal: controller.signal,
         });
         const data = await resp.json();
         if (!targetEl.isConnected || targetEl.dataset.renderVersion !== renderVersion) return;
@@ -2135,9 +2209,14 @@ async function renderMarkdownServer(text, targetEl) {
             if (code && typeof hljs !== 'undefined') hljs.highlightElement(code);
         });
     } catch (e) {
+        if (e?.name === 'AbortError') return;
         if (!targetEl.isConnected || targetEl.dataset.renderVersion !== renderVersion) return;
         // Fallback to client-side rendering
         targetEl.innerHTML = renderMarkdown(text);
+    } finally {
+        if (markdownRenderControllers.get(targetEl) === controller) {
+            markdownRenderControllers.delete(targetEl);
+        }
     }
 }
 
@@ -2234,11 +2313,13 @@ function switchToPreview(cellId, field) {
             promptResponseEditor?.finish(cellId, textarea.value);
             delete textarea.dataset.responseEditing;
         }
-        // Show client-side preview immediately, then upgrade with server rendering
+        // Prompt editing stays entirely client-side so visual rendering cannot
+        // contend with source/output mutations. Note previews still use the
+        // server renderer for extended Markdown syntax.
         preview.innerHTML = renderMarkdown(textarea.value);
         preview.style.display = 'block';
         textarea.style.display = 'none';
-        renderMarkdownServer(textarea.value, preview);
+        if (field === 'source') renderMarkdownServer(textarea.value, preview);
     }
 }
 
@@ -2422,7 +2503,6 @@ function initCell(cellId) {
         const content = aiTextarea.value;
         if (content && content.trim()) {
             aiPreview.innerHTML = renderMarkdown(content);
-            renderMarkdownServer(content, aiPreview);
         } else {
             aiPreview.innerHTML = '<p style="color: var(--text-muted); font-style: italic;">Click ▶ to generate response...</p>';
         }
@@ -3114,6 +3194,7 @@ async function openSkillCreator() {
     if (!overlay) return;
     overlay.classList.add('visible');
     document.body.classList.add('modal-open');
+    document.getElementById('skill-creator-name')?.focus({preventScroll: true});
     setSkillCreatorStatus('Loading project sources...', 'pending');
     try {
         const response = await fetch('/dialeng/skills', {headers: {'Accept': 'application/json'}});
@@ -3147,7 +3228,6 @@ async function openSkillCreator() {
             }
         }
         setSkillCreatorStatus('Select project sources, add optional web pages, and generate a reviewable draft.');
-        requestAnimationFrame(() => document.getElementById('skill-creator-name')?.focus());
     } catch (error) {
         setSkillCreatorStatus(error.message || 'Could not load project skills.', 'error');
     }
@@ -4284,6 +4364,9 @@ function executeCoreClientAction(payload) {
         const position = index >= 0 ? index + 1 : cells.length;
         _pendingScrollToNewCell = true;
         requestCellAdd(args.cell_type || 'code', position);
+    } else if (action.startsWith('extension-studio:')) {
+        openExtensionManager();
+        runExtensionStudioAction(args.extension_id || '', action.split(':', 2)[1]);
     }
 }
 
@@ -4456,7 +4539,10 @@ function renderExtensionManager(snapshot) {
         title.textContent = extension.name || extension.id;
         const meta = document.createElement('div');
         meta.className = 'extension-manager-meta';
-        meta.textContent = `${extension.id} · ${extension.version} · ${extension.origin} · ${extension.state}`;
+        const runtimeLabel = extension.runtime_mode === 'privileged_in_process'
+            ? 'privileged in-process'
+            : extension.runtime_mode || 'runtime unknown';
+        meta.textContent = `${extension.id} · ${extension.version} · ${extension.origin} · ${extension.state} · ${runtimeLabel}`;
         heading.append(title, meta);
         const actions = document.createElement('div');
         actions.className = 'extension-manager-actions';
@@ -4480,8 +4566,13 @@ function renderExtensionManager(snapshot) {
             actions.append(extensionButton('Enable', 'enable', extension.id, {primary: true}));
         }
         if (extension.origin === 'project') {
+            actions.append(extensionStudioButton('Profile', 'profile', extension.id));
             actions.append(extensionStudioButton('Build', 'build', extension.id));
             actions.append(extensionStudioButton('Validate', 'prepare', extension.id));
+            actions.append(extensionStudioButton('Test', 'test', extension.id));
+            actions.append(extensionStudioButton('Preview', 'preview', extension.id));
+            actions.append(extensionStudioButton('Package', 'package', extension.id));
+            actions.append(extensionStudioButton('Activate reviewed', 'activate-reviewed', extension.id));
             const open = document.createElement('button');
             open.type = 'button';
             open.className = 'btn btn-sm';
@@ -4669,25 +4760,40 @@ async function createExtensionFromStudio() {
 }
 
 async function runExtensionStudioAction(extensionId, action) {
-    setExtensionStudioStatus(`${action === 'prepare' ? 'Validating' : 'Building'} ${extensionId}...`, 'pending');
+    if (!extensionId) {
+        setExtensionStudioStatus('Provide an extension ID.', 'error');
+        return;
+    }
+    if (action === 'activate-reviewed' && !window.confirm(
+        `Activate the last reviewed build of ${extensionId}? Local trust is still required.`
+    )) return;
+    const labels = {
+        profile: 'Inspecting', build: 'Building', prepare: 'Validating', test: 'Testing',
+        preview: 'Previewing', package: 'Packaging', 'activate-reviewed': 'Activating',
+    };
+    setExtensionStudioStatus(`${labels[action] || 'Running'} ${extensionId}...`, 'pending');
     toggleExtensionStudio(true);
     try {
         const response = await fetch(
             `/dialeng/extensions/studio/${encodeURIComponent(extensionId)}/${action}`,
-            {method: 'POST', headers: {'Accept': 'application/json'}},
+            {method: action === 'profile' ? 'GET' : 'POST', headers: {'Accept': 'application/json'}},
         );
         const payload = await response.json();
         if (!response.ok || payload.ok === false) {
             throw new Error(payload.error || `Extension ${action} failed (${response.status})`);
         }
-        renderExtensionManager(payload);
+        if (payload.extensions) renderExtensionManager(payload);
         showExtensionStudioOutput(payload.result || payload.build || payload);
-        setExtensionStudioStatus(
-            action === 'prepare'
-                ? 'Isolated validation and extension tests passed. Trust and activation still require confirmation.'
-                : 'Notebook exported and static validation passed.',
-            'success',
-        );
+        const messages = {
+            profile: 'Development profile refreshed.',
+            build: 'Notebook exported deterministically. Validation evidence is not yet reviewed.',
+            prepare: 'Isolated validation and extension tests passed. Trust and activation still require confirmation.',
+            test: 'Extension tests completed in a subprocess.',
+            preview: 'Contributions previewed without importing extension code.',
+            package: 'Extension package build completed.',
+            'activate-reviewed': 'Reviewed build activated.',
+        };
+        setExtensionStudioStatus(messages[action] || `${action} completed.`, 'success');
     } catch (error) {
         setExtensionStudioStatus(error.message || `Could not ${action} extension.`, 'error');
     }
@@ -4729,17 +4835,13 @@ async function mutateExtension(extensionId, action, trustMode = 'version') {
         const response = await fetch(`/dialeng/extensions/${encodeURIComponent(extensionId)}/${action}`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
-            body: action === 'trust' ? JSON.stringify({mode: trustMode}) : '{}',
+            body: action === 'trust' ? JSON.stringify({mode: trustMode, enable: true}) : '{}',
         });
         const payload = await response.json();
         if (!response.ok || payload.ok === false) {
             throw new Error(payload.error || `Extension ${action} failed (${response.status})`);
         }
         renderExtensionManager(payload);
-        if (action === 'trust') {
-            await mutateExtension(extensionId, 'enable');
-            return;
-        }
         const changed = (payload.extensions || []).find(item => item.id === extensionId);
         const contributionSet = [
             ...(previousExtension?.contributions || []),
@@ -5342,6 +5444,32 @@ async function fetchKernelSnapshot(notebookId, source = 'poll') {
     }
 }
 
+function stopKernelSetupPolling() {
+    if (!kernelSetupPollTimerId) return;
+    clearTimeout(kernelSetupPollTimerId);
+    kernelSetupPollTimerId = null;
+}
+
+function finishKernelSelectionSetup() {
+    kernelSelectionSetupPending = false;
+    kernelSelectionSetupObserved = false;
+    kernelSelectionSetupScheduled = false;
+    stopKernelSetupPolling();
+}
+
+function pollKernelSetupUntilReady(notebookId) {
+    stopKernelSetupPolling();
+    const poll = async () => {
+        kernelSetupPollTimerId = null;
+        if (!kernelSelectionSetupPending || kernelSetupPageClosing) return;
+        await fetchKernelSnapshot(notebookId, 'kernel-setup-poll');
+        if (kernelSelectionSetupPending && !kernelSetupPageClosing) {
+            kernelSetupPollTimerId = setTimeout(poll, 500);
+        }
+    };
+    kernelSetupPollTimerId = setTimeout(poll, 250);
+}
+
 function handleNotebookDeleted(data = {}) {
     if (window.NOTEBOOK_TERMINAL_STATE) return;
     window.NOTEBOOK_TERMINAL_STATE = true;
@@ -5387,10 +5515,29 @@ function applyKernelSnapshot(snapshot, source = 'ws') {
     );
 
     const previous = getKernelState();
-    window.KERNEL_STATE = snapshot;
-    window.KERNEL_ALIVE = !!snapshot.kernel?.can_run;
-    applyNotebookSnapshot(snapshot.notebook, previous?.notebook || null, snapshot.llm || null);
-    syncCurrentExplorerKernelState(snapshot);
+    const setupTerminalForKernel = (
+        snapshot.setup?.last_generation === snapshot.kernel?.generation
+        && ['completed', 'cancelled', 'failed'].includes(snapshot.setup?.last_outcome)
+    );
+    if (kernelSelectionSetupPending && snapshot.setup?.is_active) {
+        kernelSelectionSetupObserved = true;
+    } else if (
+        kernelSelectionSetupPending
+        && (kernelSelectionSetupObserved || setupTerminalForKernel)
+        && !snapshot.setup?.is_active
+    ) {
+        finishKernelSelectionSetup();
+    }
+    const effectiveSnapshot = kernelSelectionSetupPending
+        ? {
+            ...snapshot,
+            kernel: {...snapshot.kernel, can_run: false, display_state: 'initializing'},
+        }
+        : snapshot;
+    window.KERNEL_STATE = effectiveSnapshot;
+    window.KERNEL_ALIVE = !!effectiveSnapshot.kernel?.can_run;
+    applyNotebookSnapshot(effectiveSnapshot.notebook, previous?.notebook || null, effectiveSnapshot.llm || null);
+    syncCurrentExplorerKernelState(effectiveSnapshot);
 
     handleQueueUpdate({
         running_cell_id: snapshot.queue?.running_cell_id || null,
@@ -5408,11 +5555,11 @@ function applyKernelSnapshot(snapshot, source = 'ws') {
         auth_required: '',
         error: 'error'
     };
-    updateKernelDot(dotStateMap[snapshot.kernel.display_state] || '');
+    updateKernelDot(dotStateMap[effectiveSnapshot.kernel.display_state] || '');
 
     const dot = document.getElementById('kernel-dot');
     if (dot) {
-        const detail = snapshot.setup?.detail || snapshot.kernel?.connection_detail || '';
+        const detail = effectiveSnapshot.setup?.detail || effectiveSnapshot.kernel?.connection_detail || '';
         const labelMap = {
             connected: 'Kernel: idle',
             busy: 'Kernel: busy',
@@ -5423,8 +5570,8 @@ function applyKernelSnapshot(snapshot, source = 'ws') {
             disconnected: 'Kernel: disconnected',
             auth_required: 'Kernel: authentication required'
         };
-        dot.title = detail ? `${labelMap[snapshot.kernel.display_state] || 'Kernel'} (${detail})`
-            : (labelMap[snapshot.kernel.display_state] || 'Kernel');
+        dot.title = detail ? `${labelMap[effectiveSnapshot.kernel.display_state] || 'Kernel'} (${detail})`
+            : (labelMap[effectiveSnapshot.kernel.display_state] || 'Kernel');
     }
 
     const prevRuntimeId = previous?.kernel?.runtime_id;
@@ -5434,11 +5581,11 @@ function applyKernelSnapshot(snapshot, source = 'ws') {
     }
 
     const prevDisplayState = previous?.kernel?.display_state;
-    const nextDisplayState = snapshot.kernel?.display_state;
+    const nextDisplayState = effectiveSnapshot.kernel?.display_state;
     if (prevDisplayState !== nextDisplayState) {
         if (nextDisplayState === 'degraded') {
             showKernelStatusMessage('Colab connection is degraded. Dialeng will keep trying to recover.', 'warning', 7000);
-        } else if (nextDisplayState === 'disconnected' && snapshot.kernel?.exists) {
+        } else if (nextDisplayState === 'disconnected' && effectiveSnapshot.kernel?.exists) {
             showKernelStatusMessage('Kernel connection was lost. Reattach or restart if it does not recover.', 'error', 9000);
         } else if (nextDisplayState === 'auth_required') {
             showKernelStatusMessage('Sign in with Google before using a Colab kernel.', 'warning', 7000);
@@ -5465,15 +5612,15 @@ function applyKernelSnapshot(snapshot, source = 'ws') {
     }
 
     const prevCanRun = !!previous?.kernel?.can_run;
-    const nextCanRun = !!snapshot.kernel?.can_run;
+    const nextCanRun = !!effectiveSnapshot.kernel?.can_run;
     const prevAuthEnabled = !!previous?.auth?.enabled;
-    const nextAuthEnabled = !!snapshot.auth?.enabled;
+    const nextAuthEnabled = !!effectiveSnapshot.auth?.enabled;
     const prevAuthenticated = !!previous?.auth?.authenticated;
-    const nextAuthenticated = !!snapshot.auth?.authenticated;
+    const nextAuthenticated = !!effectiveSnapshot.auth?.authenticated;
     const prevSelectedType = previous?.kernel?.selected_type;
-    const nextSelectedType = snapshot.kernel?.selected_type;
+    const nextSelectedType = effectiveSnapshot.kernel?.selected_type;
     const prevRuntime = previous?.notebook?.colab_runtime_type;
-    const nextRuntime = snapshot.notebook?.colab_runtime_type;
+    const nextRuntime = effectiveSnapshot.notebook?.colab_runtime_type;
 
     if (
         previous &&
@@ -6014,12 +6161,6 @@ function finishStreaming(cellId) {
         clearTimeout(streamingTimeoutId);
         streamingTimeoutId = null;
     }
-    // Re-render with server-side mistlefoot for full-fidelity markdown
-    const outputPreview = document.querySelector(`[data-cell-id="${cellId}"][data-field="output"]`);
-    const outputTextarea = document.getElementById(`output-${cellId}`);
-    if (outputPreview && outputTextarea && outputTextarea.value) {
-        renderMarkdownServer(outputTextarea.value, outputPreview);
-    }
 }
 
 let streamingTimeoutId = null;
@@ -6049,7 +6190,6 @@ function applyPromptOutputUpdate(cellId, output, {force = false} = {}) {
     if (preview) {
         if (result.value && result.value.trim()) {
             preview.innerHTML = renderMarkdown(result.value);
-            renderMarkdownServer(result.value, preview);
         } else {
             preview.innerHTML = '<p style="color: var(--text-muted);">Click to edit...</p>';
         }
@@ -6892,7 +7032,6 @@ function renderCellPreviews(cellId) {
         const promptTextarea = document.getElementById(`prompt-${cellId}`);
         if (promptTextarea) {
             promptPreview.innerHTML = renderMarkdown(promptTextarea.value);
-            renderMarkdownServer(promptTextarea.value, promptPreview);
         }
     }
 
@@ -6901,7 +7040,6 @@ function renderCellPreviews(cellId) {
         const outputTextarea = document.getElementById(`output-${cellId}`);
         if (outputTextarea && outputTextarea.value) {
             outputPreview.innerHTML = renderMarkdown(outputTextarea.value);
-            renderMarkdownServer(outputTextarea.value, outputPreview);
         }
     }
 }
@@ -7234,7 +7372,7 @@ function _runPendingCell() {
     if (cell) clickCellRunButton(cell, {advance});
 }
 
-function applyKernelSelection(nbId) {
+async function applyKernelSelection(nbId) {
     const typeInput = document.getElementById('kernel-modal-selected-type');
     const rtInput = document.getElementById('kernel-modal-selected-runtime');
     if (!typeInput) return;
@@ -7245,6 +7383,10 @@ function applyKernelSelection(nbId) {
 
     // Close modal immediately and show initializing state (yellow dot)
     closeKernelModalForApply();
+    kernelSelectionSetupPending = true;
+    kernelSelectionSetupObserved = false;
+    kernelSelectionSetupScheduled = false;
+    kernelSetupPageClosing = false;
     window.KERNEL_ALIVE = false;
     window.KERNEL_STATE = window.KERNEL_STATE || {};
     window.KERNEL_STATE.kernel = Object.assign({}, window.KERNEL_STATE.kernel, {
@@ -7255,16 +7397,16 @@ function applyKernelSelection(nbId) {
     updateKernelDot('busy');
     showKernelStatusMessage('Attaching kernel and running notebook setup…', 'warning', 4000);
 
-    // Send kernel type change in background
-    fetch(`/dialeng/${nbId}/kernel/type`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: `kernel_type=${encodeURIComponent(kernelType)}`
-    }).then(response => {
+    try {
+        const response = await fetch(`/dialeng/${nbId}/kernel/type`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: `kernel_type=${encodeURIComponent(kernelType)}&initialize=${kernelType === 'colab' ? 'false' : 'true'}`
+        });
         console.log('[Kernel] kernel/type response:', response.status);
         if (!response.ok) throw new Error(`kernel/type failed: ${response.status}`);
-        return response.text();
-    }).then(async () => {
+        await response.text();
+
         // If Colab, set runtime type and WAIT before craft-init
         // (set_runtime_type shuts down the old kernel and creates a new one)
         if (runtimeType && kernelType === 'colab') {
@@ -7274,33 +7416,29 @@ function applyKernelSelection(nbId) {
                 body: `runtime_type=${encodeURIComponent(runtimeType)}`
             });
             console.log('[Kernel] runtime type response:', rtResp.status);
+            if (!rtResp.ok) throw new Error(`kernel/runtime failed: ${rtResp.status}`);
         }
 
-        // Refresh kernel toolbar button
-        htmx.ajax('GET', `/dialeng/${nbId}/kernel/info`, {target: '#kernel-status-bar', swap: 'outerHTML'});
+        // Kernel selection schedules setup server-side before returning. Follow
+        // that backend-owned operation through snapshots instead of launching a
+        // second request that can race the initial WebSocket handshake.
+        console.log('[Kernel] Kernel setup scheduled by selection route');
+        kernelSelectionSetupScheduled = true;
+        window.HAS_CRAFT_CODE = false;
+        pollKernelSetupUntilReady(nbId);
+        await fetchKernelSnapshot(nbId, 'kernel-setup-scheduled');
 
-        // Always trigger craft-init on kernel selection/switch.
-        // The backend handles: lib sys.path injection, Colab uploads, CRAFT cell
-        // execution. It's safe to call even with no CRAFT files (just does lib init).
-        // The dot stays yellow (busy) — the backend broadcasts kernel_connected
-        // via WebSocket when the background init task completes.
-        console.log('[Kernel] Triggering craft-init (dot will update via WebSocket)');
-        fetch(`/dialeng/${nbId}/kernel/craft-init`, { method: 'POST' })
-            .then(resp => {
-                if (!resp.ok) throw new Error(`craft-init failed: ${resp.status}`);
-                window.HAS_CRAFT_CODE = false;
-                // Pending cell runs when kernel_connected arrives via WebSocket
-            })
-            .catch(err => {
-                console.error('[Kernel] CRAFT init error:', err);
-                updateKernelDot('error');
-                showKernelStatusMessage('Kernel setup failed. Check the server logs for details.', 'error', 8000);
-            });
-    }).catch(err => {
+        // Refresh only after setup has been accepted so this auxiliary request
+        // cannot race the setup POST on a page whose WebSocket is still opening.
+        htmx.ajax('GET', `/dialeng/${nbId}/kernel/info`, {target: '#kernel-status-bar', swap: 'outerHTML'});
+        // Pending cell runs when kernel_connected arrives via WebSocket.
+    } catch (err) {
+        if (kernelSetupPageClosing) return;
+        finishKernelSelectionSetup();
         console.error('[Kernel] applyKernelSelection error:', err);
         updateKernelDot('error');
         showKernelStatusMessage('Kernel selection failed. Check the server logs for details.', 'error', 8000);
-    });
+    }
 }
 
 // Refresh kernel status bar after first cell execution.

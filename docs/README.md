@@ -52,6 +52,7 @@ docs/
 | 24 | [Notebook-to-Skill Creation](how_it_works/24_notebook_skill_creation.md) | Built-in creator, deterministic extraction, staged refinement, and atomic installation |
 | 25 | [Extension Platform](how_it_works/25_extension_platform.md) | Discovery, ownership, trust, transactional activation, events, UI, and packaging |
 | 26 | [Extension Verification](how_it_works/26_extension_verification.md) | Reproducible unit, stress, E2E, package, security, and manual acceptance baseline |
+| 27 | [Extension Runtime And Environments](how_it_works/27_extension_runtime_environments.md) | Isolated hosts, extension lockfiles, command palette, and notebook-native development |
 
 ## Contributing Documentation
 

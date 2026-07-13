@@ -456,16 +456,19 @@ def test_public_resources_are_namespaced_ordered_and_removed(tmp_path):
     manager = _manager(project, extension)
 
     with _registry_guard():
-        asyncio.run(manager.activate("test.owner-runtime", require_trust=False))
-        assert "test.owner-runtime:hello" in resources.commands
-        assert resources.shortcuts["test.owner-runtime:hello-key"].command == "test.owner-runtime:hello"
-        assert "test-owner-runtime--inspect-project" in resources.tools
-        assert "test.owner-runtime:notebook.saved.saved" in events.handlers
+        async def scenario():
+            await manager.activate("test.owner-runtime", require_trust=False)
+            assert "test.owner-runtime:hello" in resources.commands
+            assert resources.shortcuts["test.owner-runtime:hello-key"].command == "test.owner-runtime:hello"
+            assert "test-owner-runtime--inspect-project" in resources.tools
+            assert "test.owner-runtime:notebook.saved.saved" in events.handlers
 
-        asyncio.run(manager.disable("test.owner-runtime"))
-        assert not any(name.startswith("test.owner-runtime:") for name in resources.commands)
-        assert "test-owner-runtime--inspect-project" not in resources.tools
-        assert not any(name.startswith("test.owner-runtime:") for name in events.handlers)
+            await manager.disable("test.owner-runtime")
+            assert not any(name.startswith("test.owner-runtime:") for name in resources.commands)
+            assert "test-owner-runtime--inspect-project" not in resources.tools
+            assert not any(name.startswith("test.owner-runtime:") for name in events.handlers)
+
+        asyncio.run(scenario())
 
 
 def test_event_bus_chains_transforms_and_guards_deterministically(tmp_path):
@@ -481,11 +484,15 @@ def test_event_bus_chains_transforms_and_guards_deterministically(tmp_path):
     manager = _manager(project, extension)
 
     with _registry_guard():
-        asyncio.run(manager.activate("test.owner-runtime", require_trust=False))
-        outcome = asyncio.run(events.event_bus.emit("execution.before_start", {"block": True}))
-        assert outcome.payload["steps"] == ["first", "second"]
-        assert outcome.blocked is True
-        assert outcome.reason == "blocked by fixture"
+        async def scenario():
+            await manager.activate("test.owner-runtime", require_trust=False)
+            outcome = await events.event_bus.emit("execution.before_start", {"block": True})
+            assert outcome.payload["steps"] == ["first", "second"]
+            assert outcome.blocked is True
+            assert outcome.reason == "blocked by fixture"
+            await manager.disable("test.owner-runtime")
+
+        asyncio.run(scenario())
 
 
 def test_tool_events_transform_provider_neutral_input_and_result():
@@ -535,13 +542,14 @@ def setup(api, ctx):
     manager = _manager(project, extension)
 
     async def scenario():
-        with _registry_guard():
-            active = await manager.activate("test.owner-runtime", require_trust=False)
-            assert len(active.context._tasks) == 1
-            assert await manager.disable("test.owner-runtime") is True
-            assert active.context.state["cleanup_count"] == 1
-            assert not active.context._tasks
-            assert await manager.disable("test.owner-runtime") is False
+            with _registry_guard():
+                active = await manager.activate("test.owner-runtime", require_trust=False)
+                assert active.runtime_mode == "isolated"
+                assert active.host.alive
+                assert await manager.disable("test.owner-runtime") is True
+                assert manager.state_store.runtime_state(project, "test.owner-runtime")["cleanup_count"] == 1
+                assert not active.host.alive
+                assert await manager.disable("test.owner-runtime") is False
 
     asyncio.run(scenario())
 
@@ -585,6 +593,7 @@ def test_extension_manager_routes_cover_trust_enable_action_command_and_disable(
     previous = appmod.extension_manager
     monkeypatch.setattr(appmod, "extension_manager", manager)
     client = TestClient(appmod.app)
+    client.__enter__()
 
     try:
         inventory = client.get("/dialeng/extensions")
@@ -608,10 +617,14 @@ def test_extension_manager_routes_cover_trust_enable_action_command_and_disable(
 
         trusted = client.post(
             "/dialeng/extensions/test.route-manager/trust",
-            json={"mode": "version"},
+            json={"mode": "version", "enable": True},
         )
         assert trusted.status_code == 200
+        assert trusted.json()["extensions"][0]["state"] == "active"
+        assert manager.state_store.enabled(project) == {"test.route-manager"}
 
+        disabled_once = client.post("/dialeng/extensions/test.route-manager/disable")
+        assert disabled_once.status_code == 200
         enabled = client.post("/dialeng/extensions/test.route-manager/enable")
         assert enabled.status_code == 200
         assert enabled.json()["extensions"][0]["state"] == "active"
@@ -662,6 +675,7 @@ def test_extension_manager_routes_cover_trust_enable_action_command_and_disable(
         assert disabled.json()["extensions"][0]["state"] == "disabled"
         assert manager.state_store.enabled(project) == set()
     finally:
+        client.__exit__(None, None, None)
         asyncio.run(manager.shutdown())
         monkeypatch.setattr(appmod, "extension_manager", previous)
 

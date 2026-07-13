@@ -1,14 +1,16 @@
 # Building Dialeng Extensions
 
-Dialeng extensions are trusted Python contribution bundles. They can add commands,
+Dialeng extensions are reviewed Python contribution bundles. They can add commands,
 tools, settings, events, actions, toolbar controls, panels, status items, browser
 assets, cell types, kernels, providers, skills, and templates without modifying
 Dialeng core.
 
 Project extensions live under `.dialeng/extensions/` and are disabled until a
-user reviews and trusts them. Trusted extensions execute in the Dialeng server
-process with the server user's operating-system permissions. Manifest permissions
-are review metadata and API gates, not a security sandbox.
+user reviews and trusts them. RPC-safe extensions execute in one supervised
+`python -I` host; kernel/provider/custom-renderer contributions are visibly marked
+as privileged and execute in the server process. Manifest permissions are both
+review metadata and core-broker gates, but neither mode is a complete OS security
+sandbox.
 
 ## Create An Extension
 
@@ -58,6 +60,10 @@ scope = "project"
 [permissions]
 network = false
 filesystem_read = ["project"]
+filesystem_write = []
+subprocess = false
+notebook = false
+kernel = false
 
 [contributes]
 commands = true
@@ -71,9 +77,9 @@ The entry point receives the stable facade and managed context:
 ```python
 def setup(api, ctx):
     async def audit(command):
-        root = ctx.resolve_project_path(".", must_exist=True)
-        await ctx.notify(f"Auditing {root.name}")
-        return {"message": "Audit complete"}
+        readme = await ctx.read_text("README.md")
+        await ctx.notify(f"Audited {len(readme)} characters")
+        return {"message": "Audit complete", "characters": len(readme)}
 
     api.register_command(
         "audit",
@@ -113,8 +119,10 @@ Extensions should not import application globals or mutate registries directly.
 | `add_cleanup` | Deterministic synchronous or async cleanup |
 
 `ExtensionContext` provides `logger`, persistent `state`, `setting`, `notify`,
-`resolve_project_path`, `watch_path`, permission-gated `open_http_client`,
-backend-authoritative `change_cell_type`, `cancel_signal`, and `create_task`.
+`resolve_project_path`, `watch_path`, `read_text`/`read_bytes`,
+`write_text`/`write_bytes`, permission-gated `open_http_client`/`request_http`,
+`run_process`, backend-authoritative `change_cell_type`/`invoke_kernel`,
+`cancel_signal`, and `create_task`.
 Always use `ctx.create_task`; unmanaged tasks created by extension setup cause
 activation to fail.
 
@@ -311,3 +319,83 @@ Run their focused tests with:
 uv run pytest -q tests/test_extension_reference_fixtures.py
 uv run pytest -q tests/e2e/test_extension_platform.py
 ```
+
+## Command Palette
+
+Press `Cmd/Ctrl+Shift+P` to search every core and extension command. Unavailable
+commands remain visible with a backend-provided reason. Parameterized commands
+open controls generated from their argument schema. Use `Alt+Enter` on a selected
+command to set or clear a browser-local shortcut override. Favorites and recents
+are local to the browser and do not modify project state.
+
+## Lock And Restore An Extension Environment
+
+After enabling the intended extension and resource set:
+
+```bash
+uv run dialeng extension lock --path .
+uv run dialeng extension check --path .
+```
+
+Commit `.dialeng/extensions.lock`. A new checkout restores it with:
+
+```bash
+uv sync
+uv run dialeng extension sync --path .
+```
+
+After one online lock/sync has populated the content-addressed source, wheel, and
+uv caches, an offline checkout can use:
+
+```bash
+uv run dialeng extension sync --offline --path .
+```
+
+`sync` installs/verifies immutable artifacts and reconciles enabled IDs. It never
+grants trust. Review and trust restored sources locally. To update deliberately:
+
+```bash
+uv run dialeng extension update dev.example.extension --path .
+```
+
+The output lists version, source, API, permission, and resource changes and marks
+changes that require renewed trust. `dialeng doctor --path .` combines Python,
+configuration, provider, kernel, extension runtime, generated-build, and lock
+diagnostics.
+
+## Notebook Development Profile
+
+Extension notebooks display an **Extension Development** badge. Use the Extension
+Manager or command palette for Profile, Build, Validate, Test, Preview, Package,
+and Activate Reviewed Build. Preview never imports the candidate. Build and tests
+run outside the server, and activation is rejected if the notebook, manifest,
+generated module, or documentation differs from the reviewed hashes.
+
+Use explicit cell roles:
+
+```python
+#| extension implementation
+def setup(api, ctx):
+    ...
+```
+
+```python
+#| extension test
+def test_behavior():
+    ...
+```
+
+Documentation/example/non-export roles are `#| extension documentation`,
+`#| extension example`, and `#| extension non-export`. Monaco completion for
+`api.` and `ctx.` provides the common public methods and contextual documentation.
+
+## Isolated And Privileged Modes
+
+The manager shows `isolated` or `privileged in-process` before activation.
+RPC-safe contributions run in one authenticated private-socket subprocess per extension. Custom
+cells, Python-rendered panels/status, kernels, providers, callbacks, and internal
+core/FastHTML imports currently require privileged mode. Subprocess isolation
+protects server availability but is not a complete OS security sandbox; only run
+code you have reviewed. Project filesystem, network, process, notebook, and kernel
+operations cross the core broker and are checked against the manifest on every
+request.

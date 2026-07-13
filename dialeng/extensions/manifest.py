@@ -91,6 +91,8 @@ class ExtensionSource:
     origin: str
     precedence: int
     package_entrypoint: str = ""
+    package_name: str = ""
+    package_version: str = ""
 
     @property
     def identity(self) -> str:
@@ -105,6 +107,8 @@ class ExtensionSource:
             "origin": self.origin,
             "precedence": self.precedence,
             "package_entrypoint": self.package_entrypoint,
+            "package_name": self.package_name,
+            "package_version": self.package_version,
         }
 
 

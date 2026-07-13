@@ -31,6 +31,7 @@ Read the documents in numerical order for the best understanding of the system:
 | 24 | [24_notebook_skill_creation.md](24_notebook_skill_creation.md) | Packaged skills, notebook extraction, staged LLM refinement, preview hashes, and atomic installation |
 | 25 | [25_extension_platform.md](25_extension_platform.md) | Manifest discovery, trust, transactional ownership, public APIs, browser surfaces, Studio, and packages |
 | 26 | [26_extension_verification.md](26_extension_verification.md) | Extension unit, stress, isolated, Playwright, package, security, and manual acceptance baseline |
+| 27 | [27_extension_runtime_environments.md](27_extension_runtime_environments.md) | Isolated hosts, lockfiles, command palette, and notebook-native extension builds |
 
 ## Purpose
 
@@ -92,6 +93,7 @@ These documents are intended for developers who want to:
 | Build a supported extension | [Extension guide](../guides/extensions.md) → [25_extension_platform.md](25_extension_platform.md) |
 | Migrate an AUTORUN extension | [AUTORUN migration guide](../guides/migrating_autorun_extensions.md) |
 | Verify extension changes | [26_extension_verification.md](26_extension_verification.md) |
+| Understand isolated hosts, lockfiles, or command palette | [27_extension_runtime_environments.md](27_extension_runtime_environments.md) |
 
 ## Related Documentation
 

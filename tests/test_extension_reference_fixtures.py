@@ -4,6 +4,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from dialeng.core import dispatch
 from dialeng.extensions.events import event_bus
 from dialeng.extensions.manager import ExtensionManager
@@ -164,3 +166,49 @@ def test_project_inspector_resources_enable_independently_from_runtime(tmp_path)
     manager.set_resource_enabled(extension_id, "skills", False)
     service.refresh(force=True)
     assert not any(skill.name == "project-inspector" for skill in service.all_skills)
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    ("hello-workspace", "execution-guard", "diagram-cell", "project-inspector-package"),
+)
+def test_reference_extension_full_install_upgrade_downgrade_and_reinstall_lifecycle(tmp_path, fixture):
+    project = tmp_path / "project"
+    target = project / ".dialeng/extensions" / fixture
+    target.parent.mkdir(parents=True)
+    shutil.copytree(FIXTURES / fixture, target)
+    manager = ExtensionManager(
+        project,
+        trust_store=ExtensionTrustStore(tmp_path / "trust.json"),
+        state_store=ExtensionStateStore(tmp_path / "state.json"),
+        user_root=tmp_path / "user",
+    )
+    extension_id = next(iter(manager.refresh().active))
+
+    async def scenario():
+        initial = await manager.activate(extension_id, require_trust=False)
+        assert initial.source.manifest.version == "0.1.0"
+        await manager.disable(extension_id)
+        assert extension_id not in manager.active
+
+        reloaded = await manager.activate(extension_id, require_trust=False)
+        manifest = target / "extension.toml"
+        original = manifest.read_text(encoding="utf-8")
+        manifest.write_text(original.replace('version = "0.1.0"', 'version = "0.2.0"'), encoding="utf-8")
+        upgraded = await manager.activate(extension_id, require_trust=False)
+        assert upgraded.source.manifest.version == "0.2.0"
+        assert not reloaded.host or not reloaded.host.alive
+
+        manifest.write_text(original, encoding="utf-8")
+        downgraded = await manager.activate(extension_id, require_trust=False)
+        assert downgraded.source.manifest.version == "0.1.0"
+        await manager.disable(extension_id)
+
+        shutil.rmtree(target)
+        assert extension_id not in manager.refresh().active
+        shutil.copytree(FIXTURES / fixture, target)
+        reinstalled = await manager.activate(extension_id, require_trust=False)
+        assert reinstalled.source.manifest.id == extension_id
+        await manager.shutdown()
+
+    asyncio.run(scenario())

@@ -74,6 +74,10 @@ def test_recovery_endpoint_returns_cells_and_all_revision_domains(tmp_path: Path
         appmod._touch_notebook_revision("recover", "test")
         appmod._protocol_event("recover", {"type": "cell_source_update"})
         appmod._next_stream_revision("recover", "output")
+        runtime = appmod.runtime_registry.get_or_create("recover")
+        runtime.kernel_generation = 3
+        runtime.setup_last_generation = 3
+        runtime.setup_last_outcome = "completed"
         client = TestClient(appmod.app)
         response = client.get("/dialeng/recover/recovery")
 
@@ -85,10 +89,14 @@ def test_recovery_endpoint_returns_cells_and_all_revision_domains(tmp_path: Path
         assert payload["snapshot"]["revisions"]["notebook"] == 1
         assert payload["snapshot"]["revisions"]["output"] == 1
         assert payload["snapshot"]["authoritative"] is True
+        assert payload["snapshot"]["kernel"]["generation"] == 3
+        assert payload["snapshot"]["setup"]["last_generation"] == 3
+        assert payload["snapshot"]["setup"]["last_outcome"] == "completed"
     finally:
-        appmod.notebooks.pop("recover", None)
-        appmod.notebook_revisions.pop("recover", None)
-        appmod.event_stream_revisions.pop("recover", None)
+        appmod.runtime_registry.clear_runtime(
+            "recover",
+            lifecycle=appmod.LifecycleState.STOPPED,
+        )
         appmod.set_root_dir(previous_root)
 
 

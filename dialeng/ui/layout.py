@@ -236,6 +236,9 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
         btn_sm_padding = {"compact": "2px 5px", "normal": "4px 8px", "large": "6px 12px"}.get(btn_size, "4px 8px")
         display_style = f":root {{ --notebook-width: {notebook_width}px; --base-font-size: {font_size}px; --btn-padding: {btn_padding}; --btn-font-size: {btn_font}; --btn-sm-padding: {btn_sm_padding}; }}"
 
+    extension_development = (
+        ".dialeng~extensions~" in nb.id and nb.id.endswith("~extension")
+    )
     return Titled(f"{nb.title} - Dialeng",
         # Display settings as CSS custom properties
         Style(display_style) if display_style else None,
@@ -259,6 +262,11 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                         Span(icon_sprites('notebook', sz=16), nb.title,
                              Span(cls=dot_cls, id="kernel-dot", title=dot_title),
                              cls="toolbar-title"),
+                        Span(
+                            "Extension Development",
+                            cls="extension-development-badge",
+                            title="Notebook-authoritative extension source",
+                        ) if extension_development else None,
                         cls="toolbar-left"
                     ),
                     Div(

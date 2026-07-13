@@ -18,7 +18,9 @@ MANIFEST_CONTRIBUTION_FIELDS = (
     "status", "templates", "toolbar", "tools",
 )
 MANIFEST_PERMISSION_LIST_FIELDS = ("filesystem_read", "filesystem_write")
-MANIFEST_PERMISSION_BOOL_FIELDS = ("network", "subprocess", "browser_assets")
+MANIFEST_PERMISSION_BOOL_FIELDS = (
+    "network", "subprocess", "notebook", "kernel", "browser_assets",
+)
 
 
 @dataclass(frozen=True)

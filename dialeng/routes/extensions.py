@@ -227,9 +227,13 @@ def register_extension_routes(
                 "mode": mode,
                 "trusted": True,
             })
+            if body.get("enable") is True:
+                await manager.enable(extension_id)
             return JSONResponse({"ok": True, **await changed(manager)})
         except (KeyError, ValueError) as exc:
             return _error(str(exc), 404 if isinstance(exc, KeyError) else 400)
+        except Exception as exc:
+            return _error(f"{type(exc).__name__}: {exc}", 200, kind="extension_activation_failed")
 
     @rt("/dialeng/extensions/{extension_id}/enable")
     async def post(extension_id: str):
@@ -327,6 +331,49 @@ def register_extension_routes(
             return JSONResponse({"ok": True, **service.diagnostics(extension_id)})
         except Exception as exc:
             return _error(f"{type(exc).__name__}: {exc}", 404, kind="extension_diagnostics_failed")
+
+    @rt("/dialeng/extensions/studio/{extension_id}/profile")
+    async def get(extension_id: str):
+        manager = manager_provider()
+        try:
+            return JSONResponse({
+                "ok": True,
+                "result": ExtensionProjectService(manager.project_root).development_profile(extension_id),
+            })
+        except Exception as exc:
+            return _error(f"{type(exc).__name__}: {exc}", 404, kind="extension_profile_failed")
+
+    @rt("/dialeng/extensions/studio/{extension_id}/{operation}")
+    async def post(extension_id: str, operation: str):
+        if operation not in {"test", "preview", "package", "activate-reviewed"}:
+            return _error("Unknown Extension Studio operation", 404)
+        manager = manager_provider()
+        service = ExtensionProjectService(manager.project_root)
+        try:
+            root = service.resolve_extension(extension_id)
+            if operation == "test":
+                result = service.test(root)
+            elif operation == "preview":
+                result = service.preview(extension_id)
+            elif operation == "package":
+                result = service.package(root)
+            else:
+                status = service.build_status(extension_id)
+                if not status["fresh"] or not status["reviewed"]:
+                    return _error(
+                        "The reviewed build is stale or incomplete. Build, validate, and test again before activation.",
+                        409,
+                        kind="extension_build_stale",
+                    )
+                manager.refresh()
+                await manager.enable(extension_id)
+                result = {"ok": True, "extension_id": extension_id, "activated": True, "build": status}
+            snapshot = await changed(manager)
+            return JSONResponse({"ok": bool(result.get("ok", True)), "result": result, **snapshot})
+        except ExtensionNotTrustedError as exc:
+            return _error(str(exc), 403, kind="extension_not_trusted")
+        except Exception as exc:
+            return _error(f"{type(exc).__name__}: {exc}", 422, kind="extension_studio_operation_failed")
 
     @rt("/dialeng/{nb_id}/extensions/{extension_id}/actions/{action_name}")
     async def post(nb_id: str, extension_id: str, action_name: str, request):

@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 # Subcommand names that should not be treated as path arguments
-_SUBCOMMANDS = {"init", "package", "skill", "extension"}
+_SUBCOMMANDS = {"init", "package", "skill", "extension", "doctor"}
 
 
 def parse_args(argv=None):
@@ -116,6 +116,9 @@ def _parse_subcommand(argv):
     project_init.add_argument("--name", dest="project_name", default=None,
                               help="Package/reuse name (default: detect or derive from directory)")
 
+    doctor = subparsers.add_parser("doctor", help="Report project and runtime readiness")
+    doctor.add_argument("--path", default=".", help="Dialeng project directory")
+
     # --- `dialeng package init` ---
     pkg_parser = subparsers.add_parser("package", help="Package management commands")
     pkg_sub = pkg_parser.add_subparsers(dest="package_action")
@@ -174,12 +177,26 @@ def _parse_subcommand(argv):
         command = extension_sub.add_parser(action, help=f"{action.title()} one extension")
         command.add_argument("extension_id")
         command.add_argument("--path", default=".")
-    for action in ("build", "check", "validate", "test", "prepare", "package", "install", "migrate"):
+    extension_check = extension_sub.add_parser("check", help="Check a source or locked project for drift")
+    extension_check.add_argument("extension_path", nargs="?", default="")
+    extension_check.add_argument("--path", default=".")
+    for action in ("build", "validate", "test", "prepare", "package", "install", "migrate"):
         command = extension_sub.add_parser(action, help=f"{action.title()} an extension source")
         command.add_argument("extension_path")
         command.add_argument("--path", default=".")
         if action == "test":
             command.add_argument("--browser", action="store_true")
+    for action in ("lock", "sync"):
+        command = extension_sub.add_parser(action, help=f"{action.title()} the project extension environment")
+        command.add_argument("--path", default=".")
+        if action == "sync":
+            command.add_argument(
+                "--offline", action="store_true",
+                help="Restore only from project artifacts and the populated extension/uv caches",
+            )
+    extension_update = extension_sub.add_parser("update", help="Update locked extension coordinates deliberately")
+    extension_update.add_argument("extension_id", nargs="?", default="")
+    extension_update.add_argument("--path", default=".")
 
     return parser.parse_args(argv)
 
@@ -232,6 +249,9 @@ def cli(argv=None):
 
     if args.subcommand == "extension":
         return _run_extension_command(args)
+
+    if args.subcommand == "doctor":
+        return _run_doctor(args)
 
     # Default: start the server
     root_dir = resolve_root_dir(args.path)
@@ -344,7 +364,7 @@ def _run_extension_command(args):
     from dialeng.services.extension_project_service import ExtensionProjectService
 
     if not args.extension_action:
-        print("Usage: dialeng extension {create,list,inspect,trust,enable,disable,reload,build,check,validate,test,prepare,package,install,remove,migrate,doctor,schema}")
+        print("Usage: dialeng extension {create,list,inspect,trust,enable,disable,reload,build,check,validate,test,prepare,package,install,remove,migrate,doctor,schema,lock,sync,update}")
         return
     root = resolve_root_dir(args.path, respect_env=False)
     service = ExtensionProjectService(root)
@@ -359,6 +379,18 @@ def _run_extension_command(args):
             result = {"ok": True, **contract_snapshot()}
     elif action == "create":
         result = service.create(args.name, template=args.template, extension_id=args.extension_id)
+    elif action in {"lock", "sync", "update"} or (action == "check" and not args.extension_path):
+        from dialeng.extensions.lockfile import ExtensionLockService
+
+        lock_service = ExtensionLockService(root)
+        if action == "lock":
+            result = lock_service.write()
+        elif action == "sync":
+            result = lock_service.sync(offline=args.offline)
+        elif action == "update":
+            result = lock_service.update(args.extension_id)
+        else:
+            result = lock_service.check()
     elif action in {"build", "check", "validate", "test", "prepare", "package", "install", "migrate"}:
         source = Path(args.extension_path).resolve()
         if action == "build":
@@ -412,4 +444,64 @@ def _run_extension_command(args):
                 result = {"ok": True, "extension_id": source.manifest.id, "enabled": enabled}
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
     if isinstance(result, dict) and result.get("ok") is False:
+        raise SystemExit(1)
+
+
+def _run_doctor(args):
+    """Print one redacted project report without starting the web server."""
+    import json
+    import sys
+
+    from dialeng.extensions.diagnostics import build_extension_doctor
+    from dialeng.extensions.discovery import discover_extensions
+    from dialeng.extensions.lockfile import ExtensionLockService
+    from dialeng.extensions.state import ExtensionStateStore
+    from dialeng.extensions.trust import ExtensionTrustStore
+    from dialeng.services.credential_service import detect_credential_inventory
+    from dialeng.services.dialeng_config import load_config
+
+    root = resolve_root_dir(args.path, respect_env=False)
+    config_path = root / "dialeng_config.json"
+    config_error = ""
+    try:
+        config = load_config(config_path, force_reload=True, create_if_missing=False)
+        config_summary = {
+            "valid": True,
+            "path": str(config_path),
+            "models": len(config.available_models),
+        }
+    except Exception as exc:
+        config_error = f"{type(exc).__name__}: {exc}"
+        config_summary = {"valid": False, "path": str(config_path), "error": config_error}
+    inventory = detect_credential_inventory(root / ".env", force=True)
+    providers = [
+        {
+            "id": item.id,
+            "authenticated": item.authenticated,
+            "validation_state": item.validation_state,
+            "source": item.source,
+        }
+        for item in inventory.providers.values()
+    ]
+    state = ExtensionStateStore()
+    extension_report = build_extension_doctor(
+        root, discover_extensions(root), ExtensionTrustStore(), state,
+    )
+    lock_report = ExtensionLockService(root, state_store=state).check()
+    result = {
+        "ok": bool(extension_report.get("ok") and config_summary["valid"]),
+        "project_root": str(root),
+        "python": {"version": sys.version.split()[0], "executable": sys.executable},
+        "configuration": config_summary,
+        "providers": providers,
+        "kernels": ["local", "colab"],
+        "extensions": extension_report,
+        "extension_lock": lock_report,
+        "generated_artifacts": {
+            "extension_builds": str(root / ".dialeng" / "extension-builds"),
+            "uv_lock": str(root / "uv.lock"),
+        },
+    }
+    print(json.dumps(result, indent=2, sort_keys=True))
+    if not result["ok"]:
         raise SystemExit(1)

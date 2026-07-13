@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -21,6 +22,7 @@ from .contracts import (
 )
 from .context import capture_registration
 from .events import EventHandlerRegistration
+from .permissions import resolve_permitted_project_path
 from .resources import (
     ActionRegistration,
     AssetRegistration,
@@ -107,20 +109,29 @@ class ExtensionContext:
 
     async def change_cell_type(self, notebook_id: str, cell_id: str, cell_type: str) -> dict:
         """Change one cell type through Dialeng's backend-authoritative mutation path."""
+        if not self.permissions.get("notebook", False):
+            raise PermissionError("Extension manifest does not declare notebook access")
         handler = self._services.get("change_cell_type")
         if handler is None:
             raise RuntimeError("Notebook mutation service is unavailable")
         result = handler(notebook_id, cell_id, cell_type)
         return await result if inspect.isawaitable(result) else result
 
-    def resolve_project_path(self, path: str | Path, *, must_exist: bool = False) -> Path:
+    def resolve_project_path(
+        self,
+        path: str | Path,
+        *,
+        access: str = "read",
+        must_exist: bool = False,
+    ) -> Path:
         """Resolve a path below the current project without permitting traversal."""
-        candidate = (self.project_root / Path(path)).resolve()
-        if not candidate.is_relative_to(self.project_root):
-            raise ValueError("Extension path escapes the project root")
-        if must_exist and not candidate.exists():
-            raise FileNotFoundError(candidate)
-        return candidate
+        return resolve_permitted_project_path(
+            self.project_root,
+            path,
+            self.permissions,
+            access=access,
+            must_exist=must_exist,
+        )
 
     def watch_path(self, path: str | Path, handler: Callable, *, name: str = "watch") -> asyncio.Task:
         """Watch one project path as a managed background task."""
@@ -134,6 +145,75 @@ class ExtensionContext:
                     await result
 
         return self.create_task(run(), name=name)
+
+    async def read_text(self, path: str | Path, *, encoding: str = "utf-8") -> str:
+        target = self.resolve_project_path(path, access="read", must_exist=True)
+        return await asyncio.to_thread(target.read_text, encoding=encoding)
+
+    async def read_bytes(self, path: str | Path) -> bytes:
+        target = self.resolve_project_path(path, access="read", must_exist=True)
+        return await asyncio.to_thread(target.read_bytes)
+
+    async def write_text(
+        self, path: str | Path, value: str, *, encoding: str = "utf-8",
+    ) -> dict[str, Any]:
+        target = self.resolve_project_path(path, access="write")
+        await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(target.write_text, value, encoding=encoding)
+        return {"path": target.relative_to(self.project_root).as_posix(), "bytes": len(value.encode(encoding))}
+
+    async def write_bytes(self, path: str | Path, value: bytes) -> dict[str, Any]:
+        target = self.resolve_project_path(path, access="write")
+        await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(target.write_bytes, value)
+        return {"path": target.relative_to(self.project_root).as_posix(), "bytes": len(value)}
+
+    async def request_http(self, url: str, *, method: str = "GET", **kwargs) -> dict[str, Any]:
+        if not self.permissions.get("network", False):
+            raise PermissionError("Extension manifest does not declare network access")
+        timeout = min(max(float(kwargs.pop("timeout", 10)), 0.1), 30)
+        async with self.open_http_client(timeout=timeout, follow_redirects=False) as client:
+            response = await client.request(method.upper(), url, **kwargs)
+        content = response.content[:1_000_000]
+        return {
+            "status_code": response.status_code,
+            "headers": dict(response.headers),
+            "content": content,
+            "truncated": len(response.content) > len(content),
+        }
+
+    async def run_process(self, argv: list[str], *, timeout: float = 30) -> dict[str, Any]:
+        if not self.permissions.get("subprocess", False):
+            raise PermissionError("Extension manifest does not declare subprocess access")
+        if not argv or any(not isinstance(item, str) for item in argv):
+            raise ValueError("run_process requires a non-empty string argv list")
+        allowed = {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "PYTHONIOENCODING"}
+        environment = {key: value for key, value in os.environ.items() if key in allowed}
+        process = await asyncio.create_subprocess_exec(
+            *argv, cwd=self.project_root, env=environment,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=min(timeout, 120))
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            raise TimeoutError("Extension subprocess timed out")
+        return {
+            "returncode": process.returncode,
+            "stdout": stdout[:1_000_000].decode(errors="replace"),
+            "stderr": stderr[:1_000_000].decode(errors="replace"),
+            "truncated": len(stdout) > 1_000_000 or len(stderr) > 1_000_000,
+        }
+
+    async def invoke_kernel(self, name: str, **arguments) -> Any:
+        if not self.permissions.get("kernel", False):
+            raise PermissionError("Extension manifest does not declare kernel access")
+        handler = self._services.get("kernel_operation")
+        if handler is None:
+            raise RuntimeError("Kernel broker service is unavailable")
+        result = handler(name, arguments)
+        return await result if inspect.isawaitable(result) else result
 
     def open_http_client(self, **kwargs):
         """Create a managed HTTP client when network permission is declared."""

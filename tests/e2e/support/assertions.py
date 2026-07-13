@@ -37,7 +37,10 @@ def attach_local_kernel(page: Page) -> None:
     modal.locator('.kernel-option[data-kernel="local"]').click()
     modal.get_by_role("button", name="Apply").click()
     expect(modal).not_to_have_class("visible")
-    expect(page.locator("#kernel-dot")).to_have_attribute("title", "Kernel: idle", timeout=20_000)
+    # A clean environment may need to build Matplotlib's font cache before the
+    # first local kernel becomes ready. The UI must remain initializing until
+    # notebook setup has actually completed rather than exposing a false idle.
+    expect(page.locator("#kernel-dot")).to_have_attribute("title", "Kernel: idle", timeout=45_000)
 
 
 def run_prompt(page: Page, cell_id: str) -> None:

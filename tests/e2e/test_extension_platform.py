@@ -1,6 +1,5 @@
 """End-to-end contract tests for the Dialeng extension platform."""
 
-from pathlib import Path
 import re
 
 import pytest
@@ -177,11 +176,31 @@ def test_extension_studio_create_build_and_isolated_prepare(page, e2e_server):
     expect(page.locator("#extension-studio-status")).to_contain_text("Created and statically validated", timeout=20_000)
     card = _card(page, "dev.e2e.browser-created")
     expect(card).to_have_class(re.compile(r"\bblocked\b"))
+    card.get_by_role("button", name="Profile").click()
+    expect(page.locator("#extension-studio-status")).to_contain_text("profile refreshed", timeout=20_000)
+    expect(page.locator("#extension-studio-output")).to_contain_text("extension-development")
+    card.get_by_role("button", name="Preview").click()
+    expect(page.locator("#extension-studio-status")).to_contain_text("without importing", timeout=20_000)
+    expect(page.locator("#extension-studio-output")).to_contain_text('"imported": false')
     card.get_by_role("button", name="Build").click()
-    expect(page.locator("#extension-studio-status")).to_contain_text("static validation passed", timeout=20_000)
+    expect(page.locator("#extension-studio-status")).to_contain_text("exported deterministically", timeout=20_000)
     card.get_by_role("button", name="Validate").click()
     expect(page.locator("#extension-studio-status")).to_contain_text("Isolated validation", timeout=30_000)
+    card.get_by_role("button", name="Test").click()
+    expect(page.locator("#extension-studio-status")).to_contain_text("tests completed", timeout=20_000)
     expect(card).to_have_class(re.compile(r"\bblocked\b"))
+    trusted = page.request.post(
+        f'{e2e_server["base_url"]}/dialeng/extensions/dev.e2e.browser-created/trust',
+        data={"mode": "version"},
+    )
+    assert trusted.ok, trusted.text()
+    page.evaluate("window.DialengExtensions.refresh()")
+    expect(card).to_have_class(re.compile(r"\bdisabled\b"), timeout=20_000)
+    page.once("dialog", lambda dialog: dialog.accept())
+    card.get_by_role("button", name="Activate reviewed").click()
+    expect(page.locator("#extension-studio-status")).to_contain_text("Reviewed build activated", timeout=20_000)
+    expect(card).to_have_class(re.compile(r"\bactive\b"), timeout=20_000)
+    expect(card).to_contain_text("isolated")
 
 
 def test_failed_extension_update_rolls_back_then_corrected_update_activates(page, e2e_server):

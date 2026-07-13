@@ -2990,6 +2990,18 @@ button, select { font-size: var(--btn-font-size, inherit); }
     white-space: pre-wrap;
 }
 
+.extension-development-badge {
+    padding: 3px 8px;
+    border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+    border-radius: 999px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+}
+
 .extension-manager-status {
     margin-bottom: 12px;
     color: var(--text-muted);

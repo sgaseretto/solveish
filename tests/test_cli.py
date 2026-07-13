@@ -88,6 +88,28 @@ class TestParseArgs:
         assert schema.extension_action == "schema"
         assert schema.output == "/tmp/schema.json"
 
+        drift = parse_args(["extension", "check", "--path", "/tmp/project"])
+        assert drift.extension_path == ""
+
+    @pytest.mark.parametrize("action", ["lock", "sync"])
+    def test_extension_environment_commands_parse(self, action):
+        from dialeng.cli import parse_args
+
+        args = parse_args(["extension", action, "--path", "/tmp/project"])
+
+        assert args.extension_action == action
+        assert args.path == "/tmp/project"
+
+    def test_extension_update_and_top_level_doctor_parse(self):
+        from dialeng.cli import parse_args
+
+        update = parse_args(["extension", "update", "dev.example", "--path", "/tmp/project"])
+        doctor = parse_args(["doctor", "--path", "/tmp/project"])
+
+        assert update.extension_id == "dev.example"
+        assert doctor.subcommand == "doctor"
+        assert doctor.path == "/tmp/project"
+
     @pytest.mark.parametrize("action", ["package", "install", "migrate"])
     def test_extension_source_commands_parse(self, action):
         from dialeng.cli import parse_args

@@ -148,6 +148,18 @@ def _core_client_command(action: str):
 def register_core_commands() -> None:
     """Register idempotent core commands in the same catalog extensions use."""
 
+    extension_id_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["extension_id"],
+        "properties": {
+            "extension_id": {
+                "type": "string",
+                "title": "Extension ID",
+                "minLength": 3,
+            },
+        },
+    }
     definitions = (
         CommandRegistration(
             "core:open-settings", "Open Settings", "Open Dialeng project settings.",
@@ -196,6 +208,23 @@ def register_core_commands() -> None:
                 },
             },
             "Notebook", ("new", "code", "note", "prompt"), "",
+        ),
+        *(
+            CommandRegistration(
+                f"core:extension-{operation}", title,
+                f"{title} for a notebook-authored extension.",
+                _core_client_command(f"extension-studio:{operation}"),
+                60 + index, "workspace", extension_id_schema, "Extension Development",
+                ("notebook", "studio", operation), "",
+            )
+            for index, (operation, title) in enumerate((
+                ("build", "Build Extension"),
+                ("prepare", "Validate Extension"),
+                ("test", "Test Extension"),
+                ("preview", "Preview Extension Contributions"),
+                ("package", "Package Extension"),
+                ("activate-reviewed", "Activate Reviewed Extension Build"),
+            ))
         ),
     )
     for registration in definitions:

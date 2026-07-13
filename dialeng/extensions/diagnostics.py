@@ -91,6 +91,8 @@ def build_extension_doctor(
             "build": build,
             "build_fresh": bool(build and build.get("source_hash") == source.source_hash),
             "runtime_state": runtime.get("state", "not_running"),
+            "runtime_mode": runtime.get("runtime_mode", "unknown"),
+            "host": runtime.get("host"),
             "registrations": runtime.get("contributions", []),
             "managed_tasks": runtime.get("managed_tasks", 0),
             "failure": runtime.get("error"),

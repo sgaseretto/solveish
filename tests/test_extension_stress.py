@@ -73,6 +73,7 @@ css = ["asset.css"]
     )
 
     async def scenario():
+        previous_host = None
         for index in range(500):
             (root / "extension.py").write_text(
                 "import asyncio\n\n"
@@ -87,23 +88,30 @@ css = ["asset.css"]
             )
             active = await manager.activate("test.stress", require_trust=False)
             assert active.reload_count == index
+            assert active.runtime_mode == "isolated"
+            assert active.host.alive
+            if previous_host is not None:
+                assert previous_host.alive is False
+            previous_host = active.host
             assert len(manager.store.snapshot()["test.stress"]) == 3
-            assert len(active.context._tasks) == 1
+            assert len(active.context._tasks) == 0
             assert "test.stress:only" in commands
             assert "test.stress:style" in assets
             assert "test.stress:stress.event.only" in handlers
-            assert len([name for name in sys.modules if name.startswith("_dialeng_ext_test_stress")]) == 1
+            assert not [name for name in sys.modules if name.startswith("_dialeng_ext_test_stress")]
         await asyncio.gather(
             manager.activate("test.stress", require_trust=False),
             manager.activate("test.stress", require_trust=False),
         )
         assert len(manager.store.snapshot()["test.stress"]) == 3
+        assert manager.active["test.stress"].host.alive
         await asyncio.gather(manager.disable("test.stress"), manager.disable("test.stress"))
         assert "test.stress" not in manager.store.owners
         assert "test.stress:only" not in commands
         assert "test.stress:style" not in assets
         assert "test.stress:stress.event.only" not in handlers
         assert not [name for name in sys.modules if name.startswith("_dialeng_ext_test_stress")]
+        assert previous_host.alive is False
 
     asyncio.run(scenario())
 

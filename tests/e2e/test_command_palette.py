@@ -131,7 +131,7 @@ def test_command_palette_thousand_commands_search_conflicts_and_safe_text(page, 
 
     started = page.evaluate("performance.now()")
     page.locator("#command-palette-btn").click()
-    expect(page.locator("#command-palette-list .command-palette-item")).to_have_count(1007, timeout=20_000)
+    expect(page.locator("#command-palette-list .command-palette-item")).to_have_count(1013, timeout=20_000)
     opened_ms = page.evaluate("performance.now()") - started
     assert opened_ms < 3000
 

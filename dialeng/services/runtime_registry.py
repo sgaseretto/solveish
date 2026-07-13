@@ -58,6 +58,8 @@ class NotebookRuntime:
     structure_revision: int = 0
     outline_revision: int = 0
     setup_state: dict[str, Any] | None = None
+    setup_last_generation: int = 0
+    setup_last_outcome: str | None = None
     setup_task: asyncio.Task | None = None
     sync_task: asyncio.Task | None = None
     data_queues: dict[str, asyncio.Queue] = field(default_factory=dict)
@@ -113,10 +115,11 @@ class NotebookRuntimeRegistry:
     """Own all notebook-scoped mutable runtime state in one lifecycle object."""
 
     _OPTIONAL_FIELDS = {
-        "notebook", "execution_queue", "setup_state", "setup_task", "sync_task",
+        "notebook", "execution_queue", "setup_state", "setup_last_outcome", "setup_task", "sync_task",
     }
     _NUMERIC_FIELDS = {
         "kernel_generation", "notebook_revision", "structure_revision", "outline_revision",
+        "setup_last_generation",
     }
     _DICT_FIELDS = {"data_queues", "stream_revisions"}
 
@@ -170,6 +173,8 @@ class NotebookRuntimeRegistry:
             and runtime.structure_revision == 0
             and runtime.outline_revision == 0
             and runtime.setup_state is None
+            and runtime.setup_last_generation == 0
+            and runtime.setup_last_outcome is None
             and runtime.setup_task is None
             and runtime.sync_task is None
             and not runtime.data_queues
@@ -253,6 +258,8 @@ class NotebookRuntimeRegistry:
         runtime.structure_revision = 0
         runtime.outline_revision = 0
         runtime.setup_state = None
+        runtime.setup_last_generation = 0
+        runtime.setup_last_outcome = None
         runtime.setup_task = None
         runtime.sync_task = None
         runtime.data_queues.clear()

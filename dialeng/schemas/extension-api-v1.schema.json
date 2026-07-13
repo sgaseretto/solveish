@@ -284,7 +284,13 @@
               "type": "array",
               "uniqueItems": true
             },
+            "kernel": {
+              "type": "boolean"
+            },
             "network": {
+              "type": "boolean"
+            },
+            "notebook": {
               "type": "boolean"
             },
             "subprocess": {

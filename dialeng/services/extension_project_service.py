@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from dialeng.core.extensions import extract_extension
 from dialeng.extensions.discovery import discover_extensions
 from dialeng.extensions.manifest import load_extension_manifest
 from dialeng.extensions.manifest import extension_source_hash
@@ -29,6 +28,15 @@ from dialeng.extensions.contracts import (
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
 _TEMPLATES = {"basic", "tool", "cell", "lifecycle", "provider", "package"}
 _EDITABLE_SUFFIXES = {".ipynb", ".py", ".md", ".toml", ".json", ".css", ".js"}
+_EXTENSION_ROLES = {"implementation", "test", "documentation", "example", "non-export"}
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
@@ -144,7 +152,7 @@ def _notebook(name: str, template: str, extension_id: str, module_name: str = "e
             {
                 "cell_type": "markdown",
                 "id": "extension-docs",
-                "metadata": {},
+                "metadata": {"dialeng": {"extension_role": "documentation"}},
                 "source": [
                     f"# {name.replace('-', ' ').title()}\n",
                     "\nA Dialeng extension authored and tested from a notebook.\n",
@@ -154,7 +162,7 @@ def _notebook(name: str, template: str, extension_id: str, module_name: str = "e
                 "cell_type": "code",
                 "execution_count": None,
                 "id": "default-export",
-                "metadata": {},
+                "metadata": {"dialeng": {"extension_role": "non-export"}},
                 "outputs": [],
                 "source": [f"#| default_exp {module_name}\n"],
             },
@@ -162,7 +170,7 @@ def _notebook(name: str, template: str, extension_id: str, module_name: str = "e
                 "cell_type": "code",
                 "execution_count": None,
                 "id": "extension-setup",
-                "metadata": {"dialeng": {"is_exported": True}},
+                "metadata": {"dialeng": {"is_exported": True, "extension_role": "implementation"}},
                 "outputs": [],
                 "source": source.splitlines(keepends=True),
             },
@@ -170,9 +178,15 @@ def _notebook(name: str, template: str, extension_id: str, module_name: str = "e
                 "cell_type": "code",
                 "execution_count": None,
                 "id": "extension-smoke-test",
-                "metadata": {},
+                "metadata": {"dialeng": {"extension_role": "test"}},
                 "outputs": [],
-                "source": ["assert callable(setup)\n"],
+                "source": [
+                    "#| extension test\n",
+                    f"from {module_name} import setup\n",
+                    "\n",
+                    "def test_notebook_setup_is_callable():\n",
+                    "    assert callable(setup)\n",
+                ],
             },
         ],
         "metadata": {
@@ -410,6 +424,242 @@ jobs:
         target.write_text(str(content), encoding="utf-8")
         return self.read_file(extension_id, target.relative_to(self.resolve_extension(extension_id)).as_posix())
 
+    @staticmethod
+    def _cell_role(cell: dict[str, Any]) -> str:
+        metadata_role = str(cell.get("metadata", {}).get("dialeng", {}).get("extension_role") or "")
+        if metadata_role in _EXTENSION_ROLES:
+            return metadata_role
+        source = cell.get("source", "")
+        source = "".join(source) if isinstance(source, list) else str(source)
+        match = re.search(r"(?m)^\s*#\|\s*extension\s+([a-z-]+)\s*$", source)
+        if match and match.group(1) in _EXTENSION_ROLES:
+            return match.group(1)
+        if "#| export" in source or cell.get("metadata", {}).get("dialeng", {}).get("is_exported"):
+            return "implementation"
+        return "non-export"
+
+    @staticmethod
+    def _clean_cell_source(source: str) -> tuple[str, int]:
+        lines = source.splitlines()
+        first_source_line = 1
+        cleaned = []
+        for index, line in enumerate(lines, start=1):
+            if re.fullmatch(r"\s*#\|\s*(?:export|extension\s+[a-z-]+)\s*", line):
+                if not cleaned:
+                    first_source_line = index + 1
+                continue
+            cleaned.append(line)
+        return "\n".join(cleaned).strip(), first_source_line
+
+    def _export_notebook(self, notebook: Path, module: Path) -> dict[str, Any]:
+        payload = json.loads(notebook.read_text(encoding="utf-8"))
+        blocks: list[tuple[str, str, int]] = []
+        tests: list[tuple[str, str]] = []
+        documentation: list[str] = []
+        examples: list[str] = []
+        roles: dict[str, int] = {role: 0 for role in sorted(_EXTENSION_ROLES)}
+        for index, cell in enumerate(payload.get("cells", [])):
+            role = self._cell_role(cell)
+            roles[role] += 1
+            if cell.get("cell_type") != "code":
+                continue
+            source = cell.get("source", "")
+            source = "".join(source) if isinstance(source, list) else str(source)
+            cleaned, first_source_line = self._clean_cell_source(source)
+            if not cleaned:
+                continue
+            cell_id = str(cell.get("id") or f"cell-{index}")
+            if role == "documentation":
+                documentation.append(cleaned)
+                continue
+            if role == "example":
+                examples.append(cleaned)
+                continue
+            if role == "implementation":
+                blocks.append((cell_id, cleaned, first_source_line))
+            elif role == "test":
+                tests.append((cell_id, cleaned))
+        if not blocks:
+            raise ValueError("Extension notebook has no implementation cells (#| export or #| extension implementation)")
+
+        header = (
+            '"""Generated from extension.ipynb by Dialeng.\n\n'
+            "The notebook is authoritative; do not edit this module directly.\n"
+            '"""\n\n'
+        )
+        output = header
+        line_map = []
+        current_line = header.count("\n") + 1
+        for position, (cell_id, source, source_start) in enumerate(blocks):
+            if position:
+                output += "\n\n"
+                current_line += 2
+            start = current_line
+            output += source
+            line_count = source.count("\n") + 1
+            current_line += line_count
+            line_map.append({
+                "cell_id": cell_id,
+                "generated_start": start,
+                "generated_end": start + line_count - 1,
+                "source_start": source_start,
+            })
+        output += "\n"
+        module.parent.mkdir(parents=True, exist_ok=True)
+        module.write_text(output, encoding="utf-8")
+
+        generated_test = module.parent / "tests" / "test_notebook_cells.py"
+        if tests:
+            generated_test.parent.mkdir(parents=True, exist_ok=True)
+            test_output = (
+                '"""Generated from #| extension test cells. Do not edit directly."""\n\n'
+                + "\n\n".join(source for _cell_id, source in tests)
+                + "\n"
+            )
+            generated_test.write_text(test_output, encoding="utf-8")
+        elif generated_test.exists():
+            generated_test.unlink()
+        generated_docs = module.parent / "REFERENCE.md"
+        if documentation or examples:
+            sections = ["<!-- Generated from extension.ipynb; do not edit directly. -->"]
+            sections.extend(documentation)
+            if examples:
+                sections.append("## Examples")
+                sections.extend(f"```python\n{source}\n```" for source in examples)
+            generated_docs.write_text("\n\n".join(sections).strip() + "\n", encoding="utf-8")
+        elif generated_docs.exists():
+            generated_docs.unlink()
+        return {
+            "exported_cells": len(blocks),
+            "test_cells": len(tests),
+            "line_map": line_map,
+            "roles": roles,
+            "module_hash": _sha256_text(output),
+            "notebook_hash": _sha256_file(notebook),
+            "generated_test": str(generated_test) if tests else "",
+            "generated_documentation": str(generated_docs) if documentation or examples else "",
+            "documentation_hash": _sha256_file(generated_docs) if generated_docs.is_file() else "",
+        }
+
+    @staticmethod
+    def _map_generated_line(line: int, line_map: list[dict[str, Any]]) -> dict[str, Any]:
+        for item in line_map:
+            if item["generated_start"] <= line <= item["generated_end"]:
+                return {
+                    "cell_id": item["cell_id"],
+                    "cell_line": item["source_start"] + line - item["generated_start"],
+                }
+        return {}
+
+    def _build_record_path(self, extension_id: str) -> Path:
+        return (
+            self.project_root / ".dialeng" / "extension-builds"
+            / f"{hashlib.sha256(extension_id.encode()).hexdigest()}.json"
+        )
+
+    def _build_record(self, extension_id: str) -> dict[str, Any] | None:
+        path = self._build_record_path(extension_id)
+        if not path.is_file():
+            return None
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"corrupted": True}
+        return value if isinstance(value, dict) else {"corrupted": True}
+
+    def build_status(self, extension_id: str) -> dict[str, Any]:
+        root = self.resolve_extension(extension_id)
+        manifest = load_extension_manifest(root / "extension.toml")
+        module_name = manifest.entrypoint.split(":", 1)[0]
+        module = root / (module_name.replace(".", "/") + ".py")
+        notebook = root / "extension.ipynb"
+        documentation = root / "REFERENCE.md"
+        record = self._build_record(manifest.id)
+        current = {
+            "notebook_hash": _sha256_file(notebook) if notebook.is_file() else "",
+            "manifest_hash": _sha256_file(root / "extension.toml"),
+            "module_hash": _sha256_file(module) if module.is_file() else "",
+            "documentation_hash": _sha256_file(documentation) if documentation.is_file() else "",
+        }
+        stale_fields = [
+            field for field, value in current.items()
+            if not record or record.get(field) != value
+        ]
+        return {
+            "extension_id": manifest.id,
+            "record": record,
+            "current": current,
+            "built": bool(record),
+            "reviewed": bool(record and record.get("validated") and record.get("tests")),
+            "fresh": bool(record and not stale_fields),
+            "stale_fields": stale_fields,
+        }
+
+    def preview(self, extension_id: str) -> dict[str, Any]:
+        """Inspect contribution calls and resources without importing extension code."""
+        root = self.resolve_extension(extension_id)
+        manifest = load_extension_manifest(root / "extension.toml")
+        module_name = manifest.entrypoint.split(":", 1)[0]
+        module = root / (module_name.replace(".", "/") + ".py")
+        source = module.read_text(encoding="utf-8") if module.is_file() else ""
+        registrations = []
+        diagnostics = []
+        try:
+            tree = ast.parse(source, filename=str(module))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                    continue
+                if not node.func.attr.startswith("register_"):
+                    continue
+                name = ""
+                if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                    name = node.args[0].value
+                registrations.append({
+                    "kind": node.func.attr.removeprefix("register_"),
+                    "name": name,
+                    "line": node.lineno,
+                })
+        except SyntaxError as exc:
+            diagnostics.append({"code": "syntax_error", "message": str(exc), "line": exc.lineno})
+        return {
+            "ok": not diagnostics,
+            "extension_id": manifest.id,
+            "imported": False,
+            "registrations": registrations,
+            "declared_contributions": manifest.contributes,
+            "permissions": manifest.permissions,
+            "assets": manifest.assets,
+            "resources": manifest.resources,
+            "diagnostics": diagnostics,
+            "build_status": self.build_status(manifest.id),
+        }
+
+    def development_profile(self, extension_id: str) -> dict[str, Any]:
+        root = self.resolve_extension(extension_id)
+        manifest_error = ""
+        manifest = None
+        try:
+            manifest = load_extension_manifest(root / "extension.toml")
+        except Exception as exc:
+            manifest_error = f"{type(exc).__name__}: {exc}"
+        effective_id = manifest.id if manifest else extension_id
+        status = self.build_status(effective_id) if manifest else {
+            "extension_id": effective_id, "built": False, "reviewed": False,
+            "fresh": False, "stale_fields": ["manifest"], "record": None,
+        }
+        return {
+            "extension_id": effective_id,
+            "root": str(root),
+            "profile": "extension-development",
+            "manifest_valid": manifest is not None,
+            "manifest_error": manifest_error,
+            "manifest": manifest.public() if manifest else None,
+            "build": status,
+            "preview": self.preview(effective_id) if manifest and status["current"]["module_hash"] else None,
+            "commands": ["build", "validate", "test", "preview", "package", "activate-reviewed"],
+            "activation_requires_trust": True,
+        }
+
     def build(self, path: Path) -> dict[str, Any]:
         root = Path(path).resolve()
         manifest = load_extension_manifest(root / "extension.toml")
@@ -418,39 +668,71 @@ jobs:
             raise FileNotFoundError(f"Extension notebook not found: {notebook}")
         module_name = manifest.entrypoint.split(":", 1)[0]
         module = root / (module_name.replace(".", "/") + ".py")
-        exported = extract_extension(notebook, module, marker="#| export")
-        if exported < 1:
-            raise ValueError("Extension notebook has no #| export cells")
-        validation = self.validate(root, isolated=False)
+        export = self._export_notebook(notebook, module)
+        validation = self.validate(root, isolated=False, line_map=export["line_map"])
         notebook_name = ""
         try:
             notebook_name = notebook.relative_to(self.project_root).with_suffix("").as_posix()
         except ValueError:
             pass
-        return ExtensionBuildResult(
+        result = ExtensionBuildResult(
             extension_id=manifest.id,
             root=str(root),
             manifest=str(root / "extension.toml"),
             notebook=str(notebook),
             module=str(module),
-            exported_cells=exported,
+            exported_cells=export["exported_cells"],
             validation=validation,
             notebook_name=notebook_name,
         ).__dict__
+        result.update(export)
+        result["manifest_hash"] = _sha256_file(root / "extension.toml")
+        result["build_hash"] = hashlib.sha256(
+            (
+                result["notebook_hash"] + result["manifest_hash"]
+                + result["module_hash"] + result["documentation_hash"]
+            ).encode("ascii")
+        ).hexdigest()
+        return result
 
-    def validate(self, path: Path, *, isolated: bool = True) -> dict[str, Any]:
+    def validate(
+        self,
+        path: Path,
+        *,
+        isolated: bool = True,
+        line_map: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         root = Path(path).resolve()
         manifest = load_extension_manifest(root / "extension.toml")
         module_name = manifest.entrypoint.split(":", 1)[0]
         module = root / (module_name.replace(".", "/") + ".py")
         if not module.is_file():
             raise FileNotFoundError(f"Generated extension module not found: {module}")
-        compile(module.read_text(encoding="utf-8"), str(module), "exec")
+        if line_map is None:
+            profile = self._build_record(manifest.id)
+            line_map = list((profile or {}).get("line_map") or [])
+        try:
+            compile(module.read_text(encoding="utf-8"), str(module), "exec")
+        except SyntaxError as exc:
+            mapped = self._map_generated_line(int(exc.lineno or 0), line_map)
+            return {
+                "ok": False,
+                "extension_id": manifest.id,
+                "module": str(module),
+                "isolated": isolated,
+                "diagnostics": [{
+                    "code": "syntax_error",
+                    "message": str(exc),
+                    "generated_line": exc.lineno,
+                    **mapped,
+                }],
+            }
         result: dict[str, Any] = {
             "ok": True,
             "extension_id": manifest.id,
             "module": str(module),
             "isolated": isolated,
+            "diagnostics": [],
         }
         if isolated:
             script = '''import asyncio, json, sys
@@ -590,9 +872,15 @@ asyncio.run(run())
 
     def prepare(self, path: Path) -> dict[str, Any]:
         build = self.build(path)
-        validation = self.validate(Path(build["root"]), isolated=True)
-        tests = self.test(Path(build["root"]))
-        nbdev = self.nbdev_verify(Path(build["root"]))
+        validation = self.validate(
+            Path(build["root"]), isolated=True, line_map=build.get("line_map") or [],
+        )
+        tests = self.test(Path(build["root"])) if validation.get("ok") else {
+            "ok": False, "skipped": True, "reason": "Validation failed",
+        }
+        nbdev = self.nbdev_verify(Path(build["root"])) if tests.get("ok") else {
+            "ok": False, "skipped": True, "reason": "Tests failed",
+        }
         result = {
             **build,
             "validation": validation,
@@ -606,10 +894,17 @@ asyncio.run(run())
             record = {
                 "extension_id": build["extension_id"],
                 "source_hash": extension_source_hash(Path(build["root"])),
+                "notebook_hash": build["notebook_hash"],
+                "manifest_hash": build["manifest_hash"],
+                "module_hash": build["module_hash"],
+                "documentation_hash": build["documentation_hash"],
+                "build_hash": build["build_hash"],
+                "line_map": build["line_map"],
+                "roles": build["roles"],
                 "validated": True,
                 "tests": tests.get("ok", False),
             }
-            record_path = build_root / f"{hashlib.sha256(build['extension_id'].encode()).hexdigest()}.json"
+            record_path = self._build_record_path(build["extension_id"])
             _write_private_json(record_path, record)
             result["build_record"] = str(record_path)
             result["source_hash"] = record["source_hash"]
@@ -859,6 +1154,16 @@ def run_extension_tests(extension_id: str, level: str = "unit") -> dict[str, Any
     return service.test(service.resolve_extension(extension_id), browser=level == "browser")
 
 
+def preview_extension(extension_id: str) -> dict[str, Any]:
+    """Preview registrations, permissions, assets, and resources without importing code."""
+    return get_extension_project_service().preview(extension_id)
+
+
+def show_extension_profile(extension_id: str) -> dict[str, Any]:
+    """Show notebook/generated hashes, review state, roles, and activation readiness."""
+    return get_extension_project_service().development_profile(extension_id)
+
+
 def show_extension_diagnostics(extension_id: str) -> dict[str, Any]:
     """Show manifest, file, and validation diagnostics for one project extension."""
     return get_extension_project_service().diagnostics(extension_id)
@@ -869,10 +1174,20 @@ def request_extension_activation(extension_id: str) -> dict[str, Any]:
     service = get_extension_project_service()
     root = service.resolve_extension(extension_id)
     manifest = load_extension_manifest(root / "extension.toml")
+    status = service.build_status(extension_id)
+    if not status["fresh"] or not status["reviewed"]:
+        return {
+            "ok": False,
+            "extension_id": manifest.id,
+            "requires_user_confirmation": True,
+            "build": status,
+            "next_step": "Build and validate the notebook again before requesting activation review.",
+        }
     return {
         "ok": True,
         "extension_id": manifest.id,
         "source_hash": extension_source_hash(root),
         "requires_user_confirmation": True,
-        "next_step": "Open Extensions, review permissions and source, then choose Trust and Enable.",
+        "build": status,
+        "next_step": "Open Extensions, review permissions and source, then activate the reviewed build.",
     }

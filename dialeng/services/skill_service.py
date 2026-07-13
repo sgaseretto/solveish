@@ -260,11 +260,13 @@ def set_skill_root(project_root: Path) -> SkillService:
         create_extension,
         inspect_extension_api,
         list_extension_templates,
+        preview_extension,
         read_extension,
         request_extension_activation,
         run_extension_tests,
         set_extension_project_root,
         show_extension_diagnostics,
+        show_extension_profile,
         update_extension_file,
         validate_extension,
     )
@@ -290,7 +292,9 @@ def set_skill_root(project_root: Path) -> SkillService:
     tool_registry.register_builtin(build_extension, name="build_extension")
     tool_registry.register_builtin(validate_extension, name="validate_extension")
     tool_registry.register_builtin(run_extension_tests, name="run_extension_tests")
+    tool_registry.register_builtin(preview_extension, name="preview_extension")
     tool_registry.register_builtin(show_extension_diagnostics, name="show_extension_diagnostics")
+    tool_registry.register_builtin(show_extension_profile, name="show_extension_profile")
     tool_registry.register_builtin(request_extension_activation, name="request_extension_activation")
     return _skill_service
 

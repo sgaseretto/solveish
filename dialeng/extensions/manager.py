@@ -40,6 +40,8 @@ class ActiveExtension:
     loaded_at: float = field(default_factory=time.time)
     reload_count: int = 0
     cleanup_errors: list[str] = field(default_factory=list)
+    runtime_mode: str = "privileged_in_process"
+    host: Any = None
 
     def public(self, contributions: list[dict[str, str]]) -> dict[str, Any]:
         return {
@@ -50,6 +52,8 @@ class ActiveExtension:
             "cleanup_errors": list(self.cleanup_errors),
             "contributions": contributions,
             "managed_tasks": len(self.context._tasks),
+            "runtime_mode": self.runtime_mode,
+            "host": self.host.health() if self.host is not None else None,
         }
 
 
@@ -193,47 +197,65 @@ class ExtensionManager:
             )
             api = ExtensionAPI(context)
             module = None
+            host = None
+            from .host import ExtensionHost, proxy_contributions, source_runtime_mode
+            runtime_mode = source_runtime_mode(source)
             tasks_before = set(asyncio.all_tasks())
             try:
-                with registration_scope(scope):
-                    if source.origin == "package" and source.package_entrypoint:
-                        entry_points = metadata.entry_points(group="dialeng.extensions")
-                        matches = [
-                            entry for entry in entry_points
-                            if entry.name == source.package_entrypoint and entry.value == source.manifest.entrypoint
-                        ]
-                        if len(matches) != 1:
-                            raise ImportError("Installed extension entry point changed since discovery")
-                        setup = matches[0].load()
-                        module_name = getattr(setup, "__module__", module_name)
-                    else:
-                        spec = importlib.util.spec_from_file_location(module_name, module_path)
-                        if spec is None or spec.loader is None:
-                            raise ImportError(f"Could not load entrypoint module: {module_path}")
-                        module = importlib.util.module_from_spec(spec)
-                        sys.modules[module_name] = module
-                        spec.loader.exec_module(module)
-                        setup = getattr(module, function_name, None)
-                    if not callable(setup):
-                        raise ImportError(f"Entrypoint function not found: {function_name}")
-                    result = setup(api, context)
-                    if inspect.isawaitable(result):
-                        await asyncio.wait_for(result, timeout=10)
-                unmanaged = set()
-                for task in set(asyncio.all_tasks()) - tasks_before:
-                    if task is asyncio.current_task() or task in context._tasks or task.done():
-                        continue
-                    code = getattr(task.get_coro(), "cr_code", None)
-                    filename = Path(code.co_filename).resolve() if code else None
-                    if filename and filename.is_relative_to(source.root.resolve()):
-                        unmanaged.add(task)
-                if unmanaged:
-                    for task in unmanaged:
-                        task.cancel()
-                    await asyncio.gather(*unmanaged, return_exceptions=True)
-                    raise RuntimeError(
-                        "Extension setup created unmanaged background task(s); use ctx.create_task"
+                if runtime_mode == "isolated":
+                    host = ExtensionHost(
+                        source,
+                        context.public_identity(),
+                        dict(self.state_store.runtime_state(self.project_root, extension_id)),
+                        lambda values: self.state_store.set_runtime_state(
+                            self.project_root, extension_id, values,
+                        ),
+                        broker_services=self.context_services,
                     )
+                    await host.start()
+                    scope.contributions.extend(proxy_contributions(host))
+                    context.add_cleanup(host.stop)
+                    module_name = f"extension-host:{host.pid}"
+                else:
+                    with registration_scope(scope):
+                        if source.origin == "package" and source.package_entrypoint:
+                            entry_points = metadata.entry_points(group="dialeng.extensions")
+                            matches = [
+                                entry for entry in entry_points
+                                if entry.name == source.package_entrypoint and entry.value == source.manifest.entrypoint
+                            ]
+                            if len(matches) != 1:
+                                raise ImportError("Installed extension entry point changed since discovery")
+                            setup = matches[0].load()
+                            module_name = getattr(setup, "__module__", module_name)
+                        else:
+                            spec = importlib.util.spec_from_file_location(module_name, module_path)
+                            if spec is None or spec.loader is None:
+                                raise ImportError(f"Could not load entrypoint module: {module_path}")
+                            module = importlib.util.module_from_spec(spec)
+                            sys.modules[module_name] = module
+                            spec.loader.exec_module(module)
+                            setup = getattr(module, function_name, None)
+                        if not callable(setup):
+                            raise ImportError(f"Entrypoint function not found: {function_name}")
+                        result = setup(api, context)
+                        if inspect.isawaitable(result):
+                            await asyncio.wait_for(result, timeout=10)
+                    unmanaged = set()
+                    for task in set(asyncio.all_tasks()) - tasks_before:
+                        if task is asyncio.current_task() or task in context._tasks or task.done():
+                            continue
+                        code = getattr(task.get_coro(), "cr_code", None)
+                        filename = Path(code.co_filename).resolve() if code else None
+                        if filename and filename.is_relative_to(source.root.resolve()):
+                            unmanaged.add(task)
+                    if unmanaged:
+                        for task in unmanaged:
+                            task.cancel()
+                        await asyncio.gather(*unmanaged, return_exceptions=True)
+                        raise RuntimeError(
+                            "Extension setup created unmanaged background task(s); use ctx.create_task"
+                        )
                 self._validate_candidate(source, scope.contributions)
                 self.store.replace(extension_id, scope.contributions)
             except Exception as exc:
@@ -254,6 +276,8 @@ class ExtensionManager:
                 context=context,
                 module_name=module_name,
                 reload_count=(previous.reload_count + 1) if previous else 0,
+                runtime_mode=runtime_mode,
+                host=host,
             )
             self.active[extension_id] = active
             self.failures.pop(extension_id, None)
@@ -263,8 +287,8 @@ class ExtensionManager:
                 if previous.source.origin != "package":
                     sys.modules.pop(previous.module_name, None)
             logger.info(
-                "Extension activated (id=%s, version=%s, contributions=%d)",
-                extension_id, source.manifest.version, len(scope.contributions),
+                "Extension activated (id=%s, version=%s, mode=%s, contributions=%d)",
+                extension_id, source.manifest.version, runtime_mode, len(scope.contributions),
             )
             from .events import event_bus
             await event_bus.emit("extension.reloaded" if previous else "extension.loaded", {
@@ -384,6 +408,7 @@ class ExtensionManager:
                     })
                 items.append(item)
             else:
+                from .host import source_runtime_mode
                 items.append({
                     **source.public(),
                     "state": "blocked" if not self.trust_store.is_trusted(source) else "disabled",
@@ -392,6 +417,8 @@ class ExtensionManager:
                     "managed_tasks": 0,
                     "cleanup_errors": [],
                     "trusted": self.trust_store.is_trusted(source),
+                    "runtime_mode": source_runtime_mode(source),
+                    "host": None,
                 })
             try:
                 items[-1]["project_path"] = source.root.relative_to(self.project_root).as_posix()

@@ -61,8 +61,10 @@ The deterministic Playwright suite verifies:
 3. `diagram-cell`: type conversion, editing, save/reload, collaboration, CSS/JS
    load once, cleanup once, and data-preserving disabled fallback.
 4. `project-inspector-package`: panel, command, and independently enabled skill.
-5. Extension Studio: scaffold, build, isolated validation, and no implicit activation.
+5. Extension Studio: scaffold, development profile, deterministic build, import-free preview, isolated validation/tests, trust review, and reviewed activation.
 6. Broken update rollback followed by corrected update activation.
+7. Command palette: keyboard/focus behavior, argument schemas, live availability,
+   cancellation, unload reconciliation, shortcut conflict, safe text, and 1,000 commands.
 
 The shared E2E harness captures screenshots, Playwright traces, browser console and
 page errors, redacted server logs, diagnostics, and final project/notebook artifacts
@@ -71,8 +73,8 @@ on failure.
 ## Performance And Fault Baseline
 
 Current non-regression checks assert 25 disabled local manifests discover within a
-generous two-second shared-CI bound, 500 source reloads retain one contribution set,
-one event handler, one browser asset, one task, and one runtime module; concurrent mutations serialize, and repeated event failures stop
+generous two-second shared-CI bound, 500 isolated source reloads retain one contribution set,
+one event handler, one browser asset, and one live host while every previous host exits; concurrent mutations serialize, and repeated event failures stop
 at the third call. Package tests build a wheel and use an isolated `uv` environment
 to confirm entry-point metadata and bundled resources.
 
@@ -103,28 +105,35 @@ reported as skipped, not silently assumed, when credentials are unavailable.
 
 ## Implementation Acceptance Record
 
-On 2026-07-11 the initial Extension API 1 implementation was verified with
-CPython 3.11.14:
+On 2026-07-13 the completed Extension API 1 platform was verified with the
+following evidence:
 
-- 338 non-browser unit/integration tests passed; one unrelated optional install
-  test was skipped and 24 browser/external tests were deliberately deselected.
-- The complete deterministic browser run produced 16 passes plus one
-  timing-sensitive settings-status assertion; that assertion was corrected to
-  accept both successful status messages and its targeted rerun passed. Seven
-  real-provider scenarios remained explicitly skipped.
-- All six extension-platform Playwright scenarios passed together after the
-  final guard-control and isolated-HOME fixes.
-- The focused extension contract suite passed 67 tests, including 100 reloads,
-  rollback, stale validation, command cancellation, package activation, and all
-  four reference fixtures.
-- Ruff, Python 3.11 compilation, JavaScript syntax, and `git diff --check` passed.
-- The Dialeng wheel contained the extension runtime and `extension-creator`
-  skill; the opt-in clean-venv wheel install and idempotent `dialeng init` smoke
-  passed.
+- CPython 3.11 passed 383 non-browser unit/integration tests with two optional
+  tests skipped. The focused extension matrix also passed 77 tests on CPython
+  3.12 and 77 tests on CPython 3.13.
+- The complete deterministic Playwright suite passed 19 scenarios with seven
+  authenticated-provider scenarios explicitly skipped. This includes the
+  command palette, Extension Studio, collaboration, rollback, and all reference
+  extension browser flows.
+- All four reference extensions passed initial activation, disable, reload,
+  upgrade, downgrade, source removal, reinstall, and shutdown lifecycle tests
+  in a nine-test fixture suite.
+- A 500-reload isolated-host stress test passed in 28.49 seconds while retaining
+  one contribution set and one live host. Twenty-five crash/restart cycles left
+  no socket artifacts or child processes.
+- Adversarial host tests covered malformed and oversized protocol messages,
+  stdout noise, timeout, cancellation, memory pressure, direct file/network/
+  process denial, brokered permissions, cleanup races, and failed-upgrade
+  rollback.
+- A clean `uv` environment built and installed the Dialeng wheel plus an
+  independently packaged extension in two passing smoke tests. Git/project-local
+  installation is checked separately after committing because that probe installs
+  the repository's committed `HEAD`.
+- Python compilation, JavaScript syntax, generated-schema synchronization,
+  standalone extension-module lint, and `git diff --check` passed. Repository-wide
+  Ruff remains outside this gate because historical FastHTML modules, demos, and
+  notebooks do not yet conform to that lint profile.
 
-The opt-in authenticated Codex suite also passed all six scenarios: direct
-streaming, notebook context correction, image context, kernel tools, project
-skills, and output persistence after reload. The non-allocating Colab OAuth and
-assignment-list smoke passed. No authenticated Bedrock test marker or real Colab
-runtime allocation was available in this suite, so provider-specific extension
-claims for those paths remain unverified rather than implied.
+Real Codex, Bedrock, and Colab tests remain opt-in. They are not required to prove
+the provider-independent extension lifecycle and are reported as skipped when
+credentials or runtime allocation are unavailable.

@@ -1,4 +1,5 @@
 """Tests for notebook-first extension scaffolding and isolated validation."""
+import json
 from pathlib import Path
 
 import pytest
@@ -37,7 +38,7 @@ def test_prepare_runs_isolated_activation_and_extension_tests(tmp_path):
     assert prepared["validation"]["isolated"] is True
     assert prepared["validation"]["subprocess"]["ok"] is True
     assert prepared["tests"]["ok"] is True
-    assert "1 passed" in prepared["tests"]["stdout"]
+    assert "passed" in prepared["tests"]["stdout"]
     assert Path(prepared["build_record"]).stat().st_mode & 0o777 == 0o600
 
 
@@ -123,3 +124,69 @@ def test_package_template_builds_a_wheel(tmp_path):
 
     assert packaged["ok"] is True
     assert any(path.endswith(".whl") for path in packaged["artifacts"])
+
+
+def test_extension_directives_generate_deterministic_module_tests_and_line_map(tmp_path):
+    service = ExtensionProjectService(tmp_path)
+    created = service.create("directive-profile")
+    root = Path(created["root"])
+
+    first = service.build(root)
+    first_module = Path(first["module"]).read_bytes()
+    second = service.build(root)
+
+    assert Path(second["module"]).read_bytes() == first_module
+    assert first["build_hash"] == second["build_hash"]
+    assert first["roles"]["implementation"] == 1
+    assert first["roles"]["test"] == 1
+    assert first["test_cells"] == 1
+    assert first["line_map"][0]["cell_id"] == "extension-setup"
+    assert Path(first["generated_test"]).is_file()
+
+
+def test_syntax_diagnostic_maps_generated_line_back_to_notebook_cell(tmp_path):
+    service = ExtensionProjectService(tmp_path)
+    created = service.create("mapped-diagnostic")
+    root = Path(created["root"])
+    notebook_path = root / "extension.ipynb"
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+    implementation = next(cell for cell in notebook["cells"] if cell["id"] == "extension-setup")
+    implementation["source"].append("this is invalid Python !!!\n")
+    notebook_path.write_text(json.dumps(notebook, indent=1) + "\n", encoding="utf-8")
+
+    built = service.build(root)
+    diagnostic = built["validation"]["diagnostics"][0]
+
+    assert built["validation"]["ok"] is False
+    assert diagnostic["cell_id"] == "extension-setup"
+    assert diagnostic["cell_line"] >= 1
+
+
+def test_development_profile_detects_notebook_edits_after_review(tmp_path):
+    service = ExtensionProjectService(tmp_path)
+    created = service.create("profile-staleness")
+    root = Path(created["root"])
+    assert service.prepare(root)["ok"]
+    profile = service.development_profile("local.profile-staleness")
+    assert profile["build"]["fresh"] is True
+    assert profile["build"]["reviewed"] is True
+
+    notebook = root / "extension.ipynb"
+    notebook.write_text(notebook.read_text(encoding="utf-8") + " ", encoding="utf-8")
+    stale = service.development_profile("local.profile-staleness")
+
+    assert stale["build"]["fresh"] is False
+    assert "notebook_hash" in stale["build"]["stale_fields"]
+
+
+def test_preview_is_import_free_and_reports_declarative_contributions(tmp_path):
+    service = ExtensionProjectService(tmp_path)
+    service.create("safe-preview")
+
+    preview = service.preview("local.safe-preview")
+
+    assert preview["ok"] is True
+    assert preview["imported"] is False
+    assert {item["kind"] for item in preview["registrations"]} == {"command"}
+    assert preview["registrations"][0]["name"] == "say-hello"
+    assert preview["permissions"]["filesystem_read"] == ["project"]

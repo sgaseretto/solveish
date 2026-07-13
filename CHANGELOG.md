@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added extension authoring, AUTORUN migration, internal architecture, compatibility, security, and reproducible verification documentation
 - Published Extension API `1.0.0` compatibility and deprecation policy, Dialeng-owned public declaration types, and a generated JSON Schema catalog synchronized by CI
 - Added no-import `dialeng extension check`, project/runtime `dialeng extension doctor`, a live doctor endpoint, isolation-readiness diagnostics, and Python 3.11-3.13 CI coverage
+- Added a backend-authoritative command palette with fuzzy search, argument-schema forms, availability reasons, favorites/recents, user shortcut overrides, conflict reporting, progress, cancellation, focus restoration, and live extension/kernel reconciliation
+- Added committed `.dialeng/extensions.lock` environments with deterministic path/Git/package/wheel coordinates, source/manifest/permission/environment hashes, atomic `lock`, exact and cache-backed offline `sync`, field-level drift `check`, deliberate `update`, and a combined `dialeng doctor`; local trust remains private and is never restored from the lockfile
+- Added notebook extension roles, deterministic generated tests/reference docs, generated-line-to-cell diagnostics, source/build/review hashes, import-free contribution preview, Extension Development profiles, Monaco API completions, and reviewed-build activation that rejects stale notebooks
+- Added one supervised `python -I` subprocess per RPC-safe active extension with authenticated private-socket JSON-RPC, sanitized environment, declarative proxy contributions, deadlines, progress, cancellation, heartbeats, memory/CPU bounds, crash recovery, bounded restart, and transactional upgrades; contributions requiring Python UI/kernel/provider objects remain visibly privileged in-process
+- Added a core-side extension permission broker for exact filesystem paths, network, process, notebook, and kernel operations, plus direct-capability denial, symlink/traversal protection, and parity helpers across isolated/in-process contexts
+- Expanded verification with hostile extension hosts, 500 isolated reloads, 1,000-command browser scale, memory/protocol/direct-access attacks, immutable online/offline Git restoration, real wheel-cache installation, concurrent/interrupted lock workflows, Studio review/activation, WebSocket command cancellation, and two-tab extension lifecycle coverage
+- Made kernel setup generation backend-authoritative and removed duplicate browser setup requests; coalesced prompt rendering so extension lifecycle and kernel-selection browser tests remain responsive under concurrent updates
 
 ## [0.11.0] - 2026-07-11
 

@@ -101,6 +101,8 @@ def test_clear_runtime_is_idempotent_and_keeps_terminal_lifecycle():
     runtime.notebook = object()
     runtime.notebook_revision = 4
     runtime.structure_revision = 2
+    runtime.setup_last_generation = 3
+    runtime.setup_last_outcome = "completed"
     runtime.stream_revisions["output"] = 3
 
     registry.clear_runtime("demo", lifecycle=LifecycleState.DELETED)
@@ -111,5 +113,7 @@ def test_clear_runtime_is_idempotent_and_keeps_terminal_lifecycle():
     assert runtime.notebook is None
     assert runtime.notebook_revision == 0
     assert runtime.structure_revision == 0
+    assert runtime.setup_last_generation == 0
+    assert runtime.setup_last_outcome is None
     assert runtime.stream_revisions == {}
     assert registry.diagnostics()["lifecycle_counts"]["deleted"] == 1

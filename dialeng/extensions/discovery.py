@@ -161,6 +161,8 @@ def discover_extensions(
                     origin="package",
                     precedence=_PRECEDENCE["package"],
                     package_entrypoint=entry_point.name,
+                    package_name=distribution.metadata.get("Name", ""),
+                    package_version=distribution.version,
                 )
                 discovered.setdefault(manifest.id, []).append(source)
             except Exception as exc:

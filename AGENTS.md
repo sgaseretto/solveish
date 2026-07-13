@@ -26,6 +26,7 @@
         - guide: docs/guides/extensions.md
         - internals: docs/how_it_works/25_extension_platform.md
         - verification: docs/how_it_works/26_extension_verification.md
+        - isolated runtime, lockfiles, and palette: docs/how_it_works/27_extension_runtime_environments.md
     - ContextKit:
         - repo: https://github.com/AnswerDotAI/ContextKit
     - nbs2ctx notebook context reference:

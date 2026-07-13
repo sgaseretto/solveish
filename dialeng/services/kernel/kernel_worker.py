@@ -331,31 +331,37 @@ def kernel_worker_main(input_queue: Queue, output_queue: Queue):
 
     signal.signal(signal.SIGINT, sigint_handler)
 
-    # Setup matplotlib for inline display if available
-    try:
-        import matplotlib
-        matplotlib.use('Agg')  # Non-interactive backend
-        import matplotlib.pyplot as plt
-        import io
-        import base64
-        from IPython.display import display
+    matplotlib_inline_ready = False
 
-        # Override plt.show() to capture and display figures
-        _original_show = plt.show
-        def _inline_show(*args, **kwargs):
-            for fig_num in plt.get_fignums():
-                fig = plt.figure(fig_num)
-                buf = io.BytesIO()
-                fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
-                buf.seek(0)
-                img_data = base64.b64encode(buf.read()).decode('utf-8')
-                buf.close()
-                # Display as image
-                display({'image/png': img_data}, raw=True)
-                plt.close(fig)
-        plt.show = _inline_show
-    except ImportError:
-        pass
+    def ensure_matplotlib_inline():
+        """Install figure capture only when a cell actually uses Matplotlib."""
+        nonlocal matplotlib_inline_ready
+        if matplotlib_inline_ready:
+            return
+        try:
+            import base64
+            import io
+
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            from IPython.display import display
+
+            def _inline_show(*args, **kwargs):
+                for fig_num in plt.get_fignums():
+                    fig = plt.figure(fig_num)
+                    buf = io.BytesIO()
+                    fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+                    buf.seek(0)
+                    img_data = base64.b64encode(buf.read()).decode('utf-8')
+                    buf.close()
+                    display({'image/png': img_data}, raw=True)
+                    plt.close(fig)
+
+            plt.show = _inline_show
+            matplotlib_inline_ready = True
+        except ImportError:
+            matplotlib_inline_ready = True
 
     # Setup pshnb for %bash magic if available
     try:
@@ -395,8 +401,11 @@ def kernel_worker_main(input_queue: Queue, output_queue: Queue):
             pre_execution_names = set(shell.user_ns.keys())
 
             try:
+                code = msg['code']
+                if 'matplotlib' in code or 'pyplot' in code:
+                    ensure_matplotlib_inline()
                 # Execute with streaming output
-                shell._run_streaming(msg['code'], output_queue)
+                shell._run_streaming(code, output_queue)
 
                 # Track new variables from this cell (only names that didn't exist before)
                 if cell_id:
@@ -448,6 +457,7 @@ def kernel_worker_main(input_queue: Queue, output_queue: Queue):
         elif msg['type'] == 'restart':
             # Restart by re-creating the shell
             shell = CaptureShell()
+            matplotlib_inline_ready = False
             output_queue.put({'type': 'status', 'status': 'restarted'})
 
         elif msg['type'] == 'introspect_var':
