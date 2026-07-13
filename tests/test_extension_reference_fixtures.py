@@ -43,6 +43,7 @@ def test_hello_workspace_public_contributions_and_persistent_state(tmp_path):
     async def scenario():
         await manager.enable(extension_id)
         command = commands[f"{extension_id}:say-hello"]
+        assert commands[f"{extension_id}:kernel-only"].availability == "kernel.required"
         first = await command.handler({"notebook_id": "demo", "args": {}})
         second = await command.handler({"notebook_id": "demo", "args": {}})
         assert first["message"].endswith("(1)")

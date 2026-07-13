@@ -1,3 +1,5 @@
+import asyncio
+
 from fasthtml.common import Span
 
 from dialeng.services.settings_service import SettingDefinition
@@ -31,6 +33,27 @@ def setup(api, ctx):
     api.register_command(
         "say-hello", title="Say hello", description="Show the configured greeting.",
         handler=say_hello,
+    )
+    api.register_command(
+        "kernel-only", title="Kernel only",
+        description="Demonstrate a command that requires a running kernel.",
+        availability="kernel.required",
+        handler=lambda _context: {"message": "The kernel-required command ran."},
+    )
+
+    async def slow_greeting(command_context):
+        for index in range(100):
+            if command_context["cancel_event"].is_set():
+                return {"message": "Slow greeting cancelled."}
+            if index % 10 == 0:
+                await command_context["report_progress"]("Preparing greeting", current=index, total=100)
+            await asyncio.sleep(0.05)
+        return {"message": "Slow greeting completed."}
+
+    api.register_command(
+        "slow-greeting", title="Slow greeting",
+        description="Demonstrate progress and cancellation.",
+        handler=slow_greeting,
     )
     api.register_action(
         "greeting", notebook_greeting,

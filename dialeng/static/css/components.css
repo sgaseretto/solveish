@@ -3065,12 +3065,128 @@ button, select { font-size: var(--btn-font-size, inherit); }
 .unsupported-cell-message { margin: 0 0 12px; color: var(--accent-yellow); }
 .unsupported-cell-source { overflow: auto; white-space: pre-wrap; color: var(--text-muted); }
 
+/* Command palette */
+.command-palette-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9900;
+    display: none;
+    align-items: flex-start;
+    justify-content: center;
+    padding: min(9vh, 78px) 16px 16px;
+    background: color-mix(in srgb, var(--bg-primary, #0b1118) 68%, transparent);
+    backdrop-filter: blur(3px);
+}
+.command-palette-overlay.visible { display: flex; }
+.command-palette-dialog {
+    width: min(760px, 96vw);
+    max-height: min(720px, 82vh);
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--accent-blue) 35%, var(--border));
+    border-radius: 14px;
+    background: var(--bg-secondary, #151c25);
+    box-shadow: 0 28px 90px rgba(0, 0, 0, 0.46);
+}
+.command-palette-search-row {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 10px;
+    padding: 13px 15px;
+    border-bottom: 1px solid var(--border);
+}
+.command-palette-icon { color: var(--accent-blue); }
+.command-palette-search {
+    min-width: 0;
+    padding: 5px 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 1rem;
+}
+.command-palette-close,
+.command-palette-cancel {
+    border: 0;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+.command-palette-body { display: flex; min-height: 220px; max-height: calc(82vh - 58px); flex-direction: column; }
+#command-palette-results { min-height: 0; overflow: auto; }
+.command-palette-list { padding: 7px; }
+.command-palette-item {
+    display: grid;
+    grid-template-columns: 28px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 9px 10px;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--text-primary);
+    text-align: left;
+    cursor: pointer;
+}
+.command-palette-item:hover,
+.command-palette-item.selected {
+    border-color: color-mix(in srgb, var(--accent-blue) 45%, transparent);
+    background: color-mix(in srgb, var(--accent-blue) 12%, var(--bg-cell));
+}
+.command-palette-item[aria-disabled="true"] { cursor: not-allowed; opacity: 0.5; }
+.command-palette-favorite { color: var(--text-muted); text-align: center; }
+.command-palette-favorite.active { color: var(--accent-yellow); }
+.command-palette-item-title { display: block; overflow: hidden; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.command-palette-item-meta { display: block; overflow: hidden; color: var(--text-muted); font-size: 0.72rem; text-overflow: ellipsis; white-space: nowrap; }
+.command-palette-shortcuts { display: flex; align-items: center; gap: 5px; }
+.command-palette-shortcut {
+    padding: 2px 6px;
+    border: 1px solid var(--border);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    color: var(--text-muted);
+    font: 0.68rem ui-monospace, monospace;
+}
+.command-palette-shortcut.conflict { border-color: var(--accent-yellow); color: var(--accent-yellow); }
+.command-palette-empty { padding: 28px; color: var(--text-muted); text-align: center; }
+.command-palette-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: auto;
+    padding: 8px 14px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.7rem;
+}
+.command-palette-args { padding: 18px; overflow: auto; }
+.command-palette-args h2 { margin: 0 0 6px; font-size: 1rem; }
+.command-palette-args p { margin: 0 0 16px; color: var(--text-muted); }
+.command-palette-args-fields { display: grid; gap: 12px; }
+.command-palette-args-fields label { display: grid; gap: 5px; color: var(--text-muted); font-size: 0.76rem; }
+.command-palette-args-fields input,
+.command-palette-args-fields select,
+.command-palette-args-fields textarea {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--bg-input);
+    color: var(--text-primary);
+}
+.command-palette-args-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+
 @media (max-width: 640px) {
     .extension-manager-overlay { padding: 6px; }
     .extension-manager-dialog { max-height: 97vh; }
     .extension-manager-card-header { align-items: flex-start; flex-direction: column; }
     .extension-studio-summary { align-items: flex-start; flex-direction: column; }
     .extension-studio-form { grid-template-columns: 1fr; }
+    .command-palette-overlay { padding: 8px; }
+    .command-palette-dialog { width: 100%; max-height: 96vh; }
+    .command-palette-body { max-height: calc(96vh - 58px); }
 }
 
 @media (max-width: 800px) {

@@ -229,6 +229,40 @@ class E2EProject:
                 destination / name,
                 ignore=shutil.ignore_patterns("__pycache__", "*.egg-info", "dist", "build"),
             )
+        stress = destination / "command-stress"
+        stress.mkdir()
+        (stress / "extension.toml").write_text(
+            '''schema_version = 1
+id = "dev.e2e.command-stress"
+name = "Command Stress"
+version = "0.1.0"
+description = "One thousand command palette fixtures."
+entrypoint = "extension:setup"
+dialeng_api = ">=1,<2"
+scope = "project"
+[permissions]
+network = false
+[contributes]
+commands = true
+''',
+            encoding="utf-8",
+        )
+        (stress / "extension.py").write_text(
+            '''def setup(api, ctx):
+    for index in range(1000):
+        title = "<img src=x onerror=alert(1)> Unsafe title" if index == 0 else f"Synthetic command {index:04d}"
+        api.register_command(
+            f"synthetic-{index:04d}",
+            title=title,
+            description=f"Palette scale fixture {index}.",
+            category="Stress",
+            keywords=("synthetic", "scale"),
+            default_shortcut="Meta+S" if index == 0 else "",
+            handler=lambda context, value=index: {"result": value},
+        )
+''',
+            encoding="utf-8",
+        )
         self.write_notebook(
             "providers",
             [CellSpec("prompt", "Describe deterministic testing.", "pro00001")],

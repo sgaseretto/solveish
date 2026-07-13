@@ -15,6 +15,10 @@ class CommandRegistration:
     order: int = 50
     availability: str = "always"
     args_schema: dict[str, Any] = field(default_factory=dict)
+    category: str = "Extensions"
+    keywords: tuple[str, ...] = ()
+    default_shortcut: str = ""
+    client_action: str = ""
 
 
 @dataclass(frozen=True)
@@ -103,6 +107,10 @@ def public_resources() -> dict[str, list[dict[str, Any]]]:
                 "order": value.order,
                 "availability": value.availability,
                 "args_schema": value.args_schema,
+                "category": value.category,
+                "keywords": list(value.keywords),
+                "default_shortcut": value.default_shortcut,
+                "client_action": value.client_action,
             }
             for value in sorted(commands.values(), key=lambda item: (item.order, item.name))
         ],
@@ -128,3 +136,70 @@ def public_resources() -> dict[str, list[dict[str, Any]]]:
         "assets": [value.__dict__ for value in assets.values()],
         "tools": [{"name": value.name, "file_modifying": value.file_modifying} for value in tools.values()],
     }
+
+
+def _core_client_command(action: str):
+    def handler(context: dict[str, Any]) -> dict[str, Any]:
+        return {"client_action": action, "args": dict(context.get("args") or {})}
+
+    return handler
+
+
+def register_core_commands() -> None:
+    """Register idempotent core commands in the same catalog extensions use."""
+
+    definitions = (
+        CommandRegistration(
+            "core:open-settings", "Open Settings", "Open Dialeng project settings.",
+            _core_client_command("open-settings"), 10, "workspace", {}, "View",
+            ("preferences", "configuration"), "",
+        ),
+        CommandRegistration(
+            "core:open-extensions", "Open Extensions", "Review and manage extensions.",
+            _core_client_command("open-extensions"), 11, "workspace", {}, "View",
+            ("plugins", "manager"), "",
+        ),
+        CommandRegistration(
+            "core:show-shortcuts", "Show Keyboard Shortcuts", "Open the keyboard shortcut reference.",
+            _core_client_command("show-shortcuts"), 12, "workspace", {}, "Help",
+            ("keys", "bindings"), "?",
+        ),
+        CommandRegistration(
+            "core:toggle-explorer", "Toggle File Explorer", "Show or hide the project file explorer.",
+            _core_client_command("toggle-explorer"), 13, "workspace", {}, "View",
+            ("files", "sidebar"), "Meta+Shift+E",
+        ),
+        CommandRegistration(
+            "core:save", "Save", "Save the current notebook or text file.",
+            _core_client_command("save-current"), 20, "workspace", {}, "File",
+            ("write", "persist"), "Meta+S",
+        ),
+        CommandRegistration(
+            "core:select-kernel", "Select Kernel", "Open the kernel selection dialog.",
+            _core_client_command("select-kernel"), 30, "notebook.open", {}, "Kernel",
+            ("attach", "local", "colab"), "",
+        ),
+        CommandRegistration(
+            "core:add-cell", "Add Cell", "Add a cell below the focused cell.",
+            _core_client_command("add-cell"), 40, "notebook.open",
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["cell_type"],
+                "properties": {
+                    "cell_type": {
+                        "type": "string",
+                        "title": "Cell type",
+                        "enum": ["code", "note", "prompt"],
+                        "default": "code",
+                    }
+                },
+            },
+            "Notebook", ("new", "code", "note", "prompt"), "",
+        ),
+    )
+    for registration in definitions:
+        commands.setdefault(registration.name, registration)
+
+
+register_core_commands()

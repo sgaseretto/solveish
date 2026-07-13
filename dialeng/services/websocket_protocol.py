@@ -50,6 +50,7 @@ async def handle_control_message(
     revision_snapshot: Callable[[str], dict[str, int]],
     send_kernel_snapshot: Callable[[str, SendCallable], Awaitable[None]],
     cancel_cell: Callable[[str, str], Any],
+    cancel_extension_command: Callable[[str], Any] | None = None,
 ) -> bool:
     """Handle one browser control message and report whether it was recognized."""
     if message is None or not isinstance(message, str) or not message:
@@ -90,6 +91,19 @@ async def handle_control_message(
             result = cancel_cell(notebook_id, str(cell_id))
             if inspect.isawaitable(result):
                 await result
+        return True
+
+    if message_type == "extension_command_cancel":
+        operation_id = str(data.get("operation_id") or "")
+        cancelled = False
+        if operation_id and cancel_extension_command is not None:
+            result = cancel_extension_command(operation_id)
+            cancelled = bool(await result if inspect.isawaitable(result) else result)
+        await send(json.dumps({
+            "type": "extension_command_cancel_ack",
+            "operation_id": operation_id,
+            "cancelled": cancelled,
+        }))
         return True
 
     return False

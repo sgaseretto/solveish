@@ -2123,7 +2123,7 @@ register_skill_routes(
 )
 
 
-def _extension_command_available(expression: str, notebook_id: str) -> bool:
+def _extension_command_available(expression: str, notebook_id: str) -> tuple[bool, str]:
     """Evaluate the intentionally small public command-availability grammar."""
     predicates = {
         "always": True,
@@ -2133,7 +2133,14 @@ def _extension_command_available(expression: str, notebook_id: str) -> bool:
         "kernel.required": kernel_service.kernel_is_alive(notebook_id),
     }
     terms = [term.strip() for term in str(expression or "always").split("&&")]
-    return bool(terms) and all(predicates.get(term, False) for term in terms)
+    available = bool(terms) and all(predicates.get(term, False) for term in terms)
+    if available:
+        return True, ""
+    if "notebook.open" in terms and not predicates["notebook.open"]:
+        return False, "Open a notebook to use this command."
+    if "kernel.required" in terms and not predicates["kernel.required"]:
+        return False, "Attach a running kernel to use this command."
+    return False, f"The command requires: {expression}."
 
 
 register_extension_routes(
@@ -5647,6 +5654,14 @@ async def _cancel_prompt_cell(notebook_id: str, cell_id: str) -> None:
     )
 
 
+async def _cancel_extension_command(operation_id: str) -> bool:
+    cancel = extension_manager.context_services.get("cancel_extension_command")
+    if cancel is None:
+        return False
+    result = cancel(operation_id)
+    return bool(await result if inspect.isawaitable(result) else result)
+
+
 register_websocket_routes(
     app,
     broadcast_manager=broadcast_manager,
@@ -5657,6 +5672,7 @@ register_websocket_routes(
     revision_snapshot=_get_revision_snapshot,
     send_kernel_snapshot=send_kernel_snapshot,
     cancel_cell=_cancel_prompt_cell,
+    cancel_extension_command=_cancel_extension_command,
     logger=logger,
 )
 

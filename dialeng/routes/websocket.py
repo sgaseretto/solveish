@@ -28,6 +28,7 @@ def register_websocket_routes(
     send_kernel_snapshot: Callable[[str, Callable[[str], Awaitable[None]]], Awaitable[None]],
     cancel_cell: Callable[[str, str], Awaitable[None]],
     logger,
+    cancel_extension_command: Callable[[str], Awaitable[bool]] | None = None,
 ) -> None:
     """Register the notebook socket with explicit lifecycle dependencies."""
 
@@ -72,4 +73,5 @@ def register_websocket_routes(
             revision_snapshot=revision_snapshot,
             send_kernel_snapshot=send_kernel_snapshot,
             cancel_cell=cancel_cell,
+            cancel_extension_command=cancel_extension_command,
         )

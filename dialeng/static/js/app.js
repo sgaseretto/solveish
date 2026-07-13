@@ -2720,6 +2720,8 @@ document.addEventListener('htmx:timeout', (e) => {
 // On page load
 document.addEventListener('DOMContentLoaded', () => {
     loadTheme();
+    readCommandPaletteStorage();
+    document.getElementById('command-palette-cancel')?.addEventListener('click', cancelActivePaletteCommand);
     document.querySelectorAll('.cell').forEach(cell => {
         const cellId = cell.id.replace('cell-', '');
         initCell(cellId);
@@ -2727,6 +2729,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupPreviewEditing();
     if (window.AUTOSAVE_ENABLED) checkNotebookRecovery();
     if (document.getElementById('extension-manager-btn')) refreshExtensionManager();
+    if (document.getElementById('command-palette-overlay')) refreshCommandCatalog({silent: true});
 });
 
 document.addEventListener('visibilitychange', () => {
@@ -3843,6 +3846,530 @@ function showKernelStatusMessage(message, tone = 'warning', persistMs = 5000) {
     window.DialengNotifications.show(message, tone, persistMs);
 }
 
+// ==================== Command Palette ====================
+const commandPaletteState = {
+    commands: [],
+    filtered: [],
+    selected: 0,
+    previousFocus: null,
+    argumentCommand: null,
+    activeInvocation: null,
+    favorites: new Set(),
+    recent: [],
+    shortcutOverrides: {},
+    catalogGeneration: 0,
+};
+
+function readCommandPaletteStorage() {
+    try {
+        commandPaletteState.favorites = new Set(JSON.parse(localStorage.getItem('dialeng-command-favorites') || '[]'));
+        commandPaletteState.recent = JSON.parse(localStorage.getItem('dialeng-command-recent') || '[]');
+        commandPaletteState.shortcutOverrides = JSON.parse(localStorage.getItem('dialeng-command-shortcuts') || '{}');
+    } catch (_) {
+        commandPaletteState.favorites = new Set();
+        commandPaletteState.recent = [];
+        commandPaletteState.shortcutOverrides = {};
+    }
+}
+
+function writeCommandPaletteStorage() {
+    try {
+        localStorage.setItem('dialeng-command-favorites', JSON.stringify([...commandPaletteState.favorites]));
+        localStorage.setItem('dialeng-command-recent', JSON.stringify(commandPaletteState.recent.slice(0, 20)));
+        localStorage.setItem('dialeng-command-shortcuts', JSON.stringify(commandPaletteState.shortcutOverrides));
+    } catch (_) {}
+}
+
+function commandPaletteVisible() {
+    return document.getElementById('command-palette-overlay')?.classList.contains('visible');
+}
+
+function platformShortcut(shortcut) {
+    const isMac = /Mac|iPhone|iPad/.test(navigator.platform || '');
+    return String(shortcut || '')
+        .replaceAll('Cmd', 'Meta')
+        .replaceAll('Meta', isMac ? '⌘' : 'Ctrl')
+        .replaceAll('Alt', isMac ? '⌥' : 'Alt')
+        .replaceAll('Shift', isMac ? '⇧' : 'Shift');
+}
+
+function effectiveCommandShortcuts(command) {
+    if (Object.prototype.hasOwnProperty.call(commandPaletteState.shortcutOverrides, command.name)) {
+        const value = String(commandPaletteState.shortcutOverrides[command.name] || '').trim();
+        return value ? [value] : [];
+    }
+    return command.shortcuts || [];
+}
+
+function normalizedShortcut(shortcut) {
+    return String(shortcut || '').toLowerCase().replaceAll('cmd', 'meta').replaceAll('⌘', 'meta').replaceAll('⇧', 'shift').replaceAll('⌥', 'alt').replaceAll(' ', '');
+}
+
+function recomputeCommandShortcutConflicts() {
+    const counts = new Map();
+    commandPaletteState.commands.forEach(command => effectiveCommandShortcuts(command).forEach(shortcut => {
+        const key = normalizedShortcut(shortcut);
+        counts.set(key, (counts.get(key) || 0) + 1);
+    }));
+    commandPaletteState.commands.forEach(command => {
+        command.effective_shortcuts = effectiveCommandShortcuts(command);
+        command.shortcut_conflict = command.effective_shortcuts.some(shortcut => (counts.get(normalizedShortcut(shortcut)) || 0) > 1);
+    });
+}
+
+function applyLocalCommandAvailability() {
+    const notebookOpen = Boolean(window.NOTEBOOK_ID);
+    const kernel = getKernelState()?.kernel || {};
+    const kernelReady = Boolean(kernel.can_run || kernel.is_alive);
+    commandPaletteState.commands.forEach(command => {
+        const terms = String(command.availability || 'always').split('&&').map(term => term.trim());
+        const available = terms.every(term => {
+            if (term === 'always' || term === 'workspace' || term === 'kernel.optional') return true;
+            if (term === 'notebook.open') return notebookOpen;
+            if (term === 'kernel.required') return kernelReady;
+            return false;
+        });
+        command.available = available;
+        if (!available) {
+            if (terms.includes('notebook.open') && !notebookOpen) command.unavailable_reason = 'Open a notebook to use this command.';
+            else if (terms.includes('kernel.required') && !kernelReady) command.unavailable_reason = 'Attach a running kernel to use this command.';
+        } else command.unavailable_reason = '';
+    });
+    if (commandPaletteVisible()) renderCommandPalette();
+}
+
+function reconcileCommandsFromExtensionSnapshot(snapshot) {
+    const activeNames = new Set((snapshot?.resources?.commands || []).map(command => command.name));
+    const previousLength = commandPaletteState.commands.length;
+    commandPaletteState.commands = commandPaletteState.commands.filter(command =>
+        command.name.startsWith('core:') || activeNames.has(command.name)
+    );
+    if (commandPaletteState.commands.length !== previousLength && commandPaletteVisible()) {
+        commandPaletteState.selected = 0;
+        renderCommandPalette();
+    }
+}
+
+function commandSearchScore(command, query) {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return 0;
+    const title = command.title.toLowerCase();
+    const haystack = [
+        command.title, command.description, command.category, command.owner_label,
+        command.name, ...(command.keywords || []), ...(command.effective_shortcuts || []),
+    ].join(' ').toLowerCase();
+    let score = title.startsWith(normalized) ? -100 : 0;
+    for (const token of normalized.split(/\s+/).filter(Boolean)) {
+        const index = haystack.indexOf(token);
+        if (index < 0) return null;
+        score += index;
+    }
+    return score;
+}
+
+function renderCommandPalette() {
+    const list = document.getElementById('command-palette-list');
+    const empty = document.getElementById('command-palette-empty');
+    const search = document.getElementById('command-palette-search');
+    if (!list || !empty) return;
+    const query = search?.value || '';
+    const recentIndex = new Map(commandPaletteState.recent.map((name, index) => [name, index]));
+    commandPaletteState.filtered = commandPaletteState.commands
+        .map(command => ({command, score: commandSearchScore(command, query)}))
+        .filter(item => item.score !== null)
+        .sort((left, right) => {
+            if (!query) {
+                const favorite = Number(commandPaletteState.favorites.has(right.command.name)) - Number(commandPaletteState.favorites.has(left.command.name));
+                if (favorite) return favorite;
+                const leftRecent = recentIndex.has(left.command.name) ? recentIndex.get(left.command.name) : 999;
+                const rightRecent = recentIndex.has(right.command.name) ? recentIndex.get(right.command.name) : 999;
+                if (leftRecent !== rightRecent) return leftRecent - rightRecent;
+            }
+            return left.score - right.score || left.command.order - right.command.order || left.command.title.localeCompare(right.command.title);
+        })
+        .map(item => item.command);
+    commandPaletteState.selected = Math.max(0, Math.min(commandPaletteState.selected, commandPaletteState.filtered.length - 1));
+    list.replaceChildren();
+    commandPaletteState.filtered.forEach((command, index) => {
+        const item = document.createElement('div');
+        item.id = `command-palette-option-${index}`;
+        item.className = `command-palette-item${index === commandPaletteState.selected ? ' selected' : ''}`;
+        item.role = 'option';
+        item.tabIndex = -1;
+        item.dataset.command = command.name;
+        item.setAttribute('aria-selected', index === commandPaletteState.selected ? 'true' : 'false');
+        item.setAttribute('aria-disabled', command.available ? 'false' : 'true');
+
+        const favorite = document.createElement('span');
+        favorite.className = `command-palette-favorite${commandPaletteState.favorites.has(command.name) ? ' active' : ''}`;
+        favorite.textContent = commandPaletteState.favorites.has(command.name) ? '★' : '☆';
+        favorite.title = commandPaletteState.favorites.has(command.name) ? 'Remove favorite' : 'Add favorite';
+        favorite.addEventListener('click', event => {
+            event.stopPropagation();
+            if (commandPaletteState.favorites.has(command.name)) commandPaletteState.favorites.delete(command.name);
+            else commandPaletteState.favorites.add(command.name);
+            writeCommandPaletteStorage();
+            renderCommandPalette();
+        });
+
+        const content = document.createElement('span');
+        const title = document.createElement('span');
+        title.className = 'command-palette-item-title';
+        title.textContent = command.title;
+        const meta = document.createElement('span');
+        meta.className = 'command-palette-item-meta';
+        meta.textContent = command.available
+            ? `${command.category} · ${command.owner_label} · ${command.description}`
+            : `${command.unavailable_reason || 'Unavailable'} · ${command.owner_label}`;
+        content.append(title, meta);
+
+        const shortcuts = document.createElement('span');
+        shortcuts.className = 'command-palette-shortcuts';
+        shortcuts.title = 'Click to set a browser shortcut';
+        shortcuts.addEventListener('click', event => {
+            event.stopPropagation();
+            editCommandShortcut(command);
+        });
+        (command.effective_shortcuts || []).forEach(value => {
+            const key = document.createElement('span');
+            key.className = `command-palette-shortcut${command.shortcut_conflict ? ' conflict' : ''}`;
+            key.textContent = platformShortcut(value);
+            key.title = command.shortcut_conflict ? 'Shortcut conflicts with another command' : value;
+            shortcuts.appendChild(key);
+        });
+        if (!shortcuts.childNodes.length) {
+            const add = document.createElement('span');
+            add.className = 'command-palette-shortcut';
+            add.textContent = '+';
+            shortcuts.appendChild(add);
+        }
+        item.append(favorite, content, shortcuts);
+        item.addEventListener('mouseenter', () => selectCommandPaletteIndex(index));
+        item.addEventListener('click', () => runSelectedPaletteCommand());
+        list.appendChild(item);
+    });
+    empty.hidden = commandPaletteState.filtered.length > 0;
+    empty.textContent = commandPaletteState.commands.length ? 'No commands match your search.' : 'No commands are registered.';
+    if (search) {
+        search.setAttribute('aria-activedescendant', commandPaletteState.filtered.length ? `command-palette-option-${commandPaletteState.selected}` : '');
+    }
+}
+
+function selectCommandPaletteIndex(index) {
+    commandPaletteState.selected = Math.max(0, Math.min(index, commandPaletteState.filtered.length - 1));
+    document.querySelectorAll('.command-palette-item').forEach((item, itemIndex) => {
+        item.classList.toggle('selected', itemIndex === commandPaletteState.selected);
+        item.setAttribute('aria-selected', itemIndex === commandPaletteState.selected ? 'true' : 'false');
+    });
+    document.getElementById(`command-palette-option-${commandPaletteState.selected}`)?.scrollIntoView({block: 'nearest'});
+    document.getElementById('command-palette-search')?.setAttribute('aria-activedescendant', `command-palette-option-${commandPaletteState.selected}`);
+}
+
+async function refreshCommandCatalog({silent = false} = {}) {
+    const notebookId = window.NOTEBOOK_ID || '_workspace';
+    const generation = ++commandPaletteState.catalogGeneration;
+    try {
+        const response = await fetch(`/dialeng/${encodeURIComponent(notebookId)}/extensions/commands`, {headers: {'Accept': 'application/json'}});
+        const payload = await response.json();
+        if (!response.ok || payload.ok === false) throw new Error(payload.error || `Command catalog failed (${response.status})`);
+        if (generation !== commandPaletteState.catalogGeneration) return null;
+        commandPaletteState.commands = payload.commands || [];
+        recomputeCommandShortcutConflicts();
+        if (commandPaletteVisible()) renderCommandPalette();
+        return payload;
+    } catch (error) {
+        if (generation !== commandPaletteState.catalogGeneration) return null;
+        if (!silent) {
+            const empty = document.getElementById('command-palette-empty');
+            if (empty) {
+                empty.hidden = false;
+                empty.textContent = error.message || 'Could not load commands.';
+            }
+        }
+        return null;
+    }
+}
+
+async function openCommandPalette() {
+    const overlay = document.getElementById('command-palette-overlay');
+    const search = document.getElementById('command-palette-search');
+    if (!overlay || !search) return;
+    commandPaletteState.previousFocus = document.activeElement;
+    commandPaletteState.selected = 0;
+    commandPaletteState.argumentCommand = null;
+    document.getElementById('command-palette-args').hidden = true;
+    document.getElementById('command-palette-results').hidden = false;
+    overlay.classList.add('visible');
+    search.setAttribute('aria-expanded', 'true');
+    search.value = '';
+    search.focus();
+    renderCommandPalette();
+    await refreshCommandCatalog();
+    search.focus();
+}
+
+function closeCommandPalette({restoreFocus = true} = {}) {
+    const overlay = document.getElementById('command-palette-overlay');
+    const search = document.getElementById('command-palette-search');
+    overlay?.classList.remove('visible');
+    search?.setAttribute('aria-expanded', 'false');
+    commandPaletteState.argumentCommand = null;
+    if (restoreFocus && commandPaletteState.previousFocus?.focus) commandPaletteState.previousFocus.focus();
+}
+
+function editCommandShortcut(command) {
+    const current = effectiveCommandShortcuts(command)[0] || '';
+    const value = window.prompt(`Shortcut for ${command.title}. Leave blank to disable it.`, current);
+    if (value === null) return;
+    commandPaletteState.shortcutOverrides[command.name] = value.trim();
+    writeCommandPaletteStorage();
+    recomputeCommandShortcutConflicts();
+    renderCommandPalette();
+}
+
+function showCommandArguments(command) {
+    const schema = command.args_schema || {};
+    const properties = schema.properties || {};
+    const fields = document.getElementById('command-palette-args-fields');
+    const args = document.getElementById('command-palette-args');
+    if (!fields || !args) return;
+    commandPaletteState.argumentCommand = command;
+    document.getElementById('command-palette-results').hidden = true;
+    args.hidden = false;
+    document.getElementById('command-palette-args-title').textContent = command.title;
+    document.getElementById('command-palette-args-description').textContent = command.description;
+    fields.replaceChildren();
+    Object.entries(properties).forEach(([name, definition]) => {
+        const label = document.createElement('label');
+        const required = (schema.required || []).includes(name);
+        label.append(`${definition.title || name}${required ? ' *' : ''}`);
+        let control;
+        if (Array.isArray(definition.enum)) {
+            control = document.createElement('select');
+            definition.enum.forEach(value => {
+                const option = document.createElement('option');
+                option.value = String(value);
+                option.textContent = String(value);
+                option.selected = value === definition.default;
+                control.appendChild(option);
+            });
+        } else if (definition.type === 'boolean') {
+            control = document.createElement('select');
+            ['true', 'false'].forEach(value => {
+                const option = document.createElement('option');
+                option.value = value;
+                option.textContent = value;
+                option.selected = Boolean(definition.default).toString() === value;
+                control.appendChild(option);
+            });
+        } else if (definition.type === 'object' || definition.type === 'array') {
+            control = document.createElement('textarea');
+            control.value = JSON.stringify(definition.default ?? (definition.type === 'array' ? [] : {}), null, 2);
+        } else {
+            control = document.createElement('input');
+            control.type = definition.type === 'integer' || definition.type === 'number' ? 'number' : 'text';
+            if (definition.minimum != null) control.min = definition.minimum;
+            if (definition.maximum != null) control.max = definition.maximum;
+            control.value = definition.default ?? '';
+        }
+        control.dataset.commandArg = name;
+        control.dataset.commandType = definition.type || 'string';
+        control.required = required;
+        if (definition.description) control.title = definition.description;
+        label.appendChild(control);
+        fields.appendChild(label);
+    });
+    fields.querySelector('input, select, textarea')?.focus();
+}
+
+function readCommandArguments(command) {
+    const values = {};
+    const required = new Set(command.args_schema?.required || []);
+    document.querySelectorAll('[data-command-arg]').forEach(control => {
+        const name = control.dataset.commandArg;
+        const type = control.dataset.commandType;
+        const raw = control.value;
+        if (!raw && !required.has(name)) return;
+        if (!raw && required.has(name)) throw new Error(`${name} is required.`);
+        if (type === 'integer') values[name] = Number.parseInt(raw, 10);
+        else if (type === 'number') values[name] = Number(raw);
+        else if (type === 'boolean') values[name] = raw === 'true';
+        else if (type === 'object' || type === 'array') values[name] = JSON.parse(raw);
+        else values[name] = raw;
+    });
+    return values;
+}
+
+async function executePaletteCommand(command, args = {}) {
+    if (!command.available) {
+        showKernelStatusMessage(command.unavailable_reason || 'Command is unavailable.', 'warning', 5000);
+        return;
+    }
+    const cancel = document.getElementById('command-palette-cancel');
+    try {
+        const invocation = invokeExtensionCommand(command.name, args);
+        commandPaletteState.activeInvocation = invocation;
+        const result = await invocation;
+        commandPaletteState.recent = [command.name, ...commandPaletteState.recent.filter(name => name !== command.name)].slice(0, 20);
+        writeCommandPaletteStorage();
+        const message = result.message || result.result;
+        if (message) showKernelStatusMessage(String(message), 'success', 4000);
+        closeCommandPalette();
+    } catch (error) {
+        showKernelStatusMessage(error.message || 'Command failed.', 'error', 7000);
+    } finally {
+        commandPaletteState.activeInvocation = null;
+        if (cancel) cancel.hidden = true;
+    }
+}
+
+function cancelActivePaletteCommand() {
+    const cancellation = commandPaletteState.activeInvocation?.cancel?.();
+    if (cancellation?.catch) {
+        cancellation.catch(error => {
+            showKernelStatusMessage(error.message || 'Could not cancel command.', 'error', 5000);
+        });
+    }
+}
+
+function runSelectedPaletteCommand() {
+    const command = commandPaletteState.filtered[commandPaletteState.selected];
+    if (!command) return;
+    if (!command.available) {
+        showKernelStatusMessage(command.unavailable_reason || 'Command is unavailable.', 'warning', 5000);
+        return;
+    }
+    if (Object.keys(command.args_schema?.properties || {}).length) {
+        showCommandArguments(command);
+        return;
+    }
+    executePaletteCommand(command);
+}
+
+function commandShortcutMatches(event, shortcut) {
+    const normalized = normalizedShortcut(shortcut);
+    const parts = normalized.split('+').filter(Boolean);
+    const key = parts.pop();
+    const meta = parts.includes('meta');
+    const ctrl = parts.includes('ctrl');
+    const effectiveMeta = /Mac|iPhone|iPad/.test(navigator.platform || '') ? event.metaKey : event.ctrlKey;
+    return Boolean(key)
+        && event.key.toLowerCase() === key
+        && (meta ? effectiveMeta : event.metaKey === meta)
+        && (ctrl ? event.ctrlKey : (meta && !/Mac|iPhone|iPad/.test(navigator.platform || '') ? true : !event.ctrlKey))
+        && event.altKey === parts.includes('alt')
+        && event.shiftKey === parts.includes('shift');
+}
+
+function executeCoreClientAction(payload) {
+    const action = payload?.client_action;
+    const args = payload?.args || {};
+    if (!action) return;
+    if (action === 'open-settings') toggleSettings();
+    else if (action === 'open-extensions') openExtensionManager();
+    else if (action === 'show-shortcuts') toggleKeyboardShortcuts();
+    else if (action === 'toggle-explorer') toggleFileExplorer();
+    else if (action === 'save-current') {
+        if (isFilePage()) saveOpenFile();
+        else {
+            const focused = getFocusedCellId();
+            if (focused) syncAllContent(focused);
+            document.getElementById('save-btn')?.click();
+        }
+    } else if (action === 'select-kernel') toggleKernelModal(window.NOTEBOOK_ID || '');
+    else if (action === 'add-cell') {
+        const cells = getOrderedCells();
+        const focused = getFocusedCellId();
+        const index = cells.findIndex(cell => cell.id === `cell-${focused}`);
+        const position = index >= 0 ? index + 1 : cells.length;
+        _pendingScrollToNewCell = true;
+        requestCellAdd(args.cell_type || 'code', position);
+    }
+}
+
+document.addEventListener('keydown', event => {
+    const mod = event.metaKey || event.ctrlKey;
+    if (mod && event.shiftKey && event.key.toLowerCase() === 'p') {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (commandPaletteVisible()) closeCommandPalette();
+        else openCommandPalette();
+        return;
+    }
+    if (commandPaletteVisible()) {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            if (commandPaletteState.argumentCommand) {
+                commandPaletteState.argumentCommand = null;
+                document.getElementById('command-palette-args').hidden = true;
+                document.getElementById('command-palette-results').hidden = false;
+                document.getElementById('command-palette-search')?.focus();
+            } else closeCommandPalette();
+        } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            const direction = event.key === 'ArrowDown' ? 1 : -1;
+            selectCommandPaletteIndex((commandPaletteState.selected + direction + commandPaletteState.filtered.length) % Math.max(commandPaletteState.filtered.length, 1));
+        } else if (event.key === 'Enter' && !event.isComposing) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            if (commandPaletteState.argumentCommand) {
+                try {
+                    const command = commandPaletteState.argumentCommand;
+                    executePaletteCommand(command, readCommandArguments(command));
+                } catch (error) {
+                    showKernelStatusMessage(error.message || 'Invalid command arguments.', 'error', 5000);
+                }
+            } else if (event.altKey) {
+                const command = commandPaletteState.filtered[commandPaletteState.selected];
+                if (command) editCommandShortcut(command);
+            } else runSelectedPaletteCommand();
+        } else if (event.key === 'Tab') {
+            const focusable = [...document.querySelectorAll('#command-palette-overlay input, #command-palette-overlay select, #command-palette-overlay textarea, #command-palette-overlay button:not([hidden])')]
+                .filter(element => !element.disabled && element.offsetParent !== null);
+            if (focusable.length) {
+                event.preventDefault();
+                const current = focusable.indexOf(document.activeElement);
+                const next = event.shiftKey ? (current - 1 + focusable.length) % focusable.length : (current + 1) % focusable.length;
+                focusable[next].focus();
+            }
+        }
+        return;
+    }
+    const command = commandPaletteState.commands.find(item =>
+        item.available && effectiveCommandShortcuts(item).some(shortcut => commandShortcutMatches(event, shortcut))
+    );
+    if (command && !event.repeat) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        executePaletteCommand(command);
+    }
+}, true);
+
+document.addEventListener('input', event => {
+    if (event.target?.id === 'command-palette-search') {
+        commandPaletteState.selected = 0;
+        renderCommandPalette();
+    }
+});
+
+document.addEventListener('click', event => {
+    if (event.target?.id === 'command-palette-args-back') {
+        commandPaletteState.argumentCommand = null;
+        document.getElementById('command-palette-args').hidden = true;
+        document.getElementById('command-palette-results').hidden = false;
+        document.getElementById('command-palette-search')?.focus();
+    } else if (event.target?.id === 'command-palette-args-run' && commandPaletteState.argumentCommand) {
+        try {
+            const command = commandPaletteState.argumentCommand;
+            executePaletteCommand(command, readCommandArguments(command));
+        } catch (error) {
+            showKernelStatusMessage(error.message || 'Invalid command arguments.', 'error', 5000);
+        }
+    }
+});
+
 // ==================== Extension Manager ====================
 const extensionClientState = {
     snapshot: null,
@@ -3906,6 +4433,7 @@ function renderExtensionManager(snapshot) {
         }
     });
     extensionClientState.snapshot = snapshot;
+    reconcileCommandsFromExtensionSnapshot(snapshot);
     const list = document.getElementById('extension-manager-list');
     const diagnostics = document.getElementById('extension-manager-diagnostics');
     if (!list) return;
@@ -4048,6 +4576,7 @@ function renderExtensionManager(snapshot) {
     refreshExtensionCellTypeChoices(snapshot);
     renderExtensionSurfaces(snapshot);
     refreshExtensionSettingsSurface(snapshot);
+    refreshCommandCatalog({silent: true});
 }
 
 async function refreshExtensionSettingsSurface(snapshot) {
@@ -4399,6 +4928,7 @@ function invokeExtensionCommand(qualifiedName, args = {}) {
         if (!response.ok || payload.ok === false) {
             throw new Error(payload.error || `Command failed (${response.status})`);
         }
+        if (extensionId === 'core') executeCoreClientAction(payload);
         return payload;
     });
     invocation.operationId = operationId;
@@ -4407,6 +4937,9 @@ function invokeExtensionCommand(qualifiedName, args = {}) {
 }
 
 async function cancelExtensionCommand(operationId) {
+    if (sendWebSocketControl({type: 'extension_command_cancel', operation_id: operationId})) {
+        return {ok: true, operation_id: operationId, cancelled: true, transport: 'websocket'};
+    }
     const response = await fetch(
         `/dialeng/extensions/commands/${encodeURIComponent(operationId)}/cancel`,
         {method: 'POST', headers: {'Accept': 'application/json'}},
@@ -4500,27 +5033,6 @@ window.DialengExtensions = {
 };
 window.dialeng = window.dialeng || {};
 window.dialeng.extensions = window.DialengExtensions;
-
-function extensionShortcutMatches(event, shortcut) {
-    const parts = String(shortcut || '').toLowerCase().split('+').map(part => part.trim());
-    const key = parts.pop();
-    return Boolean(key)
-        && event.key.toLowerCase() === key.toLowerCase()
-        && event.ctrlKey === parts.includes('ctrl')
-        && event.metaKey === parts.includes('meta')
-        && event.altKey === parts.includes('alt')
-        && event.shiftKey === parts.includes('shift');
-}
-
-document.addEventListener('keydown', event => {
-    const shortcuts = extensionClientState.snapshot?.resources?.shortcuts || [];
-    const match = shortcuts.find(item => extensionShortcutMatches(event, item.shortcut));
-    if (!match) return;
-    event.preventDefault();
-    invokeExtensionCommand(match.command).catch(error => {
-        showKernelStatusMessage(error.message || 'Extension command failed.', 'error', 7000);
-    });
-});
 
 function showLlmFailureAction(data) {
     showKernelStatusMessage(data.message || 'The prompt failed.', data.tone || 'error', data.persist_ms || 10000);
@@ -5372,7 +5884,11 @@ if (window.dialengEvents) {
             `server revision mismatch: ${(data.streams || []).join(', ') || 'unknown'}`,
         );
     });
-    window.dialengEvents.register('kernel_snapshot', data => applyKernelSnapshot(data, 'ws'));
+    window.dialengEvents.register('kernel_snapshot', data => {
+        applyKernelSnapshot(data, 'ws');
+        applyLocalCommandAvailability();
+        if (commandPaletteVisible()) refreshCommandCatalog({silent: true});
+    });
     window.dialengEvents.register('llm_status', data => {
         const notebook = getKernelState()?.notebook || {
             llm_provider: data.selected_provider,
@@ -5387,12 +5903,32 @@ if (window.dialengEvents) {
         renderExtensionManager(data);
     });
     window.dialengEvents.register('extension_command_progress', data => {
+        if (
+            data.message === 'Started'
+            && commandPaletteState.activeInvocation?.operationId === data.operation_id
+        ) {
+            const cancel = document.getElementById('command-palette-cancel');
+            if (cancel) cancel.hidden = false;
+            return;
+        }
+        if (commandPaletteState.activeInvocation?.operationId === data.operation_id) {
+            const empty = document.getElementById('command-palette-empty');
+            if (empty) {
+                empty.hidden = false;
+                empty.textContent = `${data.command || 'Command'}: ${data.message || 'working'}`;
+            }
+        }
         if (data.message === 'Started') return;
         showKernelStatusMessage(
             `${data.command || 'Extension command'}: ${data.message || 'updated'}`,
             data.message === 'Cancelled' ? 'warning' : 'info',
             3000,
         );
+    });
+    window.dialengEvents.register('extension_command_cancel_ack', data => {
+        if (!data.cancelled) {
+            showKernelStatusMessage('The extension command was no longer running.', 'warning', 4000);
+        }
     });
     window.dialengEvents.register('status_message', data => {
         if (data.action) showLlmFailureAction(data);

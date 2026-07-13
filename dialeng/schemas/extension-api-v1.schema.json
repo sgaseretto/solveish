@@ -30,8 +30,21 @@
         "availability": {
           "type": "string"
         },
+        "category": {
+          "type": "string"
+        },
+        "default_shortcut": {
+          "type": "string"
+        },
         "description": {
           "type": "string"
+        },
+        "keywords": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
         },
         "name": {
           "minLength": 1,

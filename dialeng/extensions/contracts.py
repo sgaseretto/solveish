@@ -138,6 +138,33 @@ def warn_deprecated(symbol: str, replacement: str, *, removal: str) -> None:
     )
 
 
+def validate_object_schema(schema: dict[str, Any] | None, *, label: str) -> dict[str, Any]:
+    """Validate the bounded JSON-Schema subset used by actions and commands."""
+
+    value = dict(schema or {})
+    if not value:
+        return value
+    if value.get("type", "object") != "object":
+        raise ValueError(f"{label} schema root must be an object")
+    properties = value.get("properties", {})
+    required = value.get("required", [])
+    if not isinstance(properties, dict) or any(not isinstance(item, dict) for item in properties.values()):
+        raise ValueError(f"{label} schema properties must be an object of definitions")
+    if not isinstance(required, list) or any(not isinstance(item, str) for item in required):
+        raise ValueError(f"{label} schema required must be a list of property names")
+    missing = sorted(set(required) - set(properties))
+    if missing:
+        raise ValueError(f"{label} schema requires undefined properties: {', '.join(missing)}")
+    allowed_types = {"array", "boolean", "integer", "number", "object", "string"}
+    invalid = sorted(
+        name for name, definition in properties.items()
+        if definition.get("type") not in allowed_types
+    )
+    if invalid:
+        raise ValueError(f"{label} schema properties have unsupported types: {', '.join(invalid)}")
+    return value
+
+
 def _object_schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
     return {
         "type": "object",
@@ -196,6 +223,9 @@ def extension_contract_schema() -> dict[str, Any]:
                 "order": {"type": "integer"},
                 "availability": {"type": "string"},
                 "args_schema": json_schema,
+                "category": {"type": "string"},
+                "keywords": string_array,
+                "default_shortcut": {"type": "string"},
             },
             ["name", "title", "description", "order", "availability", "args_schema"],
         ),

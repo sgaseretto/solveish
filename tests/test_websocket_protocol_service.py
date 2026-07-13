@@ -57,3 +57,40 @@ def test_cancel_dispatch_and_invalid_payload_are_isolated():
         assert sent == []
 
     asyncio.run(run())
+
+
+def test_extension_command_cancel_uses_control_socket_and_acknowledges_result():
+    async def run():
+        sent = []
+        cancelled = []
+
+        async def send(message):
+            sent.append(json.loads(message))
+
+        async def cancel(operation_id):
+            cancelled.append(operation_id)
+            return operation_id == "ext-command-running"
+
+        handled = await handle_control_message(
+            json.dumps({
+                "type": "extension_command_cancel",
+                "operation_id": "ext-command-running",
+            }),
+            send,
+            "demo",
+            notebook_unavailable=lambda _id: False,
+            revision_snapshot=lambda _id: {},
+            send_kernel_snapshot=lambda _id, _send: None,
+            cancel_cell=lambda _notebook_id, _cell_id: None,
+            cancel_extension_command=cancel,
+        )
+
+        assert handled is True
+        assert cancelled == ["ext-command-running"]
+        assert sent == [{
+            "type": "extension_command_cancel_ack",
+            "operation_id": "ext-command-running",
+            "cancelled": True,
+        }]
+
+    asyncio.run(run())

@@ -30,6 +30,7 @@ from .layout import NotebookPage, WorkspacePage, AllCells, AllCellsContent, Prov
 # Settings components
 from .settings import SettingsSidebar, SettingsOverlay, SettingsGroup
 from .extensions import ExtensionManagerButton, ExtensionManagerModal
+from .command_palette import CommandPaletteButton, CommandPaletteModal
 
 # Outline sidebar components
 from .outline import OutlineSidebar, OutlineToggleButton, OutlineSection
@@ -68,6 +69,8 @@ __all__ = [
     'SettingsSidebar',
     'ExtensionManagerButton',
     'ExtensionManagerModal',
+    'CommandPaletteButton',
+    'CommandPaletteModal',
     'SettingsOverlay',
     'SettingsGroup',
     # Outline

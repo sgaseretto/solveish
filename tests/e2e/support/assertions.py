@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from urllib.parse import quote
 
 from playwright.sync_api import Page, expect
@@ -32,7 +33,7 @@ def attach_local_kernel(page: Page) -> None:
     modal = page.locator("#kernel-modal-overlay")
     if "visible" not in (modal.get_attribute("class") or ""):
         page.locator("#kernel-status-bar").click()
-        expect(modal).to_have_class("visible")
+        expect(modal).to_have_class(re.compile(r"\bvisible\b"))
     modal.locator('.kernel-option[data-kernel="local"]').click()
     modal.get_by_role("button", name="Apply").click()
     expect(modal).not_to_have_class("visible")

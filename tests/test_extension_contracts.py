@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from dialeng.extensions.context import RegistrationScope, registration_scope
 from dialeng.extensions.contracts import (
     API_POLICY,
@@ -117,6 +119,17 @@ def test_manifest_schema_rejects_unknown_and_coerced_declarations(tmp_path):
 
     assert result["ok"] is False
     assert "Unknown contribution declaration" in result["diagnostics"][0]["message"]
+
+
+def test_malformed_command_schema_is_rejected_during_registration(tmp_path):
+    from dialeng.extensions import ExtensionAPI, ExtensionContext
+
+    api = ExtensionAPI(ExtensionContext("fixture.schemas", tmp_path))
+    with pytest.raises(ValueError, match="schema root must be an object"):
+        api.register_command(
+            "broken", title="Broken", description="Broken schema", handler=lambda context: None,
+            args_schema={"type": "array"},
+        )
 
 
 def test_extension_doctor_reports_reproducibility_and_runtime_fields(tmp_path):

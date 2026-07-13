@@ -111,13 +111,35 @@ def register_extension_routes(
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
 
+    async def cancel_command(operation_id: str) -> bool:
+        active = active_commands.get(operation_id)
+        if active is None:
+            return False
+        task, cancel_event, _extension_id = active
+        cancel_event.set()
+        task.cancel()
+        return True
+
     def bind_manager_hooks(manager: ExtensionManager) -> None:
         manager.context_services["cancel_extension_commands"] = cancel_owner_commands
+        manager.context_services["cancel_extension_command"] = cancel_command
 
     bind_manager_hooks(manager_provider())
 
     def active_owner(manager: ExtensionManager, extension_id: str) -> bool:
-        return extension_id in manager.active or extension_id in manager.store.owners
+        return extension_id == "core" or extension_id in manager.active or extension_id in manager.store.owners
+
+    def availability(registration, notebook_id: str) -> tuple[bool, str]:
+        if command_available is None:
+            return True, ""
+        result = command_available(registration.availability, notebook_id)
+        if isinstance(result, tuple):
+            return bool(result[0]), str(result[1] or "")
+        return bool(result), (
+            "The current notebook or kernel state does not satisfy "
+            f"{registration.availability}."
+            if not result else ""
+        )
 
     async def changed(manager: ExtensionManager) -> dict:
         snapshot = manager.snapshot()
@@ -140,6 +162,54 @@ def register_extension_routes(
         from dialeng.extensions.contracts import contract_snapshot
 
         return JSONResponse({"ok": True, **contract_snapshot()})
+
+    @rt("/dialeng/{nb_id}/extensions/commands")
+    async def get(nb_id: str):
+        manager = manager_provider()
+        snapshot = manager.snapshot()
+        extension_labels = {
+            item.get("id"): item.get("name") or item.get("id")
+            for item in snapshot.get("extensions", [])
+        }
+        shortcut_by_command: dict[str, list[str]] = {}
+        from dialeng.extensions.resources import shortcuts
+        for item in shortcuts.values():
+            shortcut_by_command.setdefault(item.command, []).append(item.shortcut)
+        catalog = []
+        for command in commands.values():
+            owner = command.name.split(":", 1)[0]
+            command_shortcuts = shortcut_by_command.get(command.name) or (
+                [command.default_shortcut] if command.default_shortcut else []
+            )
+            is_available, reason = availability(command, nb_id)
+            catalog.append({
+                "name": command.name,
+                "title": command.title,
+                "description": command.description,
+                "category": command.category,
+                "keywords": list(command.keywords),
+                "order": command.order,
+                "owner": owner,
+                "owner_label": "Dialeng" if owner == "core" else extension_labels.get(owner, owner),
+                "availability": command.availability,
+                "available": is_available,
+                "unavailable_reason": reason,
+                "args_schema": command.args_schema,
+                "shortcuts": command_shortcuts,
+                "client_action": command.client_action,
+            })
+        shortcut_counts: dict[str, int] = {}
+        for item in catalog:
+            for shortcut in item["shortcuts"]:
+                key = shortcut.casefold().replace("cmd", "meta").replace(" ", "")
+                shortcut_counts[key] = shortcut_counts.get(key, 0) + 1
+        for item in catalog:
+            item["shortcut_conflict"] = any(
+                shortcut_counts.get(shortcut.casefold().replace("cmd", "meta").replace(" ", ""), 0) > 1
+                for shortcut in item["shortcuts"]
+            )
+        catalog.sort(key=lambda item: (item["category"], item["order"], item["title"], item["name"]))
+        return JSONResponse({"ok": True, "revision": manager.revision, "commands": catalog})
 
     @rt("/dialeng/extensions/{extension_id}/trust")
     async def post(extension_id: str, request):
@@ -303,9 +373,10 @@ def register_extension_routes(
         command = commands.get(f"{extension_id}:{command_name}")
         if command is None:
             return _error("Unknown extension command", 404)
-        if command_available and not command_available(command.availability, nb_id):
+        is_available, unavailable_reason = availability(command, nb_id)
+        if not is_available:
             return _error(
-                f"Command is unavailable while {command.availability!r} is not satisfied",
+                unavailable_reason or f"Command is unavailable while {command.availability!r} is not satisfied",
                 409,
                 kind="extension_command_unavailable",
             )
@@ -379,12 +450,8 @@ def register_extension_routes(
 
     @rt("/dialeng/extensions/commands/{operation_id}/cancel")
     async def post(operation_id: str):
-        active = active_commands.get(operation_id)
-        if active is None:
+        if not await cancel_command(operation_id):
             return _error("Extension command is not active", 404, kind="extension_command_not_active")
-        task, cancel_event, _extension_id = active
-        cancel_event.set()
-        task.cancel()
         return JSONResponse({"ok": True, "operation_id": operation_id, "cancelled": True})
 
     @rt("/dialeng/{nb_id}/extensions/surfaces/{kind}/{extension_id}/{surface_name}")

@@ -17,6 +17,7 @@ from .contracts import (
     ExtensionKernel,
     ExtensionProvider,
     ExtensionSetting,
+    validate_object_schema,
 )
 from .context import capture_registration
 from .events import EventHandlerRegistration
@@ -202,16 +203,22 @@ class ExtensionAPI:
         order: int = 50,
         availability: str = "always",
         args_schema: dict[str, Any] | None = None,
+        category: str = "Extensions",
+        keywords: tuple[str, ...] = (),
+        default_shortcut: str = "",
     ) -> str:
         availability_terms = [term.strip() for term in str(availability).split("&&")]
         invalid = [term for term in availability_terms if term not in _COMMAND_AVAILABILITY]
         if invalid:
             raise ValueError(f"Unsupported command availability predicate(s): {', '.join(invalid)}")
         qualified = self._qualified(name)
+        args_schema = validate_object_schema(args_schema, label="Command argument")
         capture_registration(
             "extension.command", qualified,
             CommandRegistration(
-                qualified, title, description, handler, order, availability, args_schema or {},
+                qualified, title, description, handler, order, availability, args_schema,
+                str(category or "Extensions"), tuple(str(item) for item in keywords),
+                str(default_shortcut or ""), "",
             ),
         )
         return qualified
@@ -329,10 +336,12 @@ class ExtensionAPI:
         response_schema: dict[str, Any] | None = None,
     ) -> str:
         qualified = self._qualified(name)
+        request_schema = validate_object_schema(request_schema, label="Action request")
+        response_schema = validate_object_schema(response_schema, label="Action response")
         capture_registration(
             "extension.action",
             qualified,
-            ActionRegistration(qualified, handler, request_schema or {}, response_schema or {}),
+            ActionRegistration(qualified, handler, request_schema, response_schema),
         )
         return qualified
 

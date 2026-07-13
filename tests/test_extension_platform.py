@@ -23,6 +23,7 @@ from dialeng.extensions.trust import ExtensionTrustStore
 from dialeng.extensions.state import ExtensionStateStore
 from dialeng.extensions.diagnostics import redact_text, redact_value
 from dialeng.ui.extensions import ExtensionManagerModal
+from dialeng.ui.command_palette import CommandPaletteModal
 from dialeng.extensions import events, resources
 from dialeng.services import settings_service
 from dialeng.services.llm.utils import execute_tool
@@ -616,6 +617,20 @@ def test_extension_manager_routes_cover_trust_enable_action_command_and_disable(
         assert enabled.json()["extensions"][0]["state"] == "active"
         assert manager.state_store.enabled(project) == {"test.route-manager"}
 
+        catalog = client.get("/dialeng/demo/extensions/commands")
+        assert catalog.status_code == 200
+        by_name = {item["name"]: item for item in catalog.json()["commands"]}
+        assert by_name["core:save"]["owner_label"] == "Dialeng"
+        assert by_name["test.route-manager:hello"]["available"] is True
+        assert by_name["test.route-manager:kernel-only"]["available"] is False
+        assert "kernel" in by_name["test.route-manager:kernel-only"]["unavailable_reason"].lower()
+
+        core_command = client.post(
+            "/dialeng/demo/extensions/commands/core/open-settings",
+            json={},
+        )
+        assert core_command.json()["client_action"] == "open-settings"
+
         action = client.post(
             "/dialeng/demo/extensions/test.route-manager/actions/ping",
             data={"value": "42"},
@@ -658,6 +673,16 @@ def test_extension_manager_modal_has_accessible_backend_driven_controls():
     assert 'role="dialog"' in html
     assert 'aria-labelledby="extension-manager-title"' in html
     assert 'id="extension-manager-list"' in html
+
+
+def test_command_palette_modal_is_accessible_and_backend_driven():
+    html = to_xml(CommandPaletteModal())
+
+    assert 'id="command-palette-overlay"' in html
+    assert 'role="dialog"' in html
+    assert 'role="combobox"' in html
+    assert 'role="listbox"' in html
+    assert 'aria-modal="true"' in html
 
 
 def test_long_running_extension_command_can_be_cancelled(tmp_path, monkeypatch):
