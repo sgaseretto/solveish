@@ -7,10 +7,15 @@ without depending on the lifecycle manager during application bootstrap.
 
 __all__ = [
     "EXTENSION_API_VERSION",
+    "ExtensionAPIPolicy",
     "ExtensionAPI",
+    "ExtensionCellType",
     "ExtensionContext",
+    "ExtensionKernel",
     "ExtensionManager",
     "ExtensionManifest",
+    "ExtensionProvider",
+    "ExtensionSetting",
     "ExtensionSource",
 ]
 
@@ -23,10 +28,29 @@ def __getattr__(name):
     if name == "ExtensionManager":
         from .manager import ExtensionManager
         return ExtensionManager
-    if name in {"EXTENSION_API_VERSION", "ExtensionManifest", "ExtensionSource"}:
-        from .manifest import EXTENSION_API_VERSION, ExtensionManifest, ExtensionSource
+    if name in {
+        "EXTENSION_API_VERSION", "ExtensionAPIPolicy", "ExtensionCellType",
+        "ExtensionKernel", "ExtensionProvider", "ExtensionSetting",
+    }:
+        from .contracts import (
+            EXTENSION_API_VERSION,
+            ExtensionAPIPolicy,
+            ExtensionCellType,
+            ExtensionKernel,
+            ExtensionProvider,
+            ExtensionSetting,
+        )
         return {
             "EXTENSION_API_VERSION": EXTENSION_API_VERSION,
+            "ExtensionAPIPolicy": ExtensionAPIPolicy,
+            "ExtensionCellType": ExtensionCellType,
+            "ExtensionKernel": ExtensionKernel,
+            "ExtensionProvider": ExtensionProvider,
+            "ExtensionSetting": ExtensionSetting,
+        }[name]
+    if name in {"ExtensionManifest", "ExtensionSource"}:
+        from .manifest import ExtensionManifest, ExtensionSource
+        return {
             "ExtensionManifest": ExtensionManifest,
             "ExtensionSource": ExtensionSource,
         }[name]

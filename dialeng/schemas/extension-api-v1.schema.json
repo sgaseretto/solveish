@@ -1,0 +1,424 @@
+{
+  "$defs": {
+    "action": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "request_schema": {
+          "type": "object"
+        },
+        "response_schema": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "request_schema",
+        "response_schema"
+      ],
+      "type": "object"
+    },
+    "command": {
+      "additionalProperties": false,
+      "properties": {
+        "args_schema": {
+          "type": "object"
+        },
+        "availability": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "order": {
+          "type": "integer"
+        },
+        "title": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "description",
+        "order",
+        "availability",
+        "args_schema"
+      ],
+      "type": "object"
+    },
+    "custom_cell": {
+      "additionalProperties": false,
+      "properties": {
+        "cell_type": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "deserializer": {
+          "type": "string"
+        },
+        "icon": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "llm_converter": {
+          "type": "string"
+        },
+        "renderer": {
+          "type": "string"
+        },
+        "serializer": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cell_type",
+        "icon",
+        "label"
+      ],
+      "type": "object"
+    },
+    "event": {
+      "additionalProperties": false,
+      "properties": {
+        "event": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "observe",
+            "transform",
+            "guard"
+          ]
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "order": {
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "event",
+        "mode",
+        "order",
+        "timeout_seconds"
+      ],
+      "type": "object"
+    },
+    "event_payload": {
+      "additionalProperties": false,
+      "properties": {
+        "event": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "payload": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "event",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "manifest": {
+      "additionalProperties": false,
+      "properties": {
+        "assets": {
+          "additionalProperties": false,
+          "properties": {
+            "css": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "js": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            }
+          },
+          "required": [],
+          "type": "object"
+        },
+        "author": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "contributes": {
+          "additionalProperties": false,
+          "properties": {
+            "actions": {
+              "type": "boolean"
+            },
+            "callbacks": {
+              "type": "boolean"
+            },
+            "cell_types": {
+              "type": "boolean"
+            },
+            "commands": {
+              "type": "boolean"
+            },
+            "events": {
+              "type": "boolean"
+            },
+            "kernels": {
+              "type": "boolean"
+            },
+            "panels": {
+              "type": "boolean"
+            },
+            "providers": {
+              "type": "boolean"
+            },
+            "services": {
+              "type": "boolean"
+            },
+            "settings": {
+              "type": "boolean"
+            },
+            "shortcuts": {
+              "type": "boolean"
+            },
+            "skills": {
+              "type": "boolean"
+            },
+            "status": {
+              "type": "boolean"
+            },
+            "templates": {
+              "type": "boolean"
+            },
+            "toolbar": {
+              "type": "boolean"
+            },
+            "tools": {
+              "type": "boolean"
+            }
+          },
+          "required": [],
+          "type": "object"
+        },
+        "description": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "dialeng_api": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "entrypoint": {
+          "pattern": "^[^:]+:[^:]+$",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)+$",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "permissions": {
+          "additionalProperties": false,
+          "properties": {
+            "browser_assets": {
+              "type": "boolean"
+            },
+            "filesystem_read": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "filesystem_write": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "network": {
+              "type": "boolean"
+            },
+            "subprocess": {
+              "type": "boolean"
+            }
+          },
+          "required": [],
+          "type": "object"
+        },
+        "resources": {
+          "additionalProperties": false,
+          "properties": {
+            "craft": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "notebook_templates": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "skills": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "templates": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            }
+          },
+          "required": [],
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "scope": {
+          "enum": [
+            "builtin",
+            "development",
+            "package",
+            "project",
+            "user"
+          ]
+        },
+        "version": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "id",
+        "name",
+        "version",
+        "description",
+        "entrypoint",
+        "dialeng_api"
+      ],
+      "type": "object"
+    },
+    "setting": {
+      "additionalProperties": false,
+      "properties": {
+        "apply_mode": {
+          "enum": [
+            "live",
+            "new_kernel",
+            "extension_reload",
+            "server_restart"
+          ]
+        },
+        "choices": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "default": {},
+        "description": {
+          "type": "string"
+        },
+        "env_var": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "group": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "bool",
+            "int",
+            "str"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "maximum": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "minimum": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "order": {
+          "type": "integer"
+        },
+        "path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "secret": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "default"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://dialeng.dev/schemas/extension-api-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": ">=1,<2",
+  "title": "Dialeng Extension API 1 Contracts",
+  "type": "object"
+}

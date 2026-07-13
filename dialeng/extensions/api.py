@@ -4,21 +4,20 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from dialeng.core.registry import (
-    CellTypeRegistration,
-    KernelRegistration,
-    ProviderRegistration,
-    SettingsSectionRegistration,
-    ToolbarItemRegistration,
-    registry,
-)
 from dialeng.services.settings_service import SettingDefinition, register_dynamic_setting
 from dialeng.services.tool_registry import function_to_tool_schema
 
+from .contracts import (
+    EXTENSION_API_VERSION,
+    ExtensionCellType,
+    ExtensionKernel,
+    ExtensionProvider,
+    ExtensionSetting,
+)
 from .context import capture_registration
 from .events import EventHandlerRegistration
 from .resources import (
@@ -60,7 +59,7 @@ class ExtensionContext:
         self.scope = scope
         self.source_root = Path(source_root or project_root).resolve()
         self.permissions = dict(permissions or {})
-        self.api_version = "1.0.0"
+        self.api_version = EXTENSION_API_VERSION
         self.logger = logging.LoggerAdapter(
             logging.getLogger(f"dialeng.extension.{extension_id}"),
             {"extension_id": extension_id},
@@ -70,6 +69,19 @@ class ExtensionContext:
         self._cleanups: list[Cleanup] = []
         self._tasks: set[asyncio.Task] = set()
         self.cancel_signal = asyncio.Event()
+
+    def public_identity(self) -> dict[str, Any]:
+        """Return the JSON-safe identity available to isolated hosts."""
+
+        return {
+            "extension_id": self.extension_id,
+            "version": self.version,
+            "scope": self.scope,
+            "api_version": self.api_version,
+            "project_root": str(self.project_root),
+            "source_root": str(self.source_root),
+            "permissions": dict(self.permissions),
+        }
 
     def add_cleanup(self, cleanup: Cleanup) -> None:
         self._cleanups.append(cleanup)
@@ -304,6 +316,8 @@ class ExtensionAPI:
         register_llm_converter(cell_type)(converter)
 
     def register_service(self, name: str, service: Any) -> None:
+        from dialeng.core.registry import registry
+
         registry.register_service(name, service)
 
     def register_action(
@@ -334,6 +348,8 @@ class ExtensionAPI:
         order: int = 50,
     ) -> str:
         if renderer is not None:
+            from dialeng.core.registry import ToolbarItemRegistration, registry
+
             registry.register_toolbar_item(ToolbarItemRegistration(name, renderer, position, order))
             return self._qualified(name)
         qualified = self._qualified(name)
@@ -350,9 +366,15 @@ class ExtensionAPI:
     def register_settings_section(
         self, name: str, label: str, renderer: Callable, *, order: int = 50,
     ) -> None:
+        from dialeng.core.registry import SettingsSectionRegistration, registry
+
         registry.register_settings_section(SettingsSectionRegistration(name, label, renderer, order))
 
-    def register_setting(self, definition: SettingDefinition) -> None:
+    def register_setting(self, definition: ExtensionSetting | SettingDefinition) -> None:
+        if isinstance(definition, ExtensionSetting):
+            definition = SettingDefinition(**asdict(definition))
+        if not isinstance(definition, SettingDefinition):
+            raise TypeError("register_setting requires ExtensionSetting")
         local_path = definition.path.strip().strip(".")
         if not local_path or local_path.startswith("extensions."):
             raise ValueError("Extension setting paths must be relative")
@@ -363,21 +385,42 @@ class ExtensionAPI:
             path=f"extensions.{self.context.extension_id}.{local_path}",
         ))
 
-    def register_kernel(self, registration: KernelRegistration) -> None:
+    def register_kernel(self, registration: ExtensionKernel | Any) -> None:
+        from dialeng.core.registry import KernelRegistration, registry
+
+        if isinstance(registration, ExtensionKernel):
+            registration = KernelRegistration(
+                registration.name,
+                registration.label,
+                registration.icon,
+                registration.factory,
+                registration.description,
+                registration.requires_auth,
+                list(registration.runtime_options),
+            )
+        if not isinstance(registration, KernelRegistration):
+            raise TypeError("register_kernel requires ExtensionKernel")
         registry.register_kernel_type(registration)
 
-    def register_provider(self, registration: ProviderRegistration) -> None:
+    def register_provider(self, registration: ExtensionProvider | Any) -> None:
+        from dialeng.core.registry import ProviderRegistration, registry
+
+        if isinstance(registration, ExtensionProvider):
+            registration = ProviderRegistration(**asdict(registration))
+        if not isinstance(registration, ProviderRegistration):
+            raise TypeError("register_provider requires ExtensionProvider")
         registry.register_provider(registration)
 
     def register_cell_type(
         self,
-        registration: CellTypeRegistration,
+        registration: ExtensionCellType | Any,
         *,
         renderer: Callable | None = None,
         serializer: Callable | None = None,
         deserializer: Callable | None = None,
         llm_converter: Callable | None = None,
     ) -> None:
+        from dialeng.core.registry import CellTypeRegistration, registry
         from dialeng.core.dispatch import (
             register_jupyter_deserializer,
             register_jupyter_serializer,
@@ -385,6 +428,10 @@ class ExtensionAPI:
             register_renderer,
         )
 
+        if isinstance(registration, ExtensionCellType):
+            registration = CellTypeRegistration(**asdict(registration))
+        if not isinstance(registration, CellTypeRegistration):
+            raise TypeError("register_cell_type requires ExtensionCellType")
         registry.register_cell_type(registration)
         if renderer:
             register_renderer(registration.cell_type)(renderer)

@@ -23,6 +23,22 @@ development sources without importing entry points. Precedence is development,
 project, user, package, then built-in; equal-precedence duplicate IDs become
 diagnostics rather than arbitrary winners.
 
+`contracts.py` is the canonical public contract source. It owns Extension API,
+manifest schema, and future RPC protocol versions; Dialeng-owned setting, cell,
+kernel, and provider declarations; the compatibility policy; and the generated
+JSON Schema catalog at `dialeng/schemas/extension-api-v1.schema.json`. A CI test
+compares the committed catalog with a fresh generation so documentation and
+runtime declarations cannot drift silently.
+
+```mermaid
+flowchart LR
+    C["contracts.py"] --> P["Public Python declarations"]
+    C --> J["Generated JSON Schema"]
+    C --> K["extension check"]
+    C --> D["extension doctor"]
+    C --> R["Future RPC handshake"]
+```
+
 ## Transactional Activation
 
 `ExtensionManager.activate` serializes mutations with one async lock:
@@ -126,6 +142,10 @@ its export/test/clean checks run before Dialeng regenerates the canonical module
 | Contract | API 1 |
 |---|---|
 | Python `setup(api, ctx)` | Stable |
+| API compatibility policy | `1.0.0`, compatible range `>=1,<2` |
+| Generated contract catalog | `dialeng/schemas/extension-api-v1.schema.json` |
+| Metadata/syntax check without import | `dialeng extension check PATH` |
+| Project and runtime health report | `dialeng extension doctor` and `/dialeng/extensions/doctor` |
 | `extension.toml` schema | Version 1 |
 | Project/user/development/package discovery | Supported |
 | Commands/actions/settings/events/tools | Supported |

@@ -389,6 +389,8 @@ class ExtensionManager:
                     "state": "blocked" if not self.trust_store.is_trusted(source) else "disabled",
                     "error": self.failures.get(extension_id),
                     "contributions": [],
+                    "managed_tasks": 0,
+                    "cleanup_errors": [],
                     "trusted": self.trust_store.is_trusted(source),
                 })
             try:
@@ -446,3 +448,17 @@ class ExtensionManager:
             "resources": public_resources(),
             "event_diagnostics": event_bus.diagnostics(),
         })
+
+    def doctor(self) -> dict[str, Any]:
+        """Return discovery, trust, compatibility, runtime, and cleanup health."""
+
+        from .diagnostics import build_extension_doctor
+
+        self.refresh()
+        return build_extension_doctor(
+            self.project_root,
+            self.discovery,
+            self.trust_store,
+            self.state_store,
+            runtime_snapshot=self.snapshot(),
+        )

@@ -167,11 +167,14 @@ def _parse_subcommand(argv):
     for action in ("list", "doctor"):
         command = extension_sub.add_parser(action, help=f"{action.title()} project extensions")
         command.add_argument("--path", default=".")
+    extension_schema = extension_sub.add_parser("schema", help="Print Extension API JSON schemas")
+    extension_schema.add_argument("--output", default="", help="Write the schema catalog to a file")
+    extension_schema.add_argument("--path", default=".")
     for action in ("inspect", "trust", "enable", "disable", "reload", "remove"):
         command = extension_sub.add_parser(action, help=f"{action.title()} one extension")
         command.add_argument("extension_id")
         command.add_argument("--path", default=".")
-    for action in ("build", "validate", "test", "prepare", "package", "install", "migrate"):
+    for action in ("build", "check", "validate", "test", "prepare", "package", "install", "migrate"):
         command = extension_sub.add_parser(action, help=f"{action.title()} an extension source")
         command.add_argument("extension_path")
         command.add_argument("--path", default=".")
@@ -341,17 +344,27 @@ def _run_extension_command(args):
     from dialeng.services.extension_project_service import ExtensionProjectService
 
     if not args.extension_action:
-        print("Usage: dialeng extension {create,list,inspect,trust,enable,disable,reload,build,validate,test,prepare,package,install,remove,migrate,doctor}")
+        print("Usage: dialeng extension {create,list,inspect,trust,enable,disable,reload,build,check,validate,test,prepare,package,install,remove,migrate,doctor,schema}")
         return
     root = resolve_root_dir(args.path, respect_env=False)
     service = ExtensionProjectService(root)
     action = args.extension_action
-    if action == "create":
+    if action == "schema":
+        from dialeng.extensions.contracts import contract_snapshot, write_contract_schema
+
+        if args.output:
+            output = write_contract_schema(Path(args.output).expanduser().resolve())
+            result = {"ok": True, "output": str(output), **contract_snapshot()}
+        else:
+            result = {"ok": True, **contract_snapshot()}
+    elif action == "create":
         result = service.create(args.name, template=args.template, extension_id=args.extension_id)
-    elif action in {"build", "validate", "test", "prepare", "package", "install", "migrate"}:
+    elif action in {"build", "check", "validate", "test", "prepare", "package", "install", "migrate"}:
         source = Path(args.extension_path).resolve()
         if action == "build":
             result = service.build(source)
+        elif action == "check":
+            result = service.check(source)
         elif action == "validate":
             result = service.validate(source, isolated=True)
         elif action == "test":
@@ -365,11 +378,19 @@ def _run_extension_command(args):
         else:
             result = service.prepare(source)
     else:
-        discovery = discover_extensions(root, user_root=root / ".no-user-extensions")
+        discovery = discover_extensions(root)
         if action in {"list", "doctor"}:
-            result = discovery.public()
             if action == "doctor":
-                result["ok"] = not result["diagnostics"]
+                from dialeng.extensions.diagnostics import build_extension_doctor
+
+                result = build_extension_doctor(
+                    root,
+                    discovery,
+                    ExtensionTrustStore(),
+                    ExtensionStateStore(),
+                )
+            else:
+                result = discovery.public()
         else:
             source = discovery.active.get(args.extension_id)
             if source is None:

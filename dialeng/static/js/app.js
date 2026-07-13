@@ -4330,6 +4330,7 @@ async function loadExtensionSurface(kind, registration) {
         `/dialeng/${encodeURIComponent(notebookId)}/extensions/surfaces/${kind}/${encodeURIComponent(extensionId)}/${encodeURIComponent(localName)}`,
         {headers: {'Accept': 'text/html'}},
     );
+    if (response.status === 204) return null;
     if (!response.ok) return null;
     const wrapper = document.createElement('section');
     wrapper.className = `extension-surface extension-${kind} ${registration.location || ''}`;

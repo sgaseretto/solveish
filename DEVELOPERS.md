@@ -2,6 +2,11 @@
 
 A comprehensive guide for developers who want to extend, customize, or contribute to Dialeng.
 
+Extension authors should start with the [extension guide](docs/guides/extensions.md)
+and the [versioned Extension API internals](docs/how_it_works/25_extension_platform.md).
+Use `dialeng extension check PATH` before activation and `dialeng extension doctor`
+when diagnosing discovery, trust, build, or lifecycle state.
+
 ## Table of Contents
 
 1. [Architecture Overview](#architecture-overview)

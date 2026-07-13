@@ -37,7 +37,7 @@ uv run pytest -q tests/e2e/test_extension_platform.py
 - Metadata parsing, compatibility, path safety, hashing, malformed diagnostics,
   duplicate precedence, and no-import discovery.
 - One-session/version/project trust and source/permission invalidation.
-- Atomic registration, rollback, removal, cleanup, unique modules, and 100 reloads.
+- Atomic registration, rollback, removal, cleanup, unique modules, and 500 reloads.
 - Event ordering, transforms, guards, deadlines, failure isolation, and threshold.
 - Command schema, availability, operation IDs, progress, and cancellation.
 - Action schema and namespace isolation.
@@ -71,8 +71,8 @@ on failure.
 ## Performance And Fault Baseline
 
 Current non-regression checks assert 25 disabled local manifests discover within a
-generous two-second shared-CI bound, 100 source reloads retain one contribution and
-one runtime owner, concurrent mutations serialize, and repeated event failures stop
+generous two-second shared-CI bound, 500 source reloads retain one contribution set,
+one event handler, one browser asset, one task, and one runtime module; concurrent mutations serialize, and repeated event failures stop
 at the third call. Package tests build a wheel and use an isolated `uv` environment
 to confirm entry-point metadata and bundled resources.
 

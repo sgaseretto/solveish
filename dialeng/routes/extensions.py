@@ -11,7 +11,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import FileResponse, JSONResponse, Response
 
 from dialeng.extensions.manager import ExtensionManager, ExtensionNotTrustedError
 from dialeng.extensions.resources import actions, commands, panels, status_items
@@ -129,6 +129,17 @@ def register_extension_routes(
         manager = manager_provider()
         manager.refresh()
         return JSONResponse({"ok": True, **manager.snapshot()})
+
+    @rt("/dialeng/extensions/doctor")
+    async def get():
+        manager = manager_provider()
+        return JSONResponse(manager.doctor())
+
+    @rt("/dialeng/extensions/contracts")
+    async def get():
+        from dialeng.extensions.contracts import contract_snapshot
+
+        return JSONResponse({"ok": True, **contract_snapshot()})
 
     @rt("/dialeng/extensions/{extension_id}/trust")
     async def post(extension_id: str, request):
@@ -380,13 +391,13 @@ def register_extension_routes(
     async def get(nb_id: str, kind: str, extension_id: str, surface_name: str):
         manager = manager_provider()
         if not active_owner(manager, extension_id):
-            return _error("Extension is not active", 409)
+            return Response(status_code=204)
         collection = panels if kind == "panel" else status_items if kind == "status" else None
         if collection is None:
             return _error("Unknown extension surface", 404)
         registration = collection.get(f"{extension_id}:{surface_name}")
         if registration is None:
-            return _error("Unknown extension surface", 404)
+            return Response(status_code=204)
         context = {
             "notebook_id": nb_id,
             "project_root": str(manager.project_root),

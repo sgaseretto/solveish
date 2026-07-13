@@ -1,5 +1,6 @@
 import asyncio
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from dialeng.document.cell import Cell, CellState
 from dialeng.extensions.discovery import discover_extensions
 from dialeng.extensions.events import EventHandlerRegistration, event_bus, handlers
 from dialeng.extensions.manager import ExtensionManager
+from dialeng.extensions.resources import assets, commands
 from dialeng.extensions.state import ExtensionStateStore
 from dialeng.extensions.trust import ExtensionTrustStore
 from dialeng.services.kernel.execution_queue import ExecutionQueue
@@ -38,10 +40,31 @@ commands = true
     )
 
 
-def test_one_hundred_transactional_reloads_and_concurrent_mutations_are_leak_free(tmp_path):
+def test_five_hundred_transactional_reloads_and_concurrent_mutations_are_leak_free(tmp_path):
     project = tmp_path / "project"
     root = project / ".dialeng" / "extensions" / "stress"
-    _write(root, "test.stress", "api.register_command('only', title='Only', description='One', handler=lambda context: context)")
+    root.mkdir(parents=True)
+    (root / "asset.css").write_text(".stress { color: currentColor; }\n", encoding="utf-8")
+    (root / "extension.toml").write_text(
+        '''schema_version = 1
+id = "test.stress"
+name = "Stress"
+version = "0.1.0"
+description = "Stress fixture."
+entrypoint = "extension:setup"
+dialeng_api = ">=1,<2"
+scope = "project"
+[permissions]
+network = false
+browser_assets = true
+[contributes]
+commands = true
+events = true
+[assets]
+css = ["asset.css"]
+''',
+        encoding="utf-8",
+    )
     manager = ExtensionManager(
         project,
         trust_store=ExtensionTrustStore(tmp_path / "trust.json"),
@@ -50,22 +73,37 @@ def test_one_hundred_transactional_reloads_and_concurrent_mutations_are_leak_fre
     )
 
     async def scenario():
-        for index in range(100):
+        for index in range(500):
             (root / "extension.py").write_text(
+                "import asyncio\n\n"
+                "async def hold():\n"
+                "    await asyncio.Event().wait()\n\n"
                 "def setup(api, ctx):\n"
-                f"    api.register_command('only', title='Only {index}', description='One', handler=lambda context: context)\n",
+                "    ctx.create_task(hold(), name='hold')\n"
+                f"    api.register_command('only', title='Only {index}', description='One', handler=lambda context: context)\n"
+                "    api.register_asset('style', kind='css', path='asset.css')\n"
+                "    api.on('stress.event', lambda payload: None, name='only')\n",
                 encoding="utf-8",
             )
             active = await manager.activate("test.stress", require_trust=False)
             assert active.reload_count == index
-            assert len(manager.store.snapshot()["test.stress"]) == 1
+            assert len(manager.store.snapshot()["test.stress"]) == 3
+            assert len(active.context._tasks) == 1
+            assert "test.stress:only" in commands
+            assert "test.stress:style" in assets
+            assert "test.stress:stress.event.only" in handlers
+            assert len([name for name in sys.modules if name.startswith("_dialeng_ext_test_stress")]) == 1
         await asyncio.gather(
             manager.activate("test.stress", require_trust=False),
             manager.activate("test.stress", require_trust=False),
         )
-        assert len(manager.store.snapshot()["test.stress"]) == 1
+        assert len(manager.store.snapshot()["test.stress"]) == 3
         await asyncio.gather(manager.disable("test.stress"), manager.disable("test.stress"))
         assert "test.stress" not in manager.store.owners
+        assert "test.stress:only" not in commands
+        assert "test.stress:style" not in assets
+        assert "test.stress:stress.event.only" not in handlers
+        assert not [name for name in sys.modules if name.startswith("_dialeng_ext_test_stress")]
 
     asyncio.run(scenario())
 

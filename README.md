@@ -71,6 +71,8 @@ Create a trusted project extension from a notebook-first template:
 ```bash
 uv run dialeng extension create notebook-audit --template basic
 uv run dialeng extension prepare .dialeng/extensions/notebook-audit
+uv run dialeng extension check .dialeng/extensions/notebook-audit
+uv run dialeng extension doctor --path .
 ```
 
 Then open **Extensions** in Dialeng to review, trust, and enable it. See the

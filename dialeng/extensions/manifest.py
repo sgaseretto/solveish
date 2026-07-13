@@ -12,10 +12,22 @@ from typing import Any
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
+from .contracts import (
+    EXTENSION_API_VERSION,
+    MANIFEST_CONTRIBUTION_FIELDS,
+    MANIFEST_PERMISSION_BOOL_FIELDS,
+    MANIFEST_PERMISSION_LIST_FIELDS,
+    MANIFEST_SCHEMA_VERSION,
+)
 
-EXTENSION_API_VERSION = "1.0.0"
+
 _ID_RE = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)+$")
 _SCOPES = {"builtin", "user", "project", "development", "package"}
+_TOP_LEVEL_FIELDS = {
+    "schema_version", "id", "name", "version", "description", "entrypoint",
+    "dialeng_api", "scope", "permissions", "contributes", "assets", "author",
+    "resources",
+}
 _HASH_EXCLUDES = {
     "__pycache__", ".git", ".ipynb_checkpoints", ".pytest_cache",
     ".dialeng-extension-build", "dist", "build",
@@ -152,6 +164,49 @@ def _normalize_resources(root: Path, raw: Any) -> dict[str, list[str]]:
     return result
 
 
+def _normalize_permissions(raw: Any) -> dict[str, Any]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ExtensionManifestError("permissions must be a table")
+    list_fields = set(MANIFEST_PERMISSION_LIST_FIELDS)
+    bool_fields = set(MANIFEST_PERMISSION_BOOL_FIELDS)
+    unknown = sorted(set(raw) - list_fields - bool_fields)
+    if unknown:
+        raise ExtensionManifestError(f"Unknown permission declaration(s): {', '.join(unknown)}")
+    result: dict[str, Any] = {}
+    for key in MANIFEST_PERMISSION_LIST_FIELDS:
+        if key not in raw:
+            continue
+        value = raw[key]
+        if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
+            raise ExtensionManifestError(f"Permission {key} must be a list of non-empty strings")
+        result[key] = list(value)
+    for key in MANIFEST_PERMISSION_BOOL_FIELDS:
+        if key not in raw:
+            continue
+        if not isinstance(raw[key], bool):
+            raise ExtensionManifestError(f"Permission {key} must be true or false")
+        result[key] = raw[key]
+    return result
+
+
+def _normalize_contributions(raw: Any) -> dict[str, bool]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ExtensionManifestError("contributes must be a table")
+    unknown = sorted(set(raw) - set(MANIFEST_CONTRIBUTION_FIELDS))
+    if unknown:
+        raise ExtensionManifestError(f"Unknown contribution declaration(s): {', '.join(unknown)}")
+    invalid = sorted(key for key, value in raw.items() if not isinstance(value, bool))
+    if invalid:
+        raise ExtensionManifestError(
+            f"Contribution declaration(s) must be true or false: {', '.join(invalid)}"
+        )
+    return dict(raw)
+
+
 def load_extension_manifest(path: Path) -> ExtensionManifest:
     path = Path(path).resolve()
     try:
@@ -160,10 +215,17 @@ def load_extension_manifest(path: Path) -> ExtensionManifest:
         raise ExtensionManifestError(f"Could not read extension manifest {path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise ExtensionManifestError("Extension manifest root must be a table")
+    unknown_fields = sorted(set(raw) - _TOP_LEVEL_FIELDS)
+    if unknown_fields:
+        raise ExtensionManifestError(
+            f"Unknown manifest field(s) for schema 1: {', '.join(unknown_fields)}"
+        )
 
     schema_version = raw.get("schema_version")
-    if schema_version != 1:
-        raise ExtensionManifestError("Only extension manifest schema_version = 1 is supported")
+    if schema_version != MANIFEST_SCHEMA_VERSION:
+        raise ExtensionManifestError(
+            f"Only extension manifest schema_version = {MANIFEST_SCHEMA_VERSION} is supported"
+        )
     extension_id = _string(raw, "id")
     if not _ID_RE.fullmatch(extension_id):
         raise ExtensionManifestError(
@@ -181,16 +243,14 @@ def load_extension_manifest(path: Path) -> ExtensionManifest:
     if ":" not in entrypoint:
         raise ExtensionManifestError("Entrypoint must use module:function syntax")
 
-    permissions = raw.get("permissions") or {}
-    contributes = raw.get("contributes") or {}
     author = raw.get("author") or {}
-    if not isinstance(permissions, dict) or not isinstance(contributes, dict):
-        raise ExtensionManifestError("permissions and contributes must be tables")
     if not isinstance(author, dict):
         raise ExtensionManifestError("author must be a table")
+    if any(not isinstance(key, str) or not isinstance(value, str) for key, value in author.items()):
+        raise ExtensionManifestError("author values must be strings")
 
     manifest = ExtensionManifest(
-        schema_version=1,
+        schema_version=MANIFEST_SCHEMA_VERSION,
         id=extension_id,
         name=_string(raw, "name"),
         version=version,
@@ -198,8 +258,8 @@ def load_extension_manifest(path: Path) -> ExtensionManifest:
         entrypoint=entrypoint,
         dialeng_api=_string(raw, "dialeng_api"),
         scope=scope,
-        permissions=dict(permissions),
-        contributes={str(key): bool(value) for key, value in contributes.items()},
+        permissions=_normalize_permissions(raw.get("permissions")),
+        contributes=_normalize_contributions(raw.get("contributes")),
         assets=_normalize_assets(path.parent, raw.get("assets")),
         author={str(key): str(value) for key, value in author.items()},
         resources=_normalize_resources(path.parent, raw.get("resources")),

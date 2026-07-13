@@ -1,7 +1,5 @@
 """Tests for dialeng CLI argument parsing."""
 import pytest
-from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 
 class TestParseArgs:
@@ -79,6 +77,17 @@ class TestParseArgs:
         assert args.extension_action == "prepare"
         assert args.extension_path == "/tmp/extension"
 
+    def test_extension_check_and_schema_parsing(self):
+        from dialeng.cli import parse_args
+
+        check = parse_args(["extension", "check", "/tmp/extension", "--path", "/tmp/project"])
+        schema = parse_args(["extension", "schema", "--output", "/tmp/schema.json"])
+
+        assert check.extension_action == "check"
+        assert check.extension_path == "/tmp/extension"
+        assert schema.extension_action == "schema"
+        assert schema.output == "/tmp/schema.json"
+
     @pytest.mark.parametrize("action", ["package", "install", "migrate"])
     def test_extension_source_commands_parse(self, action):
         from dialeng.cli import parse_args
@@ -134,6 +143,33 @@ class TestResolveRootDir:
         from dialeng.cli import resolve_root_dir
         result = resolve_root_dir(".", respect_env=True)
         assert result == env_dir
+
+
+class TestExtensionContractCommands:
+    def test_check_schema_and_doctor_commands(self, tmp_path, monkeypatch, capsys):
+        import json
+
+        from dialeng.cli import cli
+        from dialeng.services.extension_project_service import ExtensionProjectService
+
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        project = tmp_path / "project"
+        created = ExtensionProjectService(project).create("contract-cli")
+
+        cli(["extension", "check", created["root"], "--path", str(project)])
+        checked = json.loads(capsys.readouterr().out)
+        assert checked["ok"] is True
+        assert checked["imported"] is False
+
+        schema_path = tmp_path / "schema.json"
+        cli(["extension", "schema", "--output", str(schema_path)])
+        schema = json.loads(capsys.readouterr().out)
+        assert schema["policy"]["version"] == "1.0.0"
+        assert schema_path.is_file()
+
+        cli(["extension", "doctor", "--path", str(project)])
+        doctor = json.loads(capsys.readouterr().out)
+        assert any(item["id"] == "local.contract-cli" for item in doctor["extensions"])
 
 
 class TestAppMain:

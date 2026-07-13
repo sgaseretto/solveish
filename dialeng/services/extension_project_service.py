@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import ast
 import os
 import re
 import subprocess
@@ -17,6 +18,12 @@ from dialeng.core.extensions import extract_extension
 from dialeng.extensions.discovery import discover_extensions
 from dialeng.extensions.manifest import load_extension_manifest
 from dialeng.extensions.manifest import extension_source_hash
+from dialeng.extensions.contracts import (
+    API_POLICY,
+    LEGACY_IMPORT_DIAGNOSTICS,
+    PRIVILEGED_IN_PROCESS_API_METHODS,
+    RPC_SAFE_API_METHODS,
+)
 
 
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
@@ -73,7 +80,7 @@ def setup(api, ctx):
 '''
     if template == "cell":
         return '''#| export
-from dialeng.core.registry import CellTypeRegistration
+from dialeng.extensions import ExtensionCellType
 from dialeng.document.cell import Cell
 from fasthtml.common import Div, Pre
 
@@ -97,7 +104,7 @@ def example_to_messages(cell):
 
 def setup(api, ctx):
     api.register_cell_type(
-        CellTypeRegistration(ExampleCell, "example-cell", "file-code", "Example"),
+        ExtensionCellType(ExampleCell, "example-cell", "file-code", "Example"),
         renderer=render_example,
         serializer=serialize_example,
         deserializer=deserialize_example,
@@ -106,13 +113,13 @@ def setup(api, ctx):
 '''
     if template == "provider":
         return '''#| export
-from dialeng.core.registry import ProviderRegistration
+from dialeng.extensions import ExtensionProvider
 
 class ExampleProvider:
     async def initialize(self): return None
 
 def setup(api, ctx):
-    api.register_provider(ProviderRegistration(
+    api.register_provider(ExtensionProvider(
         name="example-provider", label="Example Provider", factory=ExampleProvider,
     ))
 '''
@@ -477,6 +484,92 @@ asyncio.run(run())
             result["subprocess"] = json.loads(completed.stdout.strip().splitlines()[-1])
         return result
 
+    def check(self, path: Path) -> dict[str, Any]:
+        """Check compatibility and isolation readiness without importing extension code."""
+
+        root = Path(path).expanduser().resolve()
+        diagnostics: list[dict[str, str]] = []
+        warnings: list[dict[str, str]] = []
+        result: dict[str, Any] = {
+            "ok": False,
+            "root": str(root),
+            "api_policy": API_POLICY.public(),
+            "imported": False,
+            "diagnostics": diagnostics,
+            "warnings": warnings,
+            "rpc_safe_methods": list(RPC_SAFE_API_METHODS),
+            "privileged_in_process_methods": list(PRIVILEGED_IN_PROCESS_API_METHODS),
+        }
+        try:
+            manifest = load_extension_manifest(root / "extension.toml")
+        except Exception as exc:
+            diagnostics.append({
+                "code": "manifest_invalid",
+                "message": f"{type(exc).__name__}: {exc}",
+                "path": str(root / "extension.toml"),
+            })
+            return result
+
+        result.update({
+            "extension_id": manifest.id,
+            "version": manifest.version,
+            "dialeng_api": manifest.dialeng_api,
+            "manifest_schema": manifest.schema_version,
+            "manifest": manifest.public(),
+            "source_hash": extension_source_hash(root),
+            "compatible": True,
+        })
+        module_name = manifest.entrypoint.split(":", 1)[0]
+        module = root / (module_name.replace(".", "/") + ".py")
+        if not module.is_file():
+            diagnostics.append({
+                "code": "entrypoint_missing",
+                "message": f"Entrypoint module is missing: {module_name}",
+                "path": str(module),
+            })
+            return result
+
+        source = module.read_text(encoding="utf-8")
+        try:
+            tree = ast.parse(source, filename=str(module))
+        except SyntaxError as exc:
+            diagnostics.append({
+                "code": "syntax_error",
+                "message": str(exc),
+                "path": str(module),
+                "line": str(exc.lineno or 0),
+            })
+            return result
+
+        imported_modules: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported_modules.add(node.module)
+        for imported, message in LEGACY_IMPORT_DIAGNOSTICS.items():
+            if any(name == imported or name.startswith(imported + ".") for name in imported_modules):
+                warnings.append({
+                    "code": "privileged_import",
+                    "message": message,
+                    "path": str(module),
+                    "import": imported,
+                })
+
+        privileged_contributions = sorted(
+            key for key in ("callbacks", "cell_types", "kernels", "panels", "providers", "services", "status")
+            if manifest.contributes.get(key)
+        )
+        result["runtime_mode"] = (
+            "privileged_in_process"
+            if privileged_contributions or any(item["code"] == "privileged_import" for item in warnings)
+            else "isolatable"
+        )
+        result["privileged_contributions"] = privileged_contributions
+        result["module"] = str(module)
+        result["ok"] = not diagnostics
+        return result
+
     def test(self, path: Path, *, browser: bool = False) -> dict[str, Any]:
         root = Path(path).resolve()
         command = [sys.executable, "-m", "pytest", "-q", str(root / "tests")]
@@ -689,11 +782,17 @@ def inspect_extension_api(topic: str = "") -> dict[str, Any]:
         "cells": ["api.register_cell_type"],
         "ui": ["api.register_panel", "api.register_status_item", "api.register_asset"],
         "settings": ["api.register_setting", "api.register_settings_section"],
-        "runtime": ["api.register_callback", "api.register_kernel", "api.register_provider"],
+        "runtime": [
+            "ExtensionKernel", "ExtensionProvider", "ExtensionCellType",
+            "api.register_callback", "api.register_kernel", "api.register_provider",
+        ],
     }
     selected = str(topic or "").strip().lower()
     return {
-        "dialeng_api": "1.0.0",
+        "dialeng_api": API_POLICY.version,
+        "compatibility": API_POLICY.public(),
+        "rpc_safe_methods": list(RPC_SAFE_API_METHODS),
+        "privileged_in_process_methods": list(PRIVILEGED_IN_PROCESS_API_METHODS),
         "topic": selected or "all",
         "methods": methods.get(selected, methods),
         "rules": [

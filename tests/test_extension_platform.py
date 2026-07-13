@@ -590,6 +590,18 @@ def test_extension_manager_routes_cover_trust_enable_action_command_and_disable(
         assert inventory.status_code == 200
         assert inventory.json()["extensions"][0]["state"] == "blocked"
 
+        contracts = client.get("/dialeng/extensions/contracts")
+        doctor = client.get("/dialeng/extensions/doctor")
+        assert contracts.status_code == 200
+        assert contracts.json()["policy"]["version"] == "1.0.0"
+        assert doctor.status_code == 200
+        assert doctor.json()["runtime_available"] is True
+        assert doctor.json()["extensions"][0]["runtime_state"] == "blocked"
+        stale_surface = client.get(
+            "/dialeng/demo/extensions/surfaces/status/test.route-manager/missing"
+        )
+        assert stale_surface.status_code == 204
+
         rejected = client.post("/dialeng/extensions/test.route-manager/enable")
         assert rejected.status_code == 403
 

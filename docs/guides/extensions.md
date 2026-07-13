@@ -118,6 +118,47 @@ backend-authoritative `change_cell_type`, `cancel_signal`, and `create_task`.
 Always use `ctx.create_task`; unmanaged tasks created by extension setup cause
 activation to fail.
 
+Public declarations such as `ExtensionSetting`, `ExtensionCellType`,
+`ExtensionKernel`, and `ExtensionProvider` are exported from `dialeng.extensions`.
+New extensions should use these declarations instead of importing classes from
+`dialeng.core`. Kernel, provider, custom-cell, FastHTML renderer, callback, and
+service contributions remain privileged in-process capabilities in API 1. Commands,
+actions, settings, tools, events, shortcuts, and declared assets are designed to
+cross the isolated-host protocol.
+
+## Compatibility And Diagnostics
+
+Extension API `1.0.0` follows this compatibility policy:
+
+- `>=1,<2` accepts additive API 1 minor releases and corrective patch releases.
+- Breaking public contracts require API 2.
+- Deprecated public entry points emit actionable diagnostics for at least one
+  minor release before removal.
+- Manifest schema 1 remains independently versioned from the Python API.
+
+Check one source without importing its entry point:
+
+```bash
+uv run dialeng extension check .dialeng/extensions/notebook-audit
+```
+
+Inspect discovery, precedence, source hashes, trust, enabled state, build
+freshness, registrations, tasks, failures, and cleanup health:
+
+```bash
+uv run dialeng extension doctor --path .
+```
+
+Export the canonical JSON Schema catalog used by Dialeng and CI:
+
+```bash
+uv run dialeng extension schema --output extension-api-v1.schema.json
+```
+
+`check` reports direct `dialeng.core` imports and FastHTML renderers as privileged
+compatibility paths. It rejects incompatible API ranges, malformed manifests,
+missing entry points, and syntax errors before extension code is imported.
+
 ## Commands And Actions
 
 Commands receive a dictionary containing:
@@ -239,6 +280,10 @@ Installed distributions expose `[project.entry-points."dialeng.extensions"]` and
 must package `extension.toml`. Discovery reads package metadata without importing
 the entry point. Optional nbdev projects run export, test, and clean checks, but
 Dialeng's deterministic exporter remains canonical for runtime Python.
+
+The packaged `project-inspector-package` reference is retained as the independent
+API 1 compatibility fixture. Its wheel is built and activated in an isolated `uv`
+environment so source-checkout imports cannot mask packaging defects.
 
 ## Trust And Recovery
 

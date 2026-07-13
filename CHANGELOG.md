@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added the packaged `extension-creator` skill and constrained authoring/build/test/diagnostic tools that cannot activate generated server code without user confirmation
 - Added four disabled reference extensions plus unit, 100-reload stress, fault, real-kernel guard, isolated wheel, multi-tab, Studio, custom-cell, asset-cleanup, rollback, and Playwright acceptance coverage
 - Added extension authoring, AUTORUN migration, internal architecture, compatibility, security, and reproducible verification documentation
+- Published Extension API `1.0.0` compatibility and deprecation policy, Dialeng-owned public declaration types, and a generated JSON Schema catalog synchronized by CI
+- Added no-import `dialeng extension check`, project/runtime `dialeng extension doctor`, a live doctor endpoint, isolation-readiness diagnostics, and Python 3.11-3.13 CI coverage
 
 ## [0.11.0] - 2026-07-11
 
