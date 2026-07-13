@@ -126,9 +126,9 @@ following evidence:
   process denial, brokered permissions, cleanup races, and failed-upgrade
   rollback.
 - A clean `uv` environment built and installed the Dialeng wheel plus an
-  independently packaged extension in two passing smoke tests. Git/project-local
-  installation is checked separately after committing because that probe installs
-  the repository's committed `HEAD`.
+  independently packaged extension in two passing smoke tests. A separate probe
+  installed the committed `HEAD` through both Git and project-local `uv` flows
+  and passed in 4.16 seconds.
 - Python compilation, JavaScript syntax, generated-schema synchronization,
   standalone extension-module lint, and `git diff --check` passed. Repository-wide
   Ruff remains outside this gate because historical FastHTML modules, demos, and
