@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Workspace Sidebar State
+
+- Preserve panel selection and Files location/scroll per workspace and browser tab, plus collapsed Outline sections and scroll per notebook, with bounded, versioned session storage and safe storage-failure fallback
+- Keep Files and Outline shells stable, eliminate duplicate content IDs, reject stale responses, and prevent refreshes from reopening a closed panel or overwriting newer folder navigation
+- Revalidate reopened panels and visible panels after reconnect/focus/online recovery, preserve the previous view on failure with Retry, and recover removed folders to Home
+- Route create/delete completion through directory invalidation; add semantic folder/breadcrumb buttons, panel ARIA/inert state, Settings focus restoration, editor-safe Escape behavior, and a narrow-screen drawer that preserves notebook width
+- Preserve Settings visibility, focus, search and section state during extension refreshes; defer stale replacements when local edits begin while loading
+- Add focused server/browser regressions and document panel ownership, navigation, fragment contracts, persistence, and accessibility behavior
+
 ### Added
+
+#### Shared Project Skills
+- Discover existing project `.agents/skills/` entries for Codex prompts, CLI listing/validation, and skill previews, with `.dialeng/skills/` overriding shared skills and both overriding packaged sources
+- Preserve shared files during skill creation/update, record `agents` source provenance, and apply automatic refresh, validation, and path confinement to both project roots, including root symlink changes
+- Add regression coverage and update the skills guide, internal mechanics, settings help, and project initialization guidance
+- Add configurable skill originals in `.dialeng/skills/` or `.agents/skills/`, optional relative links in the other root, and per-draft toolbar/CLI/HTTP/model-tool overrides; retain `.dialeng` without linking as the default
+- Bind destinations and link choices to reviewed build hashes, preserve unrelated files on conflicts, and roll back original installation/update if linking fails; document settings and cover linked creation/update, relocation, settings changes, conflicts, rollback, and browser confirmation
 
 #### Owner-Aware Extension Platform
 - Added manifest-only discovery for project, user, development-path, and installed-package extensions with deterministic precedence, API compatibility checks, source hashing, malformed diagnostics, and trust-before-import
@@ -28,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a core-side extension permission broker for exact filesystem paths, network, process, notebook, and kernel operations, plus direct-capability denial, symlink/traversal protection, and parity helpers across isolated/in-process contexts
 - Expanded verification with hostile extension hosts, 500 isolated reloads, 1,000-command browser scale, memory/protocol/direct-access attacks, immutable online/offline Git restoration, real wheel-cache installation, concurrent/interrupted lock workflows, Studio review/activation, WebSocket command cancellation, and two-tab extension lifecycle coverage
 - Made kernel setup generation backend-authoritative and removed duplicate browser setup requests; coalesced prompt rendering so extension lifecycle and kernel-selection browser tests remain responsive under concurrent updates
+- Completed extension authoring documentation for users and the bundled LLM skill with an end-to-end Studio/CLI workflow, template/runtime selection, palette-oriented command design, exact broker permissions, reproducible lock/sync guidance, clean-wheel verification, troubleshooting, and release checks; expanded `inspect_extension_api` into a topic-specific live catalog and added constrained `package_extension` tooling plus documentation-drift tests
 
 ## [0.11.0] - 2026-07-11
 

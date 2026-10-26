@@ -265,7 +265,10 @@ credentials or hidden model reasoning.
 
 Directory listings use an LRU keyed by resolved path and directory signature.
 `watchfiles` invalidates affected parent directories and broadcasts a targeted
-`file_explorer_changed` event. A closed explorer does not refresh itself.
+`file_explorer_changed` event. A closed explorer records invalidation without
+making a request; reopening always revalidates the current directory. Fragment
+updates preserve the panel shell and reject superseded responses. See
+[workspace UI state](28_workspace_ui_state.md).
 
 ### Outline
 

@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import tempfile
+import threading
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -17,6 +18,7 @@ import yaml
 from .notebook_context_service import NotebookContextBundle, NotebookContextService, reference_name
 
 logger = logging.getLogger(__name__)
+_INSTALL_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,8 @@ class SkillBuild:
     provider: str = ""
     model: str = ""
     warnings: tuple[str, ...] = ()
+    install_root: str = "dialeng"
+    link_other_root: bool = False
 
 
 class SkillCreationService:
@@ -52,6 +56,8 @@ class SkillCreationService:
         *,
         instructions: str = "",
         include_outputs: bool = False,
+        install_root: Optional[str] = None,
+        link_other_root: Optional[bool] = None,
     ) -> dict[str, Any]:
         """Extract notebooks and stage a deterministic skill draft for review.
 
@@ -61,10 +67,17 @@ class SkillCreationService:
             sources: Project-relative notebooks/text files, glob patterns, or web URLs.
             instructions: Optional additional workflow requirements for the generated skill.
             include_outputs: Include bounded text outputs. Disabled by default.
+            install_root: Original's folder: dialeng or agents. Defaults to project settings.
+            link_other_root: Link from the other skills folder. Defaults to project settings.
         """
         from .skill_service import validate_skill_name
+        from .dialeng_config import get_config
 
         name = validate_skill_name(name)
+        config = get_config()
+        install_root = config.skills_install_root if install_root is None else install_root
+        link_other_root = config.skills_link_other_root if link_other_root is None else link_other_root
+        self._validate_install_options(install_root, link_other_root)
         description = str(description or "").strip()
         if not description:
             raise ValueError("Skill description is required")
@@ -118,6 +131,8 @@ class SkillCreationService:
             include_outputs=include_outputs,
             build_hash=self._directory_hash(build_dir),
             warnings=tuple(warnings),
+            install_root=install_root,
+            link_other_root=link_other_root,
         )
         self._write_manifest(build_dir, build)
         logger.info(
@@ -272,14 +287,16 @@ class SkillCreationService:
                 relative = path.relative_to(build_dir).as_posix()
                 files[relative] = path.read_text(encoding="utf-8", errors="replace")
         errors = self.validate_build(build_id)
-        current_hash = self._directory_hash(build_dir)
+        current_hash = self._preview_hash(build_dir, build)
+        other_root = "agents" if build.install_root == "dialeng" else "dialeng"
         return {
             **asdict(build),
             "build_hash": current_hash,
             "files": files,
             "validation_errors": errors,
             "valid": not errors,
-            "target": f".dialeng/skills/{build.name}",
+            "target": f".{build.install_root}/skills/{build.name}",
+            "link_target": f".{other_root}/skills/{build.name}" if build.link_other_root else None,
         }
 
     def validate_build(self, build_id: str) -> list[str]:
@@ -322,15 +339,64 @@ class SkillCreationService:
             raise ValueError("Skill build changed after preview; inspect it again before installing")
         build = self._load_build(build_id)
         source = self._build_dir(build_id)
-        self.skills_root.mkdir(parents=True, exist_ok=True)
-        target = (self.skills_root / build.name).resolve()
-        if not target.is_relative_to(self.skills_root.resolve()):
-            raise ValueError("Skill target escapes .dialeng/skills")
-        if target.exists() and not overwrite:
-            raise FileExistsError(f"Skill '{build.name}' already exists")
+        with _INSTALL_LOCK:
+            target, link = self._install_files(build, source, overwrite=overwrite)
 
-        temp_dir = Path(tempfile.mkdtemp(prefix=f".{build.name}-", dir=self.skills_root))
-        backup = self.skills_root / f".{build.name}.backup-{uuid.uuid4().hex[:8]}"
+        get_skill_service().refresh(force=True)
+        shutil.rmtree(source, ignore_errors=True)
+        logger.info(
+            "Installed notebook-derived skill (build=%s, target=%s, sources=%d)",
+            build.name,
+            target,
+            len(build.sources),
+        )
+        return {
+            "ok": True,
+            "name": build.name,
+            "path": str(target.relative_to(self.project_root)),
+            "link_path": str(link.relative_to(self.project_root)) if link else None,
+            "sources": list(build.sources),
+        }
+
+    @staticmethod
+    def _validate_install_options(install_root: str, link_other_root: bool) -> None:
+        if install_root not in ("dialeng", "agents"):
+            raise ValueError("install_root must be 'dialeng' or 'agents'")
+        if not isinstance(link_other_root, bool):
+            raise ValueError("link_other_root must be a boolean")
+
+    def _install_files(self, build: SkillBuild, source: Path, *, overwrite: bool) -> tuple[Path, Optional[Path]]:
+        """Install the original and optional relative alias, restoring the original on failure."""
+        root = self.project_root / f".{build.install_root}" / "skills"
+        other = "agents" if build.install_root == "dialeng" else "dialeng"
+        link_root = self.project_root / f".{other}" / "skills"
+        for directory in [root] + ([link_root] if build.link_other_root else []):
+            if not directory.resolve().is_relative_to(self.project_root):
+                raise ValueError("Skill install root escapes the project")
+        if build.link_other_root and root.resolve() == link_root.resolve():
+            raise ValueError("Skill original and link folders resolve to the same directory")
+
+        target = root / build.name
+        link = link_root / build.name if build.link_other_root else None
+        if target.is_symlink():
+            raise ValueError("Skill original is a symlink; select its original install_root to update it")
+        if target.exists():
+            if not overwrite:
+                raise FileExistsError(f"Skill '{build.name}' already exists")
+            if not target.is_dir():
+                raise ValueError("Skill original must be a directory")
+        # Never replace an independent skill or an unrelated/dangling link in the other root.
+        if link and (link.exists() or link.is_symlink()):
+            if not link.is_symlink() or link.resolve() != target.resolve():
+                raise FileExistsError(f"Skill link path '{link.relative_to(self.project_root)}' is already occupied")
+
+        root.mkdir(parents=True, exist_ok=True)
+        if link:
+            link_root.mkdir(parents=True, exist_ok=True)
+        temp_dir = Path(tempfile.mkdtemp(prefix=f".{build.name}-", dir=root))
+        backup = root / f".{build.name}.backup-{uuid.uuid4().hex[:8]}"
+        installed = False
+        linked = False
         try:
             for path in source.rglob("*"):
                 if path.name == "build.json":
@@ -345,30 +411,24 @@ class SkillCreationService:
             if target.exists():
                 os.replace(target, backup)
             os.replace(temp_dir, target)
-            if backup.exists():
-                shutil.rmtree(backup, ignore_errors=True)
+            installed = True
+            if link and not link.is_symlink():
+                link.symlink_to(os.path.relpath(target, start=link.parent), target_is_directory=True)
+                linked = True
         except Exception:
-            if backup.exists() and not target.exists():
+            if linked:
+                link.unlink()
+            if installed:
+                shutil.rmtree(target)
+            if backup.exists():
                 os.replace(backup, target)
             raise
         finally:
             if temp_dir.exists():
                 shutil.rmtree(temp_dir, ignore_errors=True)
-
-        get_skill_service().refresh(force=True)
-        shutil.rmtree(source, ignore_errors=True)
-        logger.info(
-            "Installed notebook-derived skill (skill=%s, target=%s, sources=%d)",
-            build.name,
-            target,
-            len(build.sources),
-        )
-        return {
-            "ok": True,
-            "name": build.name,
-            "path": str(target.relative_to(self.project_root)),
-            "sources": list(build.sources),
-        }
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+        return target, link
 
     def list_builds(self) -> list[dict[str, Any]]:
         if not self.builds_root.exists():
@@ -434,7 +494,11 @@ class SkillCreationService:
         data = json.loads(path.read_text(encoding="utf-8"))
         data["sources"] = tuple(data.get("sources", ()))
         data["warnings"] = tuple(data.get("warnings", ()))
-        return SkillBuild(**data)
+        build = SkillBuild(**data)
+        from .skill_service import validate_skill_name
+        validate_skill_name(build.name)
+        self._validate_install_options(build.install_root, build.link_other_root)
+        return build
 
     @staticmethod
     def _write_text(path: Path, content: str) -> None:
@@ -446,8 +510,14 @@ class SkillCreationService:
     def _write_manifest(self, build_dir: Path, build: SkillBuild) -> None:
         self._write_text(
             build_dir / "build.json",
-            json.dumps(asdict(build), indent=2, sort_keys=True) + "\n",
+            json.dumps({**asdict(build), "build_hash": self._preview_hash(build_dir, build)}, indent=2, sort_keys=True) + "\n",
         )
+
+    def _preview_hash(self, directory: Path, build: SkillBuild) -> str:
+        plan = {"name": build.name, "install_root": build.install_root, "link_other_root": build.link_other_root}
+        return hashlib.sha256(
+            (self._directory_hash(directory) + json.dumps(plan, sort_keys=True)).encode("utf-8")
+        ).hexdigest()
 
     @staticmethod
     def _directory_hash(directory: Path) -> str:
@@ -502,6 +572,8 @@ def build_skill_from_notebooks(
     sources: list[str],
     instructions: str = "",
     include_outputs: bool = False,
+    install_root: Optional[str] = None,
+    link_other_root: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Stage a reviewable project skill from one or more notebooks.
 
@@ -511,6 +583,8 @@ def build_skill_from_notebooks(
         sources: Project-relative notebook files, directories, or glob patterns.
         instructions: Optional workflow requirements.
         include_outputs: Include bounded text outputs; normally leave false.
+        install_root: Original's folder: dialeng or agents; omit to use project settings.
+        link_other_root: Create a relative symlink in the other folder; omit to use project settings.
     """
     return get_skill_creation_service().create_build(
         name,
@@ -518,6 +592,8 @@ def build_skill_from_notebooks(
         sources,
         instructions=instructions,
         include_outputs=include_outputs,
+        install_root=install_root,
+        link_other_root=link_other_root,
     )
 
 
@@ -550,7 +626,7 @@ def refresh_skill_build_sources(build_id: str) -> dict[str, Any]:
 
 
 def commit_skill_build(build_id: str, expected_hash: str) -> dict[str, Any]:
-    """Install a previously inspected skill build into .dialeng/skills.
+    """Install a skill at its reviewed target and optionally link it in the other root.
 
     Args:
         build_id: Identifier returned by build_skill_from_notebooks.

@@ -74,6 +74,8 @@ _CORE_DEFINITIONS: tuple[SettingDefinition, ...] = (
     SettingDefinition("llm.openai_codex_transport", "str", "auto", "live", choices=("auto", "websocket", "sse")),
     SettingDefinition("skills.enabled", "bool", True, "live"),
     SettingDefinition("skills.creator_enabled", "bool", True, "live"),
+    SettingDefinition("skills.install_root", "str", "dialeng", "live", choices=("dialeng", "agents")),
+    SettingDefinition("skills.link_other_root", "bool", False, "live"),
     SettingDefinition("skills.max_source_bytes", "int", 2097152, "live", 65536, 20971520),
     SettingDefinition("tool_settings.max_steps", "int", 5, "live", 1, 10),
     SettingDefinition("tool_settings.require_confirmation", "bool", False, "live"),

@@ -1945,6 +1945,7 @@ app, rt = fast_app(
         Script(src=_static_asset_url("js/notifications.js")),
         Script(src=_static_asset_url("js/browser_diagnostics.js")),
         # App JS - External JavaScript (after libraries)
+        Script(src=_static_asset_url("js/workspace_ui.js")),
         Script(src=_static_asset_url("js/app.js")),
     )
 )
@@ -2315,7 +2316,7 @@ def get(path: str = "", active_notebook_id: str = "", active_file_relpath: str =
     from dialeng.ui.file_explorer import FileListContent
     target = NOTEBOOKS_DIR / path if path else NOTEBOOKS_DIR
     # Validate path is within NOTEBOOKS_DIR
-    if not target.resolve().is_relative_to(NOTEBOOKS_DIR.resolve()):
+    if not target.resolve().is_relative_to(NOTEBOOKS_DIR.resolve()) or not target.is_dir():
         target = NOTEBOOKS_DIR
     kernel_nbs = {nid for nid in kernel_service._kernels if kernel_service.kernel_is_alive(nid)}
     return FileListContent(
@@ -3472,12 +3473,12 @@ async def post(nb_id: str, code: str, cursor_pos: int):
 async def get(nb_id: str):
     """Get notebook outline for the sidebar.
 
-    Returns the OutlineSidebar component with:
+    Returns the OutlineContent fragment, without changing browser panel state, with:
     - Headings extracted from note cells
     - Variables from kernel namespace
     - Functions from kernel namespace
     """
-    from dialeng.ui.outline import OutlineSidebar, extract_headings_from_markdown
+    from dialeng.ui.outline import OutlineContent, extract_headings_from_markdown
 
     nb = get_notebook(nb_id)
 
@@ -3524,7 +3525,7 @@ async def get(nb_id: str):
         except Exception as e:
             logger.warning("Failed to build outline namespace info (notebook=%s): %s", nb_id, e)
 
-    return OutlineSidebar(nb_id, headings, variables, functions, is_open=True)
+    return OutlineContent(headings, variables, functions)
 
 # ============================================================================
 # Settings Endpoints

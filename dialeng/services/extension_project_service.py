@@ -30,6 +30,148 @@ _TEMPLATES = {"basic", "tool", "cell", "lifecycle", "provider", "package"}
 _EDITABLE_SUFFIXES = {".ipynb", ".py", ".md", ".toml", ".json", ".css", ".js"}
 _EXTENSION_ROLES = {"implementation", "test", "documentation", "example", "non-export"}
 
+_EXTENSION_AUTHORING_TOPICS: dict[str, dict[str, Any]] = {
+    "lifecycle": {
+        "summary": "Register bounded setup work, managed tasks, and deterministic cleanup.",
+        "runtime_mode": "isolated",
+        "methods": ["setup(api, ctx)", "ctx.create_task", "ctx.add_cleanup", "api.on"],
+        "permissions": [],
+        "example": "ctx.add_cleanup(close_resource); ctx.create_task(watch_changes())",
+        "checks": ["No work during import", "No unmanaged asyncio tasks", "Cleanup is idempotent"],
+    },
+    "commands": {
+        "summary": "Expose one backend-authoritative operation to the palette, toolbar, shortcut, and API.",
+        "runtime_mode": "isolated",
+        "methods": ["api.register_command", "api.register_shortcut", "api.register_toolbar_item"],
+        "permissions": [],
+        "example": (
+            "api.register_command('audit', title='Audit notebook', description='Check the project', "
+            "handler=audit, category='Quality', availability='notebook.open && kernel.optional', "
+            "args_schema={'type': 'object', 'properties': {'strict': {'type': 'boolean'}}})"
+        ),
+        "checks": [
+            "Use args_schema for palette controls", "Report progress for long operations",
+            "Observe command['cancel_event']", "Treat client availability as presentation only",
+        ],
+    },
+    "tools": {
+        "summary": "Expose a provider-neutral LLM tool with typed parameters and bounded output.",
+        "runtime_mode": "isolated",
+        "methods": ["api.register_tool"],
+        "permissions": [],
+        "example": "api.register_tool('inspect-value', inspect_value)",
+        "checks": ["Annotate every parameter", "Write a useful docstring", "Test failure and large results"],
+    },
+    "events": {
+        "summary": "Observe, transform, or guard a documented core event.",
+        "runtime_mode": "isolated",
+        "methods": ["api.on"],
+        "permissions": [],
+        "example": "api.on('notebook.saved', on_saved, name='log-save', mode='observe', order=50)",
+        "checks": ["Choose observe/transform/guard deliberately", "Keep handlers within their deadline"],
+    },
+    "ui": {
+        "summary": "Declare toolbar controls and browser assets; Python renderers remain privileged.",
+        "runtime_mode": "mixed",
+        "methods": [
+            "api.register_toolbar_item", "api.register_asset", "api.register_panel",
+            "api.register_status_item",
+        ],
+        "permissions": ["browser_assets"],
+        "example": "api.register_asset('client', kind='js', path='assets/extension.js')",
+        "checks": [
+            "Declare every asset in extension.toml", "Use window.dialeng.extensions in browser code",
+            "Review panel/status Python renderers as privileged",
+        ],
+    },
+    "settings": {
+        "summary": "Register namespaced transport-neutral settings with an explicit apply mode.",
+        "runtime_mode": "isolated",
+        "methods": ["api.register_setting", "ExtensionSetting"],
+        "permissions": [],
+        "example": (
+            "api.register_setting(ExtensionSetting(path='limit', kind='int', default=100, "
+            "minimum=1, maximum=1000, apply_mode='live'))"
+        ),
+        "checks": ["Use the public ExtensionSetting declaration", "Mark secrets", "Test apply-mode behavior"],
+    },
+    "cells": {
+        "summary": "Register a complete custom-cell render, persistence, and LLM conversion bundle.",
+        "runtime_mode": "privileged_in_process",
+        "methods": ["ExtensionCellType", "api.register_cell_type"],
+        "permissions": [],
+        "example": "api.register_cell_type(cell_type, renderer=render, serializer=save, deserializer=load, llm_converter=to_messages)",
+        "checks": ["Round-trip Jupyter data", "Preserve unsupported cells", "Test collaboration and disable"],
+    },
+    "runtime": {
+        "summary": "Kernel, provider, callback, custom renderer, and service contributions are privileged.",
+        "runtime_mode": "privileged_in_process",
+        "methods": [
+            "ExtensionKernel", "ExtensionProvider", "api.register_callback",
+            "api.register_kernel", "api.register_provider", "api.register_renderer",
+        ],
+        "permissions": ["kernel"],
+        "example": "api.register_provider(ExtensionProvider(name='provider-id', label='Provider', factory=Factory))",
+        "checks": ["Explain privileged mode during review", "Exercise restart and cleanup", "Do not import core registries"],
+    },
+    "permissions": {
+        "summary": "Declare minimum capabilities; isolated code reaches them only through the core broker.",
+        "runtime_mode": "core_broker",
+        "methods": [
+            "ctx.read_text", "ctx.read_bytes", "ctx.write_text", "ctx.write_bytes",
+            "ctx.request_http", "ctx.run_process", "ctx.change_cell_type", "ctx.invoke_kernel",
+        ],
+        "permissions": [
+            "filesystem_read", "filesystem_write", "network", "subprocess",
+            "notebook", "kernel", "browser_assets",
+        ],
+        "example": "filesystem_read = ['docs/**', 'pyproject.toml']",
+        "checks": [
+            "Prefer exact paths or narrow globs", "Expect traversal and symlink checks",
+            "Never describe subprocess isolation as a complete security sandbox",
+        ],
+    },
+    "resources": {
+        "summary": "Bundle skills and templates that can be enabled without activating runtime Python.",
+        "runtime_mode": "metadata_only",
+        "methods": ["extension.toml [resources]"],
+        "permissions": [],
+        "example": "skills = ['resources/skills/project-inspector']; templates = ['resources/templates']",
+        "checks": ["Package every resource", "Test independent enable/disable", "Avoid duplicate skill names"],
+    },
+    "packaging": {
+        "summary": "Build a prepared package extension and verify its wheel outside the source checkout.",
+        "runtime_mode": "isolated_build",
+        "methods": ["package_extension", "dialeng extension package PATH", "uv build"],
+        "permissions": [],
+        "example": "package_extension('acme.project-inspector')",
+        "checks": ["Use the package template", "Include extension.toml and resources", "Test the wheel in a clean uv environment"],
+    },
+    "environments": {
+        "summary": "Reproduce the enabled extension set without sharing local trust decisions.",
+        "runtime_mode": "project_cli",
+        "methods": [
+            "dialeng extension lock --path .", "dialeng extension check --path .",
+            "dialeng extension sync --path .", "dialeng extension sync --path . --offline",
+            "dialeng extension update ID --path .",
+        ],
+        "permissions": [],
+        "example": "uv run dialeng extension lock --path .",
+        "checks": ["Commit .dialeng/extensions.lock", "Do not commit ~/.dialeng trust", "Review permission increases locally"],
+    },
+    "diagnostics": {
+        "summary": "Diagnose compatibility, source drift, host health, registrations, and cleanup before activation.",
+        "runtime_mode": "metadata_and_isolated_validation",
+        "methods": [
+            "show_extension_profile", "show_extension_diagnostics", "preview_extension",
+            "dialeng extension check PATH", "dialeng extension doctor --path .",
+        ],
+        "permissions": [],
+        "example": "show_extension_diagnostics('acme.notebook-audit')",
+        "checks": ["Resolve every error", "Rebuild stale source", "Verify preview imports no code"],
+    },
+}
+
 
 def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -1068,32 +1210,72 @@ def inspect_extension_api(topic: str = "") -> dict[str, Any]:
     """Inspect the stable Dialeng extension API and authoring workflow.
 
     Args:
-        topic: Optional contribution topic such as tools, commands, events, cells, or lifecycle.
+        topic: Optional topic returned by available_topics, such as commands, permissions,
+            packaging, or environments. Leave empty for the complete catalog.
     """
-    methods = {
-        "lifecycle": ["setup(api, ctx)", "ctx.create_task", "ctx.add_cleanup", "api.on"],
-        "commands": ["api.register_command", "api.register_shortcut", "api.register_toolbar_item"],
-        "tools": ["api.register_tool"],
-        "cells": ["api.register_cell_type"],
-        "ui": ["api.register_panel", "api.register_status_item", "api.register_asset"],
-        "settings": ["api.register_setting", "api.register_settings_section"],
-        "runtime": [
-            "ExtensionKernel", "ExtensionProvider", "ExtensionCellType",
-            "api.register_callback", "api.register_kernel", "api.register_provider",
-        ],
-    }
     selected = str(topic or "").strip().lower()
+    known = selected in _EXTENSION_AUTHORING_TOPICS
+    catalog = json.loads(json.dumps(_EXTENSION_AUTHORING_TOPICS))
+    selected_guidance = catalog.get(selected) if selected else catalog
     return {
         "dialeng_api": API_POLICY.version,
         "compatibility": API_POLICY.public(),
+        "available_topics": list(catalog),
+        "topic": selected or "all",
+        "topic_found": not selected or known,
+        "topic_guidance": selected_guidance,
+        "diagnostic": (
+            "" if not selected or known
+            else f"Unknown extension API topic {selected!r}; choose one of: {', '.join(catalog)}"
+        ),
+        # Preserve the API 1 method-list field while returning richer guidance.
+        "methods": (
+            selected_guidance["methods"] if selected and selected_guidance
+            else {name: value["methods"] for name, value in catalog.items()}
+        ),
         "rpc_safe_methods": list(RPC_SAFE_API_METHODS),
         "privileged_in_process_methods": list(PRIVILEGED_IN_PROCESS_API_METHODS),
-        "topic": selected or "all",
-        "methods": methods.get(selected, methods),
+        "runtime": {
+            "default": "One supervised python -I host per RPC-safe active extension.",
+            "privileged": "Kernel, provider, callback, custom-cell, Python renderer, and internal-import contributions run in the server after explicit review.",
+            "security_boundary": "The core broker enforces declared permissions; process isolation is not a complete OS sandbox.",
+        },
+        "manifest": {
+            "required": [
+                "schema_version", "id", "name", "version", "description",
+                "entrypoint", "dialeng_api", "scope",
+            ],
+            "permission_fields": list(catalog["permissions"]["permissions"]),
+            "compatibility_example": ">=1,<2",
+        },
+        "templates": ExtensionProjectService.templates(),
+        "workflow": [
+            "Inspect the relevant API topic and choose the smallest template.",
+            "Create the extension; keep extension.ipynb authoritative.",
+            "Edit with optimistic hashes and declare minimum permissions.",
+            "Build deterministically, validate in isolation, and run tests.",
+            "Preview contributions without importing server code and inspect diagnostics/profile.",
+            "Package and clean-install when the extension is distributable.",
+            "Request activation review; only the user may trust and activate.",
+            "Lock the reviewed project extension set; sync never grants trust.",
+        ],
+        "notebook_roles": [
+            "implementation", "test", "documentation", "example", "non-export",
+        ],
+        "documentation": [
+            "docs/guides/extensions.md",
+            "docs/how_it_works/25_extension_platform.md",
+            "docs/how_it_works/27_extension_runtime_environments.md",
+            "dialeng/schemas/extension-api-v1.schema.json",
+        ],
         "rules": [
             "Use only ExtensionAPI and ExtensionContext public methods.",
             "Keep extension.ipynb as the source of truth for generated Python.",
             "Register all long-lived resources through the context cleanup lifecycle.",
+            "Design commands once for palette, toolbar, shortcut, and API invocation.",
+            "Use brokered context methods rather than direct project files, network, or processes.",
+            "Do not silently change an extension from isolated to privileged mode.",
+            "Lockfiles reproduce artifacts and enabled resources, never trust decisions.",
             "Activation always requires an explicit user trust decision.",
         ],
     }
@@ -1152,6 +1334,12 @@ def run_extension_tests(extension_id: str, level: str = "unit") -> dict[str, Any
         raise ValueError("Extension test level must be unit or browser")
     service = get_extension_project_service()
     return service.test(service.resolve_extension(extension_id), browser=level == "browser")
+
+
+def package_extension(extension_id: str) -> dict[str, Any]:
+    """Prepare and package one package-template extension without activating it."""
+    service = get_extension_project_service()
+    return service.package(service.resolve_extension(extension_id))
 
 
 def preview_extension(extension_id: str) -> dict[str, Any]:

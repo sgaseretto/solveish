@@ -24,6 +24,7 @@
         - docs: https://nbdev.fast.ai/getting_started.html
     - Dialeng extension authoring:
         - guide: docs/guides/extensions.md
+        - LLM authoring skill: dialeng/builtin_skills/extension-creator/SKILL.md
         - internals: docs/how_it_works/25_extension_platform.md
         - verification: docs/how_it_works/26_extension_verification.md
         - isolated runtime, lockfiles, and palette: docs/how_it_works/27_extension_runtime_environments.md

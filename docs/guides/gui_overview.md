@@ -29,31 +29,17 @@ This guide walks through every section of the Dialeng notebook interface, explai
 
 ## Page Layout
 
-The interface is split into several areas arranged horizontally:
+The workspace has one optional left panel and a Settings overlay on the right:
 
-```
-┌──────────────────────────────────────────────────────────┐
-│                        Header & Toolbar                   │
-├─────────┬──────────┬─────────────────────────────────────┤
-│  File   │          │                                      │
-│Explorer │ Outline  │  Cell Area                           │
-│(toggle) │ Sidebar  │  ┌──────────────────────────────┐   │
-│         │ (toggle) │  │ Cell 1                       │   │
-│ Home >  │          │  ├──────────────────────────────┤   │
-│ folder  │ Headings │  │ [+ Code] [+ Note] [+ ...]   │   │
-│         │ Vars     │  ├──────────────────────────────┤   │
-│ 📓 nb1  │ Funcs    │  │ Cell 2                       │   │
-│ 📓 nb2  │          │  └──────────────────────────────┘   │
-│ 📁 sub/ │          ├─────────────────────────────────────┤
-│         │          │  🏠 Local Python                     │
-├─────────┴──────────┴──────────────────────┬──────────────┤
-│                                            │  Settings   │
-│                                            │  Sidebar    │
-└────────────────────────────────────────────┴─────────────┘
+```mermaid
+flowchart LR
+    Toolbar["Toolbar"] --> Left["Files OR Outline OR closed"]
+    Left --- Main["Notebook cells / file editor"]
+    Toolbar --> Settings["Settings overlay"]
 ```
 
 - **File Explorer** (left): Push-style sidebar showing folders and notebooks with breadcrumb navigation. Toggle with the files button or `Ctrl+Shift+E`.
-- **Outline Sidebar** (left, next to file explorer): Push-style sidebar showing headings, variables, and functions. Toggle with the outline button or `Ctrl+Shift+O`.
+- **Outline Sidebar** (left, sharing the Files position): Push-style sidebar showing headings, variables, and functions. Toggle with the outline button or `Ctrl+Shift+O`.
 - **Main Content** (center): Header, cells, and kernel status bar at the bottom.
 - **Kernel Status Bar** (bottom): Shows current kernel type and connection state. Click to open the kernel selection modal.
 - **Settings Sidebar** (right): Overlay-style panel for configuration. Toggle with the gear button.
@@ -133,12 +119,25 @@ or explicitly create a new one, including one with the same name.
 
 ### Refreshing
 
-Click the **refresh** button (rotate icon) in the file explorer header to reload the file list. This picks up files created outside the UI (e.g., from the terminal).
+Files refreshes when reopened, when you return to the tab, and when its directory
+changes while a notebook connection is active. The **refresh** button reloads it
+manually. Loading keeps the previous listing visible; an update failure shows a
+**Retry** action. If the browsed folder was removed, Files returns to Home.
 
 ### Toggle
 
 - **Button**: Click the panel icon in the toolbar or the collapse button in the file explorer header.
 - **Keyboard**: `Ctrl+Shift+E` / `Cmd+Shift+E`
+- **Escape** closes the left panel when you are not editing a cell and returns focus to its toolbar button.
+- **Folders and breadcrumbs** support Tab navigation and Enter/Space activation.
+
+The selected left panel, browsed folder, and scroll position survive reloads and
+navigation between notebooks and plain files in the same browser tab. These
+choices are scoped to the workspace and do not change another tab's layout.
+Files and Outline share one position: opening either closes the other.
+On narrow screens they appear as an overlay drawer, so the notebook retains its
+width. Click outside the drawer or press Escape to close it. Selecting a file or
+an Outline heading also dismisses the drawer to reveal the content.
 
 ---
 
@@ -380,7 +379,10 @@ Shows variables currently defined in the kernel (from code cell execution). Disp
 
 Shows functions defined in the kernel. Displays name and signature. Click to jump to the defining cell.
 
-The outline auto-refreshes when cells are executed or modified.
+The outline auto-refreshes when cells are executed or modified. Collapsed
+sections and scroll position are remembered per notebook, including across
+refreshes, closing/reopening, and page reloads. A refresh cannot reopen a panel
+you have closed. `Cmd+Shift+O` is also supported on macOS.
 
 ---
 
@@ -412,14 +414,17 @@ Settings are organized in collapsible groups:
 
 ### OpenAI Codex
 - **Connect OpenAI / Disconnect**: Manage the server-global Codex subscription OAuth session.
-- **Enable project skills**: Discover Codex skills from `.dialeng/skills/`.
+- **Enable project skills**: Discover Codex skills from `.agents/skills/` and `.dialeng/skills/`; Dialeng-local skills take precedence for matching names.
 - **Enable skill creator**: Show the toolbar sparkles button and dedicated staged creator tools.
+- **Created skill location**: Default original folder for new drafts: `.dialeng/skills/` or shared `.agents/skills/`.
+- **Link skills in the other folder**: Create a relative symlink to the original in the other root. Off by default; existing skills are not moved.
 - **Skill source limit**: Bound notebook context extracted into one generated skill.
 
 The toolbar sparkles button opens the notebook-to-skill workflow. Select source
 notebooks, generate a deterministic or LLM-refined draft, inspect every staged
-file, then explicitly install it into `.dialeng/skills/`. Installation remains
-disabled until backend validation succeeds.
+file and destination, then explicitly install it. The modal allows per-draft
+location/link overrides; the reviewed destination remains fixed if settings
+change later. Installation remains disabled until backend validation succeeds.
 
 ### Tool Settings
 - **Max Tool Steps**: Slider (1-10) controlling how many tool-use rounds the AI can perform per prompt.

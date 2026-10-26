@@ -1183,9 +1183,8 @@ document.addEventListener('keydown', e => {
             closeSettings();
             return;
         }
-        const outlineSidebar = document.getElementById('outline-sidebar');
-        if (outlineSidebar && outlineSidebar.classList.contains('outline-open')) {
-            toggleOutline();
+        if (window.dialengWorkspaceUI?.leftPanel && !inInput && !inMonaco) {
+            window.dialengWorkspaceUI.selectPanel(null);
             return;
         }
     }
@@ -1198,7 +1197,7 @@ document.addEventListener('keydown', e => {
     }
 
     // ===== Ctrl+Shift+O to toggle outline =====
-    if (e.ctrlKey && e.shiftKey && e.key === 'O') {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'O') {
         e.preventDefault();
         toggleOutline();
         return;
@@ -1210,6 +1209,10 @@ document.addEventListener('keydown', e => {
         toggleFileExplorer();
         return;
     }
+
+    // Panel controls keep their native keyboard behavior. Notebook shortcuts
+    // must not turn Enter on a folder button into "edit the selected cell".
+    if (target.closest('#file-explorer-sidebar, #outline-sidebar, #settings-sidebar')) return;
 
     if (isFilePage()) {
         if (mod && e.key === 's') {
@@ -3178,6 +3181,8 @@ function handleKernelTypeChanged(kernelType) {
 const skillCreatorState = {
     buildId: '',
     buildHash: '',
+    target: '',
+    linkTarget: '',
     files: {},
     loading: false,
 };
@@ -3200,6 +3205,8 @@ async function openSkillCreator() {
         const response = await fetch('/dialeng/skills', {headers: {'Accept': 'application/json'}});
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.error || `Skill request failed (${response.status})`);
+        document.getElementById('skill-creator-install-root').value = payload.install_root || 'dialeng';
+        document.getElementById('skill-creator-link-other-root').checked = Boolean(payload.link_other_root);
         const sources = document.getElementById('skill-creator-sources');
         if (sources) {
             sources.replaceChildren();
@@ -3290,6 +3297,8 @@ async function generateSkillDraft() {
                 instructions,
                 sources,
                 include_outputs: Boolean(document.getElementById('skill-creator-outputs')?.checked),
+                install_root: document.getElementById('skill-creator-install-root')?.value || 'dialeng',
+                link_other_root: Boolean(document.getElementById('skill-creator-link-other-root')?.checked),
                 use_llm: Boolean(document.getElementById('skill-creator-use-llm')?.checked),
                 provider: document.getElementById('provider-select')?.value || '',
                 model: document.getElementById('model-select')?.value || '',
@@ -3299,9 +3308,11 @@ async function generateSkillDraft() {
         if (!response.ok) throw new Error(payload.error || `Skill generation failed (${response.status})`);
         skillCreatorState.buildId = payload.build_id;
         skillCreatorState.buildHash = payload.build_hash;
+        skillCreatorState.target = payload.target;
+        skillCreatorState.linkTarget = payload.link_target || '';
         renderSkillPreviewFiles(payload.files || {});
         const label = document.getElementById('skill-creator-build-label');
-        if (label) label.textContent = `${payload.target} · ${payload.sources.length} source(s)`;
+        if (label) label.textContent = `${payload.target}${payload.link_target ? ` · Link: ${payload.link_target}` : ''} · ${payload.sources.length} source(s)`;
         const warnings = [...(payload.warnings || [])];
         if (payload.refinement_error) warnings.push(`LLM refinement skipped: ${payload.refinement_error}`);
         if (payload.validation_errors?.length) {
@@ -3320,7 +3331,8 @@ async function generateSkillDraft() {
 
 async function installSkillDraft() {
     if (!skillCreatorState.buildId || !skillCreatorState.buildHash || skillCreatorState.loading) return;
-    if (!window.confirm('Install this reviewed skill into .dialeng/skills?')) return;
+    const linkMessage = skillCreatorState.linkTarget ? ` and link it at ${skillCreatorState.linkTarget}` : '';
+    if (!window.confirm(`Install this reviewed skill into ${skillCreatorState.target}${linkMessage}?`)) return;
     skillCreatorState.loading = true;
     document.getElementById('skill-install-btn')?.setAttribute('disabled', '');
     setSkillCreatorStatus('Installing skill atomically...', 'pending');
@@ -3518,15 +3530,13 @@ function initializeSettingsForm() {
 
 function toggleSettings() {
     const sidebar = document.getElementById('settings-sidebar');
-    const overlay = document.getElementById('settings-overlay');
     if (!sidebar) return;
     if (sidebar.classList.contains('open')) {
         closeSettings();
         return;
     }
     initializeSettingsForm();
-    sidebar.classList.add('open');
-    overlay?.classList.add('open');
+    window.dialengWorkspaceUI?.setSettingsOpen(true);
     refreshSettings({preserveDirty: false});
     requestAnimationFrame(() => document.getElementById('settings-search')?.focus());
 }
@@ -3534,8 +3544,7 @@ function toggleSettings() {
 function closeSettings(force = false) {
     if (!force && settingsState.dirty.size && !window.confirm('Discard unsaved settings changes?')) return false;
     if (settingsState.dirty.size) revertSettings();
-    document.getElementById('settings-sidebar')?.classList.remove('open');
-    document.getElementById('settings-overlay')?.classList.remove('open');
+    window.dialengWorkspaceUI?.setSettingsOpen(false);
     return true;
 }
 
@@ -3603,30 +3612,17 @@ async function saveSettings(event) {
 
 // ==================== Outline Sidebar Toggle ====================
 function toggleOutline() {
-    const sidebar = document.getElementById('outline-sidebar');
-    if (sidebar) {
-        const isOpening = !sidebar.classList.contains('outline-open');
-        sidebar.classList.toggle('outline-open');
-
-        // Close file explorer if opening outline
-        if (isOpening) {
-            const fileExplorer = document.getElementById('file-explorer-sidebar');
-            if (fileExplorer && fileExplorer.classList.contains('file-explorer-open')) {
-                fileExplorer.classList.remove('file-explorer-open');
-            }
-            refreshOutline();
-        }
-    }
+    window.dialengWorkspaceUI?.togglePanel('outline');
 }
 
 function refreshOutline() {
-    // Trigger HTMX refresh of the outline sidebar
-    document.body.dispatchEvent(new CustomEvent('outline-refresh'));
+    window.dialengWorkspaceUI?.invalidateOutline();
 }
 
 function scrollToCell(cellId) {
     const cell = document.getElementById(`cell-${cellId}`);
     if (cell) {
+        window.dialengWorkspaceUI?.revealContent();
         cell.scrollIntoView({ behavior: 'smooth', block: 'start' });
         // Add a brief highlight effect
         cell.classList.add('cell-highlight');
@@ -4678,33 +4674,67 @@ async function refreshExtensionSettingsSurface(snapshot) {
                 .map(item => `${extension.id}:${item.kind}:${item.name}`)
         ).sort()
     );
-    if (signature === extensionClientState.settingsSignature) return;
-    extensionClientState.settingsSignature = signature;
+    extensionClientState.settingsTargetSignature = signature;
+    if (signature === extensionClientState.settingsSignature
+        || signature === extensionClientState.settingsPendingSignature) return;
     const current = document.getElementById('settings-sidebar');
     if (!current) return;
     if (settingsState.dirty.size) {
         setSettingsStatus('Extensions changed settings while local edits are unsaved. Save or revert before refreshing.', 'warning');
         return;
     }
-    const wasOpen = current.classList.contains('open');
+    extensionClientState.settingsPendingSignature = signature;
+    const request = {};
+    extensionClientState.settingsRequest = request;
     try {
         const response = await fetch('/settings/view', {headers: {'Accept': 'text/html'}});
         if (!response.ok) throw new Error(`Settings view failed (${response.status})`);
         const documentFragment = new DOMParser().parseFromString(await response.text(), 'text/html');
         const replacement = documentFragment.getElementById('settings-sidebar');
         if (!replacement) throw new Error('Settings view did not include the sidebar');
-        current.replaceWith(replacement);
-        htmx.process(replacement);
+        if (extensionClientState.settingsRequest !== request
+            || extensionClientState.settingsTargetSignature !== signature || !current.isConnected) return;
+        // A user may close Settings or start editing while the HTML is in flight.
+        if (settingsState.dirty.size) {
+            setSettingsStatus('Extensions changed settings while local edits are unsaved. Save or revert before refreshing.', 'warning');
+            return;
+        }
+        const focusedId = current.contains(document.activeElement) ? document.activeElement.id : '';
+        const scrollTop = current.querySelector('.settings-content')?.scrollTop || 0;
+        const query = document.getElementById('settings-search')?.value || '';
+        const groups = new Map([...current.querySelectorAll('.settings-group')].map(group => [
+            group.querySelector('summary')?.textContent, group.open,
+        ]));
+        current.replaceChildren(...replacement.childNodes);
+        htmx.process(current);
         settingsState.initialized = false;
         settingsState.baseline.clear();
         settingsState.dirty.clear();
+        current.querySelectorAll('.setting-row[data-setting-path]').forEach(row => {
+            const path = row.dataset.settingPath;
+            const control = getSettingControl(path);
+            if (control) settingsState.baseline.set(path, readSettingControl(control));
+        });
         initializeSettingsForm();
-        if (wasOpen) {
-            replacement.classList.add('open');
-            await refreshSettings({preserveDirty: false});
+        extensionClientState.settingsSignature = signature;
+        current.querySelectorAll('.settings-group').forEach(group => {
+            const title = group.querySelector('summary')?.textContent;
+            if (groups.has(title)) group.open = groups.get(title);
+        });
+        document.getElementById('settings-search').value = query;
+        filterSettings(query);
+        current.querySelector('.settings-content').scrollTop = scrollTop;
+        window.dialengWorkspaceUI?.render();
+        if (window.dialengWorkspaceUI?.settingsOpen) {
+            if (focusedId) document.getElementById(focusedId)?.focus({preventScroll: true});
+            await refreshSettings({preserveDirty: true});
         }
     } catch (error) {
         console.warn('[Extensions] Could not refresh settings surface', error);
+    } finally {
+        if (extensionClientState.settingsRequest === request) {
+            extensionClientState.settingsPendingSignature = null;
+        }
     }
 }
 
@@ -5599,10 +5629,7 @@ function applyKernelSnapshot(snapshot, source = 'ws') {
         nextOutlineRevision !== null &&
         prevOutlineRevision !== nextOutlineRevision
     ) {
-        const outlineSidebar = document.getElementById('outline-sidebar');
-        if (outlineSidebar && outlineSidebar.classList.contains('outline-open')) {
-            refreshOutline();
-        }
+        refreshOutline();
     }
 
     const prevSetupDetail = previous?.setup?.detail;
@@ -5662,6 +5689,7 @@ function connectWebSocket(notebookId) {
         // Send join message to register this connection with the notebook
         sendWebSocketControl({type: 'join', notebook_id: notebookId, revisions: wsRevisions});
         startWebSocketHeartbeat();
+        window.dialengWorkspaceUI?.refreshVisible();
     };
 
     ws.onmessage = function(event) {
@@ -5716,14 +5744,7 @@ function connectWebSocket(notebookId) {
         } else if (data.type === 'notebook_reloaded') {
             window.location.reload();
         } else if (data.type === 'file_explorer_changed') {
-            const sidebar = document.getElementById('file-explorer-sidebar');
-            const currentPath = document.getElementById('current-explorer-path')?.value || '';
-            if (
-                sidebar?.classList.contains('file-explorer-open')
-                && (data.paths || []).includes(currentPath)
-            ) {
-                refreshFileExplorer();
-            }
+            window.dialengWorkspaceUI?.invalidateFiles(data.paths || []);
         } else if (data.type === 'status_message') {
             if (data.action) showLlmFailureAction(data);
             else showKernelStatusMessage(data.message || 'Dialeng status changed.', data.tone || 'warning', data.persist_ms || 7000);
@@ -6086,14 +6107,7 @@ if (window.dialengEvents) {
     window.dialengEvents.register('notebook_saved', () => setNotebookSaveState('saved'));
     window.dialengEvents.register('notebook_reloaded', () => window.location.reload());
     window.dialengEvents.register('file_explorer_changed', data => {
-        const sidebar = document.getElementById('file-explorer-sidebar');
-        const currentPath = document.getElementById('current-explorer-path')?.value || '';
-        if (
-            sidebar?.classList.contains('file-explorer-open')
-            && (data.paths || []).includes(currentPath)
-        ) {
-            refreshFileExplorer();
-        }
+        window.dialengWorkspaceUI?.invalidateFiles(data.paths || []);
     });
     window.dialengEvents.register('cell_type_change', applyCellTypeChange);
     window.dialengEvents.register('cell_output_commit', data => {
@@ -7730,26 +7744,11 @@ window.addEventListener('beforeunload', () => {
 
 // ==================== File Explorer ====================
 function toggleFileExplorer() {
-    const sidebar = document.getElementById('file-explorer-sidebar');
-    if (sidebar) {
-        const isOpening = !sidebar.classList.contains('file-explorer-open');
-        sidebar.classList.toggle('file-explorer-open');
-
-        // Close outline if opening file explorer
-        if (isOpening) {
-            const outline = document.getElementById('outline-sidebar');
-            if (outline && outline.classList.contains('outline-open')) {
-                outline.classList.remove('outline-open');
-            }
-        }
-    }
+    window.dialengWorkspaceUI?.togglePanel('files');
 }
 
 function refreshFileExplorer() {
-    const currentPath = document.getElementById('current-explorer-path')?.value || '';
-    const activeNotebookId = document.getElementById('current-explorer-active-notebook')?.value || window.NOTEBOOK_ID || '';
-    const activeFileRelpath = document.getElementById('current-explorer-active-file')?.value || window.DIALENG_FILE_PATH || '';
-    htmx.ajax('GET', `/files?path=${encodeURIComponent(currentPath)}&active_notebook_id=${encodeURIComponent(activeNotebookId)}&active_file_relpath=${encodeURIComponent(activeFileRelpath)}`, '#file-list-content');
+    window.dialengWorkspaceUI?.invalidateFiles();
 }
 
 function toggleNewItemModal() {
@@ -7791,13 +7790,11 @@ function createNewItem() {
             method: 'POST',
             headers: {'Content-Type': 'application/x-www-form-urlencoded'},
             body: `path=${encodeURIComponent(currentPath)}&name=${encodeURIComponent(name)}&active_notebook_id=${encodeURIComponent(activeNotebookId)}&active_file_relpath=${encodeURIComponent(activeFileRelpath)}`
-        }).then(r => r.text()).then(html => {
-            const container = document.getElementById('file-list-content');
-            if (container) {
-                container.outerHTML = html;
-                const newContainer = document.getElementById('file-list-content');
-                if (newContainer && typeof htmx !== 'undefined') htmx.process(newContainer);
-            }
+        }).then(response => {
+            if (!response.ok) throw new Error('The folder could not be created.');
+            window.dialengWorkspaceUI?.invalidateFiles([currentPath]);
+        }).catch(error => {
+            showKernelStatusMessage(error.message, 'error', 7000);
         });
         toggleNewItemModal();
     } else {
@@ -7842,12 +7839,8 @@ function confirmDeleteFile() {
         if (!r.ok || !result.ok) throw new Error(result.message || `Delete failed: ${r.status}`);
         return result;
     }).then(result => {
-        const container = document.getElementById('file-list-content');
-        if (container && result.html) {
-            container.outerHTML = result.html;
-            const newContainer = document.getElementById('file-list-content');
-            if (newContainer && typeof htmx !== 'undefined') htmx.process(newContainer);
-        }
+        const parentPath = filePath.includes('/') ? filePath.slice(0, filePath.lastIndexOf('/')) : '';
+        window.dialengWorkspaceUI?.invalidateFiles([parentPath]);
         if (result.deleted_notebook_id && result.deleted_notebook_id === window.NOTEBOOK_ID) {
             handleNotebookDeleted({
                 notebook_id: result.deleted_notebook_id,

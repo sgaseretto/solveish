@@ -63,6 +63,7 @@ def test_stale_revision_is_rejected_without_changing_file(tmp_path):
         ({"display.font_size": 40}, "display.font_size"),
         ({"tool_settings.max_steps": 0}, "tool_settings.max_steps"),
         ({"colab.default_runtime": "quantum"}, "colab.default_runtime"),
+        ({"skills.install_root": "../outside"}, "skills.install_root"),
         ({"unknown.path": True}, "unknown.path"),
     ],
 )
@@ -149,6 +150,9 @@ def test_settings_sidebar_exposes_persistence_and_authoritative_controls(tmp_pat
 
     assert "persistence.autosave.enabled" in html
     assert "persistence.autosave.recovery_snapshots" in html
+    assert "skills.install_root" in html
+    assert "skills.link_other_root" in html
+
     assert 'id="settings-search"' in html
     assert 'onsubmit="saveSettings(event)"' in html
     assert 'data-apply-mode="server_restart"' in html

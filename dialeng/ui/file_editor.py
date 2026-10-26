@@ -111,7 +111,8 @@ def FileEditorPage(
                 Div(
                     Div(
                         Button(icon_sprites("panel-left-open", sz=16), cls="btn btn-sm file-explorer-toggle-btn",
-                               onclick="toggleFileExplorer()", title="Toggle file explorer (Ctrl+Shift+E)"),
+                               onclick="toggleFileExplorer()", data_workspace_toggle="files",
+                               aria_controls="file-explorer-sidebar", aria_expanded="true", title="Toggle file explorer (Ctrl+Shift+E)"),
                         Span(icon_sprites("file-text", sz=16), _display_name(rel_path), cls="toolbar-title"),
                         cls="toolbar-left"
                     ),

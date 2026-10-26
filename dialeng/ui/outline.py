@@ -64,7 +64,7 @@ def OutlineSection(title: str, items: List[Any], icon_name: str = None, empty_me
             cls="outline-section-header"
         ),
         Ul(*items, cls="outline-section-list"),
-        cls="outline-section",
+        cls="outline-section", data_outline_section=title.lower(),
         open=True
     )
 
@@ -163,24 +163,9 @@ def FunctionItem(name: str, signature: str = None, cell_id: str = None):
         )
 
 
-def OutlineSidebar(notebook_id: str, headings: List[Dict] = None,
-                   variables: List[Dict] = None, functions: List[Dict] = None,
-                   is_open: bool = True):
-    """Main outline sidebar component.
-
-    This sidebar shows the notebook structure and pushes the main content
-    when open (unlike the settings sidebar which overlays).
-
-    Args:
-        notebook_id: ID of the current notebook
-        headings: List of dicts with 'text', 'cell_id', 'level' keys
-        variables: List of dicts with 'name', 'type', 'preview' keys
-        functions: List of dicts with 'name', 'signature' keys
-        is_open: Whether the sidebar starts open
-
-    Returns:
-        Aside element containing the outline sidebar
-    """
+def OutlineContent(headings: List[Dict] = None, variables: List[Dict] = None,
+                   functions: List[Dict] = None):
+    """Render only server-owned outline data; the browser owns its shell state."""
     headings = headings or []
     variables = variables or []
     functions = functions or []
@@ -203,33 +188,47 @@ def OutlineSidebar(notebook_id: str, headings: List[Dict] = None,
         for f in functions
     ]
 
+    return Div(
+        OutlineSection("Headings", heading_items, "list", "No headings found"),
+        OutlineSection("Variables", variable_items, "database", "No variables found"),
+        OutlineSection("Functions", function_items, "code", "No functions found"),
+        id="outline-content", cls="outline-content",
+    )
+
+
+def OutlineSidebar(notebook_id: str, headings: List[Dict] = None,
+                   variables: List[Dict] = None, functions: List[Dict] = None,
+                   is_open: bool = True):
+    """Main outline sidebar component.
+
+    This sidebar shows the notebook structure and pushes the main content
+    when open (unlike the settings sidebar which overlays).
+
+    Args:
+        notebook_id: ID of the current notebook
+        headings: List of dicts with 'text', 'cell_id', 'level' keys
+        variables: List of dicts with 'name', 'type', 'preview' keys
+        functions: List of dicts with 'name', 'signature' keys
+        is_open: Whether the sidebar starts open
+
+    Returns:
+        Aside element containing the outline sidebar
+    """
     return Aside(
-        # Header with title and close button
         Div(
             Span(sprites('table-of-contents'), "Outline", cls="outline-title"),
-            Button(
-                sprites('x'),
-                cls="outline-close-btn",
-                onclick="toggleOutline()",
-                title="Close outline"
-            ),
-            cls="outline-header"
+            Button(sprites('x'), type="button", cls="outline-close-btn",
+                   onclick="toggleOutline()", title="Close outline"),
+            cls="outline-header",
         ),
-        # Scrollable content
-        Div(
-            OutlineSection("Headings", heading_items, "list", "No headings found"),
-            OutlineSection("Variables", variable_items, "database", "No variables found"),
-            OutlineSection("Functions", function_items, "code", "No functions found"),
-            cls="outline-content"
-        ),
-        # Include the SVG sprite definitions
+        OutlineContent(headings, variables, functions),
+        Div(Span(), Button("Retry", type="button", data_panel_retry="outline", hidden=True),
+            id="outline-panel-status", cls="workspace-panel-status", role="status", hidden=True),
         sprites,
-        id="outline-sidebar",
+        id="outline-sidebar", aria_label="Outline", aria_hidden=str(not is_open).lower(),
+        inert=not is_open,
         cls=f"outline-sidebar {'outline-open' if is_open else ''}",
-        hx_get=f"/dialeng/{notebook_id}/outline",
-        hx_trigger="outline-refresh from:body",
-        hx_target="#outline-sidebar",
-        hx_swap="outerHTML"
+        data_notebook_id=notebook_id, data_content_url=f"/dialeng/{notebook_id}/outline",
     )
 
 
@@ -244,6 +243,7 @@ def OutlineToggleButton():
         sprites,  # Include sprites for the button icon
         cls="btn btn-sm outline-toggle-btn",
         id="outline-toggle-btn",
-        onclick="toggleOutline()",
+        onclick="toggleOutline()", data_workspace_toggle="outline",
+        aria_controls="outline-sidebar", aria_expanded="false",
         title="Toggle outline (Ctrl+Shift+O)"
     )

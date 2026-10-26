@@ -32,6 +32,7 @@ Read the documents in numerical order for the best understanding of the system:
 | 25 | [25_extension_platform.md](25_extension_platform.md) | Manifest discovery, trust, transactional ownership, public APIs, browser surfaces, Studio, and packages |
 | 26 | [26_extension_verification.md](26_extension_verification.md) | Extension unit, stress, isolated, Playwright, package, security, and manual acceptance baseline |
 | 27 | [27_extension_runtime_environments.md](27_extension_runtime_environments.md) | Isolated hosts, lockfiles, command palette, and notebook-native extension builds |
+| 28 | [28_workspace_ui_state.md](28_workspace_ui_state.md) | Browser-owned panel selection, folder navigation, fragment updates, session persistence, and accessible drawers |
 
 ## Purpose
 
@@ -47,6 +48,7 @@ These documents are intended for developers who want to:
 
 | Goal | Start with |
 |------|------------|
+| Debug sidebar state and filesystem navigation | [28_workspace_ui_state.md](28_workspace_ui_state.md) |
 | Learn the interface / UI | [GUI Overview](../guides/gui_overview.md) |
 | Reproduce notebook UI regressions | [Notebook Regression QA](../guides/notebook_regression_qa.md) |
 | Understand the data model | [01_state_management.md](01_state_management.md) |

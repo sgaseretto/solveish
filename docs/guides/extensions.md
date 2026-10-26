@@ -37,11 +37,55 @@ The generated layout is:
 └── tests/test_extension.py
 ```
 
+Choose the smallest template that matches the contribution:
+
+| Requirement | Template | Expected runtime |
+|---|---|---|
+| Command, action, setting, toolbar item | `basic` | Isolated |
+| Provider-neutral LLM tool | `tool` | Isolated |
+| Event observer, transform, or guard | `lifecycle` | Isolated |
+| New notebook cell representation | `cell` | Privileged in-process |
+| Kernel or LLM provider | `provider` | Privileged in-process |
+| Installable wheel with resources | `package` | Contribution-dependent |
+
+The manager reports the actual runtime mode before trust. A package is not
+automatically isolated: privileged contribution types remain privileged after
+packaging.
+
 `build` exports the notebook and performs static validation. `prepare` additionally
 activates the extension in an isolated process, runs its tests, optionally runs
 nbdev verification, and writes private validation evidence under
 `.dialeng/extension-builds/`. If source changes afterward, activation is rejected
 until `prepare` succeeds again.
+
+## End-To-End Authoring Workflow
+
+Use this sequence for both CLI and Extension Studio development:
+
+1. Define one narrow user outcome and select the smallest template above.
+2. Create the scaffold. Open `extension.ipynb`; do not treat generated
+   `extension.py` as editable source.
+3. Implement with public `dialeng.extensions` declarations and explicit notebook
+   roles. Add unit tests in `#| extension test` cells.
+4. Declare the minimum exact permissions, assets, contributions, and resources in
+   `extension.toml`.
+5. Select **Build**. Resolve generated diagnostics at their mapped notebook cell
+   and source line.
+6. Select **Validate** and **Test**. Use browser tests for UI, focus,
+   collaboration, custom-cell, or asset behavior.
+7. Select **Preview** and confirm it says `imported: false`. Compare the listed
+   commands, tools, events, settings, assets, resources, permissions, and runtime
+   mode with the design.
+8. Select **Profile** and require fresh notebook, manifest, module, documentation,
+   and test hashes.
+9. Review source and permissions, then explicitly trust and select **Activate
+   reviewed build**. No build, preview, skill, or lockfile can grant trust.
+10. Exercise the real contribution, disable it, re-enable it, reload it, and test
+    cleanup. Package and clean-install it when distribution is required.
+
+For LLM-assisted authoring, the bundled `extension-creator` skill follows the
+same sequence through constrained tools. It may prepare a review request but
+cannot trust or activate the result.
 
 ## Minimal Contract
 
@@ -214,10 +258,12 @@ not stop unrelated core work.
 Settings are automatically scoped under `extensions.<extension-id>`:
 
 ```python
-from dialeng.services.settings_service import SettingDefinition
+from dialeng.extensions import ExtensionSetting
 
-api.register_setting(SettingDefinition(
-    "limit", "int", 100,
+api.register_setting(ExtensionSetting(
+    path="limit",
+    kind="int",
+    default=100,
     label="Result limit",
     description="Maximum items returned by the audit.",
     minimum=1,
@@ -284,6 +330,22 @@ uv run dialeng extension prepare .dialeng/extensions/project-inspector
 uv run dialeng extension package .dialeng/extensions/project-inspector
 ```
 
+`package` reruns preparation and writes artifacts under the extension's `dist/`.
+Verify the wheel without source-checkout imports:
+
+```bash
+uv venv /tmp/dialeng-extension-check
+uv pip install --python /tmp/dialeng-extension-check/bin/python \
+  .dialeng/extensions/project-inspector/dist/*.whl pytest
+/tmp/dialeng-extension-check/bin/python -m pytest \
+  .dialeng/extensions/project-inspector/tests
+```
+
+The wheel must include `extension.toml`, entry-point metadata, declared browser
+assets, skills/templates, generated documentation, and tests where configured.
+Removing the source directory before the final import/test probe catches accidental
+checkout imports.
+
 Installed distributions expose `[project.entry-points."dialeng.extensions"]` and
 must package `extension.toml`. Discovery reads package metadata without importing
 the entry point. Optional nbdev projects run export, test, and clean checks, but
@@ -327,6 +389,31 @@ commands remain visible with a backend-provided reason. Parameterized commands
 open controls generated from their argument schema. Use `Alt+Enter` on a selected
 command to set or clear a browser-local shortcut override. Favorites and recents
 are local to the browser and do not modify project state.
+
+Extension authors should register one backend command and reuse it everywhere:
+
+```python
+api.register_command(
+    "audit",
+    title="Audit notebook",
+    description="Check the current project for reproducibility issues.",
+    category="Quality",
+    keywords=("check", "reproducible"),
+    availability="notebook.open && kernel.optional",
+    args_schema={
+        "type": "object",
+        "properties": {"strict": {"type": "boolean", "default": False}},
+        "additionalProperties": False,
+    },
+    handler=audit,
+)
+```
+
+Toolbar items, shortcuts, the palette, browser facade, and HTTP API must converge
+on this registration rather than duplicate logic in JavaScript. Long operations
+report progress through `command["report_progress"]` and stop when
+`command["cancel_event"]` is set. The server revalidates availability and argument
+types when invoked; client-side disabled state is not authorization.
 
 ## Lock And Restore An Extension Environment
 
@@ -399,3 +486,48 @@ protects server availability but is not a complete OS security sandbox; only run
 code you have reviewed. Project filesystem, network, process, notebook, and kernel
 operations cross the core broker and are checked against the manifest on every
 request.
+
+Isolated extensions must use `ctx.read_text`/`read_bytes`,
+`write_text`/`write_bytes`, `request_http`, `run_process`, `change_cell_type`, and
+`invoke_kernel`. Prefer exact paths or narrow globs such as `docs/**`; path
+traversal and symlink escapes are rejected. Direct project-file, socket, and
+process access from the child is denied even when the related capability is
+declared. Privileged mode bypasses process isolation, so its source review must be
+more stringent.
+
+## Troubleshooting
+
+| Symptom | Action |
+|---|---|
+| Syntax error references generated Python | Open the mapped notebook cell/line, edit the notebook, and rebuild |
+| Build is stale after a successful validation | Rebuild, rerun tests, preview again, and request a new review |
+| Manifest or API range is rejected | Run `extension check`, inspect the API schema, and correct metadata before import |
+| Broker denies a file/network/process/notebook/kernel operation | Declare only the actual capability, explain the increase, and renew local trust |
+| Isolated host exits, times out, or exceeds limits | Inspect `extension doctor`, bound the operation, and make cleanup tolerate partial setup |
+| Browser asset does not update or duplicates behavior | Check manifest declaration, source-hash URL, public browser facade use, and cleanup registration |
+| Candidate upgrade fails | Confirm the previous healthy version remains active, then correct and retry the candidate |
+| `sync --offline` cannot restore | Populate source/wheel and uv caches online first; no partial enabled-state change should occur |
+| Custom-cell data looks unsupported after disable | Re-enable the extension; the fallback intentionally preserves raw Jupyter data |
+
+Use both reports when diagnosis crosses layers:
+
+```bash
+uv run dialeng extension doctor --path .
+uv run dialeng doctor --path .
+```
+
+## Release Checklist
+
+An extension is ready only when all applicable checks pass:
+
+- `extension check`, deterministic Build, isolated Validate, and unit tests pass.
+- Preview imports no code and lists only intended contributions and permissions.
+- Browser tests pass for UI, custom cells, assets, focus, and collaboration.
+- Disable, reload, failed upgrade, cancellation, and cleanup preserve core behavior.
+- Source or permission changes invalidate review as expected.
+- A package wheel installs and tests in a clean `uv` environment without the
+  source checkout.
+- `.dialeng/extensions.lock` reproduces artifacts/resources while trust remains
+  local and explicit.
+- User documentation explains configuration, commands, recovery, runtime mode,
+  and security limitations.

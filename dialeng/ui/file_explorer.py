@@ -8,6 +8,7 @@ and notebook/file navigation. Replaces the old flat file list.
 from fasthtml.common import *
 from pathlib import Path
 import time
+import hashlib
 from typing import List, Tuple, Optional
 from urllib.parse import quote
 from dialeng.notebook_id import nb_id_from_relpath
@@ -88,33 +89,22 @@ def BreadcrumbNav(current_path: Path, root: Path, nb_id: str, active_file_relpat
     except ValueError:
         rel = Path(".")
 
-    segments = []
-    active_query = ""
-    if nb_id:
-        active_query += f"&active_notebook_id={nb_id}"
-    if active_file_relpath:
-        active_query += f"&active_file_relpath={quote(active_file_relpath)}"
-    # Root segment
-    accumulated = ""
-    segments.append(
-        Span("Home", cls="breadcrumb-segment" + (" current" if str(rel) == "." else ""),
-             hx_get=f"/files?path={active_query}", hx_target="#file-list-content", hx_swap="innerHTML")
-    )
-
+    segments = [Button(
+        "Home", type="button",
+        cls="breadcrumb-segment" + (" current" if str(rel) == "." else ""),
+        data_explorer_path="", aria_current="location" if str(rel) == "." else None,
+    )]
     if str(rel) != ".":
-        parts = rel.parts
-        for i, part in enumerate(parts):
-            accumulated = str(Path(*parts[:i+1]))
-            is_last = i == len(parts) - 1
+        for i, part in enumerate(rel.parts):
+            is_last = i == len(rel.parts) - 1
             segments.append(icon_sprites('chevron-right', sz=10))
-            segments.append(
-                Span(part,
-                     cls="breadcrumb-segment" + (" current" if is_last else ""),
-                     hx_get=f"/files?path={accumulated}{active_query}",
-                     hx_target="#file-list-content", hx_swap="innerHTML")
-            )
-
-    return Div(*segments, cls="breadcrumb-nav")
+            segments.append(Button(
+                part, type="button",
+                cls="breadcrumb-segment" + (" current" if is_last else ""),
+                data_explorer_path=str(Path(*rel.parts[:i+1])),
+                aria_current="location" if is_last else None,
+            ))
+    return Nav(*segments, cls="breadcrumb-nav", aria_label="File location")
 
 
 def FolderItem(name: str, path: str, nb_id: str, active_file_relpath: str = ""):
@@ -125,18 +115,11 @@ def FolderItem(name: str, path: str, nb_id: str, active_file_relpath: str = ""):
         path: Relative path to folder
         nb_id: Active notebook ID
     """
-    active_query = ""
-    if nb_id:
-        active_query += f"&active_notebook_id={nb_id}"
-    if active_file_relpath:
-        active_query += f"&active_file_relpath={quote(active_file_relpath)}"
-    return Div(
+    return Button(
         icon_sprites('folder', sz=16),
         Span(name, cls="file-explorer-item-name"),
-        cls="file-explorer-item folder",
-        hx_get=f"/files?path={path}{active_query}",
-        hx_target="#file-list-content",
-        hx_swap="innerHTML",
+        type="button", cls="file-explorer-item folder",
+        data_explorer_path=path,
     )
 
 
@@ -206,7 +189,7 @@ def FileItem(name: str, path: str, is_active: bool):
 def FileListContent(path: Path, root: Path, active_notebook_id: str,
                     active_file_relpath: str = "",
                     kernel_notebooks: set = None):
-    """File list content (breadcrumbs + folders + files) for HTMX partial swaps.
+    """File list fragment (breadcrumbs + folders + files) for content replacement.
 
     Also stores the current relative path in a hidden input so JS can read it
     when creating new items (the modal is rendered once at page load, so it
@@ -295,8 +278,12 @@ def FileExplorerSidebar(current_path: Path, root: Path, active_notebook_id: str,
                            kernel_notebooks=kernel_notebooks or set()),
             cls="file-explorer-content"
         ),
-        id="file-explorer-sidebar",
-        cls=cls,
+        Div(Span(), Button("Retry", type="button", data_panel_retry="files", hidden=True),
+            id="files-panel-status", cls="workspace-panel-status", role="status", hidden=True),
+        id="file-explorer-sidebar", aria_label="Files", aria_hidden=str(not is_open).lower(),
+        inert=not is_open, cls=cls,
+        data_workspace_id=hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:24],
+        data_active_notebook=active_notebook_id, data_active_file=active_file_relpath,
     )
 
 

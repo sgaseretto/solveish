@@ -8,6 +8,8 @@ from dialeng.extensions.manager import ExtensionManager
 from dialeng.services.extension_project_service import (
     ExtensionProjectService,
     get_extension_project_service,
+    inspect_extension_api,
+    package_extension,
     request_extension_activation,
     set_extension_project_root,
     update_extension_file,
@@ -26,6 +28,35 @@ def test_all_extension_templates_build_and_validate_syntax(tmp_path, template):
     assert Path(result["module"]).is_file()
     assert result["validation"]["ok"] is True
     assert "#| export" not in Path(result["module"]).read_text(encoding="utf-8")
+
+
+def test_extension_api_inspection_teaches_complete_current_authoring_contract():
+    catalog = inspect_extension_api()
+    expected_topics = {
+        "lifecycle", "commands", "tools", "events", "ui", "settings", "cells",
+        "runtime", "permissions", "resources", "packaging", "environments",
+        "diagnostics",
+    }
+
+    assert expected_topics <= set(catalog["available_topics"])
+    assert catalog["topic_found"] is True
+    assert set(catalog["methods"]) == set(catalog["available_topics"])
+    assert catalog["runtime"]["default"].startswith("One supervised python -I host")
+    assert catalog["runtime"]["privileged"].startswith("Kernel, provider")
+    assert catalog["manifest"]["compatibility_example"] == ">=1,<2"
+    assert catalog["workflow"][-1].endswith("sync never grants trust.")
+
+    commands = inspect_extension_api("commands")
+    assert commands["topic_found"] is True
+    assert commands["topic_guidance"]["runtime_mode"] == "isolated"
+    assert "args_schema" in commands["topic_guidance"]["example"]
+    assert commands["methods"] == commands["topic_guidance"]["methods"]
+
+    cells = inspect_extension_api("cells")
+    assert cells["topic_guidance"]["runtime_mode"] == "privileged_in_process"
+    unknown = inspect_extension_api("not-a-topic")
+    assert unknown["topic_found"] is False
+    assert "Unknown extension API topic" in unknown["diagnostic"]
 
 
 def test_prepare_runs_isolated_activation_and_extension_tests(tmp_path):
@@ -117,10 +148,10 @@ def test_constrained_authoring_files_use_hashes_and_never_activate(tmp_path):
 
 
 def test_package_template_builds_a_wheel(tmp_path):
-    service = ExtensionProjectService(tmp_path)
-    created = service.create("packaged-reference", template="package")
+    service = set_extension_project_root(tmp_path)
+    service.create("packaged-reference", template="package")
 
-    packaged = service.package(Path(created["root"]))
+    packaged = package_extension("local.packaged-reference")
 
     assert packaged["ok"] is True
     assert any(path.endswith(".whl") for path in packaged["artifacts"])

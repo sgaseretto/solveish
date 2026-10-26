@@ -140,6 +140,10 @@ def _parse_subcommand(argv):
                              help="Additional workflow requirements")
         command.add_argument("--include-outputs", action="store_true",
                              help="Include bounded text outputs (off by default)")
+        command.add_argument("--install-root", choices=("dialeng", "agents"), default=None,
+                             help="Original skill location; defaults to skills.install_root")
+        command.add_argument("--link-other-root", action=argparse.BooleanOptionalAction, default=None,
+                             help="Create a relative symlink in the other skills folder; defaults to project settings")
         command.add_argument("--provider", default=None,
                              help="LLM provider used to refine the deterministic draft")
         command.add_argument("--model", default=None,
@@ -316,6 +320,8 @@ def _run_skill_command(args):
         args.sources,
         instructions=args.instructions,
         include_outputs=args.include_outputs,
+        install_root=args.install_root,
+        link_other_root=args.link_other_root,
     )
     if not args.no_llm:
         try:
@@ -331,6 +337,7 @@ def _run_skill_command(args):
     print(json.dumps({
         "build_id": preview["build_id"],
         "target": preview["target"],
+        "link_target": preview["link_target"],
         "build_hash": preview["build_hash"],
         "warnings": preview["warnings"],
         "validation_errors": preview["validation_errors"],
@@ -352,6 +359,8 @@ def _run_skill_command(args):
         overwrite=args.skill_action == "update",
     )
     print(f"Installed {result['name']} at {result['path']}")
+    if result["link_path"]:
+        print(f"Linked {result['link_path']} to {result['path']}")
 
 
 def _run_extension_command(args):

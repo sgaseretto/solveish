@@ -479,10 +479,18 @@ def SettingsSidebar(config: DialengConfig):
                     ),
                     SettingToggle("Enable project skills", "skills.enabled",
                                   config.skills_enabled,
-                                  help_text="Discover OpenAI Codex skills from .dialeng/skills."),
+                                  help_text="Discover OpenAI Codex skills from .agents/skills and .dialeng/skills; .dialeng takes precedence."),
                     SettingToggle("Enable skill creator", "skills.creator_enabled",
                                   config.skills_creator_enabled,
                                   help_text="Show the staged notebook-to-skill workflow and its dedicated tools."),
+                    SettingSelect("Created skill location", "skills.install_root",
+                                  [("dialeng", ".dialeng/skills (Dialeng-specific)"),
+                                   ("agents", ".agents/skills (shared)")],
+                                  config.skills_install_root,
+                                  "Where new skill drafts will install their original files."),
+                    SettingToggle("Link skills in the other folder", "skills.link_other_root",
+                                  config.skills_link_other_root,
+                                  help_text="Create a relative symlink to the original. Applies to new drafts; existing skills are not moved."),
                     SettingNumber("Skill source limit (bytes)", "skills.max_source_bytes",
                                   config.skills_max_source_bytes, 65536, 20971520, 65536,
                                   "Maximum extracted notebook context accepted by one skill build."),
@@ -617,8 +625,8 @@ def SettingsSidebar(config: DialengConfig):
             cls="settings-footer"
         ),
 
-        id="settings-sidebar",
-        cls="settings-sidebar"
+        id="settings-sidebar", role="dialog", aria_label="Settings", aria_modal="true",
+        aria_hidden="true", inert=True, cls="settings-sidebar"
     )
 
 

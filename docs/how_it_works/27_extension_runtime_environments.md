@@ -120,6 +120,16 @@ Reviewed activation requires a fresh successful build and tests, then still
 requires local trust. The `extension-creator` skill can edit source, invoke these
 checks, and request review, but cannot trust or activate code.
 
+The skill calls `inspect_extension_api(topic)` for a runtime-generated authoring
+catalog rather than relying only on embedded prose. The catalog returns current
+API compatibility, isolated/privileged classifications, public methods,
+permissions, examples, validation checks, templates, notebook roles, packaging,
+and reproducible-environment guidance. `package_extension` is a constrained build
+tool for package-template projects; it prepares and builds a wheel but cannot
+install, trust, or activate it. Contract tests assert that this catalog, the
+bundled skill, and the public authoring guide retain the same lifecycle and trust
+boundary.
+
 ## Verification Contract
 
 Release validation covers malformed manifests before import, independently

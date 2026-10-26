@@ -20,6 +20,13 @@ Each `SKILL.md` needs YAML frontmatter with `name` and `description`. Project
 skills are discovered only for the OpenAI Codex provider and can reference
 additional files inside their own directory.
 
+Existing `.agents/skills/<name>/SKILL.md` files are discovered too. Skills in
+`.dialeng/skills/` override shared `.agents/skills/` entries with the same name;
+both override packaged skills. Creation defaults to `.dialeng/skills/`. Configure
+`skills.install_root` as `agents` to create originals in `.agents/skills/`, and
+`skills.link_other_root` as true to add a relative symlink in the other folder.
+These defaults can also be changed in Settings or overridden for each draft.
+
 Dialeng also ships a built-in `skill-creator`. Use the toolbar workflow or
 `dialeng skill create` to produce a staged, reviewable skill from notebooks.
 """

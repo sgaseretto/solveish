@@ -29,6 +29,8 @@ def register_skill_routes(
         service = get_skill_service()
         return {
             "enabled": bool(config_provider().skills_creator_enabled),
+            "install_root": config_provider().skills_install_root,
+            "link_other_root": config_provider().skills_link_other_root,
             "skills": [
                 {
                     "name": skill.name,
@@ -74,6 +76,8 @@ def register_skill_routes(
                 sources,
                 instructions=str(payload.get("instructions", "")),
                 include_outputs=bool(payload.get("include_outputs", False)),
+                install_root=payload.get("install_root", config_provider().skills_install_root),
+                link_other_root=payload.get("link_other_root", config_provider().skills_link_other_root),
             )
             if payload.get("use_llm", True):
                 try:

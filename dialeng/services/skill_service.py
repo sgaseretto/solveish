@@ -40,26 +40,22 @@ class SkillService:
 
     def __init__(self, project_root: Path) -> None:
         self.project_root = Path(project_root).resolve()
-        requested_root = self.project_root / ".dialeng" / "skills"
-        self.skills_root = requested_root.resolve()
+        self.skills_root = self.project_root / ".dialeng" / "skills"
+        self.agents_skills_root = self.project_root / ".agents" / "skills"
         self.builtin_skills_root = (Path(__file__).parent.parent / "builtin_skills").resolve()
-        self._root_error = (
-            "skills root resolves outside the project"
-            if not self.skills_root.is_relative_to(self.project_root) else None
-        )
         self._skills: Dict[str, Skill] = {}
         self._diagnostics: List[SkillDiagnostic] = []
         self._signature: Optional[tuple] = None
 
     @property
     def skills(self) -> List[Skill]:
-        """Return project-owned skills for backwards-compatible project APIs."""
+        """Return resolved project-owned skills from .agents and .dialeng."""
         self.refresh()
-        return [skill for skill in self._skills.values() if skill.source == "project"]
+        return [skill for skill in self._skills.values() if skill.source in {"agents", "project"}]
 
     @property
     def all_skills(self) -> List[Skill]:
-        """Return packaged built-ins plus project skills after override resolution."""
+        """Return built-in, extension, and local skills after override resolution."""
         self.refresh()
         return list(self._skills.values())
 
@@ -74,14 +70,19 @@ class SkillService:
 
     def _directory_signature(self) -> tuple:
         entries = []
+        root_errors = []
         roots = [("builtin", self.builtin_skills_root)]
         try:
             from dialeng.extensions.resources import bundle_roots
             roots.extend((f"extension:{extension_id}", root) for extension_id, root in bundle_roots("skills"))
         except Exception:
             pass
-        if not self._root_error:
-            roots.append(("project", self.skills_root))
+        for source, requested_root in (("agents", self.agents_skills_root), ("project", self.skills_root)):
+            root = requested_root.resolve()
+            if not root.is_relative_to(self.project_root):
+                root_errors.append((str(requested_root), "skills root resolves outside the project"))
+            else:
+                roots.append((source, root))
         for source, root in roots:
             if not root.exists():
                 continue
@@ -91,7 +92,7 @@ class SkillService:
                     entries.append((source, str(root), str(path), stat.st_mtime_ns, stat.st_size))
                 except OSError:
                     continue
-        return tuple(entries)
+        return tuple(entries), tuple(root_errors)
 
     def refresh(self, force: bool = False) -> None:
         signature = self._directory_signature()
@@ -100,12 +101,15 @@ class SkillService:
         self._signature = signature
         self._skills = {}
         self._diagnostics = []
-        if self._root_error:
-            self._diagnostics.append(SkillDiagnostic(str(self.skills_root), self._root_error))
-            logger.warning("Skills ignored: %s", self._root_error)
+        entries, root_errors = signature
+        for path, message in root_errors:
+            self._diagnostics.append(SkillDiagnostic(path, message))
+            logger.warning("Skills ignored (path=%s): %s", path, message)
 
         skill_sources: Dict[str, str] = {}
-        for source, root_str, path_str, _, size in signature:
+        # Preserve duplicate handling among packaged sources; local roots override them.
+        precedence = {"agents": 1, "project": 2}
+        for source, root_str, path_str, _, size in entries:
             path = Path(path_str)
             try:
                 resolved = path.resolve(strict=True)
@@ -118,8 +122,8 @@ class SkillService:
                 name = skill.name
                 if name in self._skills:
                     previous_source = skill_sources[name]
-                    if source == "project" and previous_source != "project":
-                        logger.info("Project skill overrides %s skill: %s", previous_source, name)
+                    if precedence.get(source, 0) > precedence.get(previous_source, 0):
+                        logger.info("%s skill overrides %s skill: %s", source, previous_source, name)
                     else:
                         raise ValueError(f"duplicate skill name '{name}'")
                 self._skills[name] = skill
@@ -260,6 +264,7 @@ def set_skill_root(project_root: Path) -> SkillService:
         create_extension,
         inspect_extension_api,
         list_extension_templates,
+        package_extension,
         preview_extension,
         read_extension,
         request_extension_activation,
@@ -292,6 +297,7 @@ def set_skill_root(project_root: Path) -> SkillService:
     tool_registry.register_builtin(build_extension, name="build_extension")
     tool_registry.register_builtin(validate_extension, name="validate_extension")
     tool_registry.register_builtin(run_extension_tests, name="run_extension_tests")
+    tool_registry.register_builtin(package_extension, name="package_extension")
     tool_registry.register_builtin(preview_extension, name="preview_extension")
     tool_registry.register_builtin(show_extension_diagnostics, name="show_extension_diagnostics")
     tool_registry.register_builtin(show_extension_profile, name="show_extension_profile")

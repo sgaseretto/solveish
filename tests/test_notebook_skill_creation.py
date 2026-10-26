@@ -206,7 +206,11 @@ def test_skill_creator_modal_is_review_first():
     assert "disabled" in html
 
 
-def test_skill_cli_creates_from_notebook_non_interactively(tmp_path, capsys):
+@pytest.mark.parametrize("extra_args,folder,linked", [
+    ([], ".dialeng", False),
+    (["--install-root", "agents", "--link-other-root"], ".agents", True),
+])
+def test_skill_cli_creates_from_notebook_non_interactively(tmp_path, capsys, extra_args, folder, linked):
     from dialeng.cli import cli
     from dialeng.services.dialeng_config import reset_config_cache
 
@@ -217,8 +221,11 @@ def test_skill_cli_creates_from_notebook_non_interactively(tmp_path, capsys):
             "--from", "lesson.ipynb",
             "--description", "Use for CLI-created lessons.",
             "--no-llm", "--yes", "--path", str(tmp_path),
+            *extra_args,
         ])
-        assert (tmp_path / ".dialeng" / "skills" / "lesson-cli" / "SKILL.md").is_file()
+        assert (tmp_path / folder / "skills" / "lesson-cli" / "SKILL.md").is_file()
+        if linked:
+            assert (tmp_path / ".dialeng/skills/lesson-cli").is_symlink()
         assert "Installed lesson-cli" in capsys.readouterr().out
     finally:
         reset_config_cache()
@@ -230,3 +237,5 @@ def test_skill_creator_tool_schema_accepts_notebook_arrays(tmp_path):
     set_skill_root(tmp_path)
     schema = get_tool_registry().get_builtin_schema("build_skill_from_notebooks")
     assert schema["input_schema"]["properties"]["sources"]["type"] == "array"
+    assert "install_root" in schema["input_schema"]["properties"]
+    assert "link_other_root" in schema["input_schema"]["properties"]

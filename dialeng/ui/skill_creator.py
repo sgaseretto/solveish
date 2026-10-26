@@ -1,5 +1,5 @@
 """Notebook-to-skill creator controls."""
-from fasthtml.common import Button, Div, H2, H3, Input, Label, P, Pre, Span, Textarea
+from fasthtml.common import Button, Div, H2, H3, Input, Label, Option, P, Pre, Select, Span, Textarea
 
 from .icons import sprites as icon_sprites
 
@@ -62,6 +62,15 @@ def SkillCreatorModal():
                         Label(Input(type="checkbox", id="skill-creator-outputs"), " Include bounded text outputs"),
                         cls="skill-creator-options",
                     ),
+                    Label("Original skill location", For="skill-creator-install-root"),
+                    Select(
+                        Option(".dialeng/skills (Dialeng-specific)", value="dialeng"),
+                        Option(".agents/skills (shared)", value="agents"),
+                        id="skill-creator-install-root",
+                    ),
+                    Label(Input(type="checkbox", id="skill-creator-link-other-root"),
+                          " Create a symlink in the other skills folder"),
+                    P("These choices apply when generating a new draft. The preview shows where it will be installed."),
                     H3("Project sources"),
                     Div("Loading project sources...", id="skill-creator-sources", cls="skill-source-list"),
                     Label("Web pages", For="skill-creator-urls"),

@@ -88,6 +88,8 @@ DEFAULT_CONFIG = {
     "skills": {
         "enabled": True,
         "creator_enabled": True,
+        "install_root": "dialeng",
+        "link_other_root": False,
         "max_source_bytes": 2097152,
         "comment": "Load project skills and allow reviewable notebook-to-skill creation."
     },
@@ -169,6 +171,8 @@ class DialengConfig:
     # Project-scoped skill settings
     skills_enabled: bool = True
     skills_creator_enabled: bool = True
+    skills_install_root: str = "dialeng"
+    skills_link_other_root: bool = False
     skills_max_source_bytes: int = 2 * 1024 * 1024
 
     # Persistence. Autosave remains opt-in.
@@ -341,6 +345,12 @@ def _parse_config(raw: Dict[str, Any]) -> DialengConfig:
     skills = raw.get("skills", {})
     config.skills_enabled = bool(skills.get("enabled", True))
     config.skills_creator_enabled = bool(skills.get("creator_enabled", True))
+    config.skills_install_root = skills.get("install_root", "dialeng")
+    if config.skills_install_root not in ("dialeng", "agents"):
+        raise ValueError("skills.install_root must be 'dialeng' or 'agents'")
+    config.skills_link_other_root = skills.get("link_other_root", False)
+    if not isinstance(config.skills_link_other_root, bool):
+        raise ValueError("skills.link_other_root must be a boolean")
     config.skills_max_source_bytes = max(
         64 * 1024,
         min(int(skills.get("max_source_bytes", 2 * 1024 * 1024)), 20 * 1024 * 1024),

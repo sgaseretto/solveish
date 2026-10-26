@@ -133,7 +133,8 @@ def WorkspacePage(root: Path, config: Optional[DialengConfig] = None,
                         Button(
                             icon_sprites('panel-left-open', sz=16),
                             cls="btn btn-sm file-explorer-toggle-btn",
-                            onclick="toggleFileExplorer()",
+                            onclick="toggleFileExplorer()", data_workspace_toggle="files",
+                            aria_controls="file-explorer-sidebar", aria_expanded="true",
                             title="Toggle file explorer (Ctrl+Shift+E)",
                         ),
                         Span(icon_sprites('notebook', sz=16), "Dialeng", cls="toolbar-title"),
@@ -257,7 +258,8 @@ def NotebookPage(nb, notebook_list: List[str], available_dialog_modes: list, ava
                     Div(
                         # Left group: sidebar toggles + notebook name
                         Button(icon_sprites('panel-left-open', sz=16), cls="btn btn-sm file-explorer-toggle-btn",
-                               onclick="toggleFileExplorer()", title="Toggle file explorer (Ctrl+Shift+E)"),
+                               onclick="toggleFileExplorer()", data_workspace_toggle="files",
+                               aria_controls="file-explorer-sidebar", aria_expanded="true", title="Toggle file explorer (Ctrl+Shift+E)"),
                         OutlineToggleButton(),
                         Span(icon_sprites('notebook', sz=16), nb.title,
                              Span(cls=dot_cls, id="kernel-dot", title=dot_title),

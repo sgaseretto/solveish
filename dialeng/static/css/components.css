@@ -1779,6 +1779,7 @@ button, select { font-size: var(--btn-font-size, inherit); }
    ========================================================================== */
 
 .outline-sidebar {
+    visibility: hidden;
     width: 0;
     min-width: 0;
     height: calc(100vh - 24px);
@@ -1797,6 +1798,7 @@ button, select { font-size: var(--btn-font-size, inherit); }
 }
 
 .outline-sidebar.outline-open {
+    visibility: visible;
     width: 320px;
     min-width: 320px;
     margin-right: 12px;
@@ -2341,6 +2343,7 @@ button, select { font-size: var(--btn-font-size, inherit); }
 
 /* ==================== File Explorer Sidebar ==================== */
 .file-explorer-sidebar {
+    visibility: hidden;
     width: 0;
     min-width: 0;
     height: calc(100vh - 24px);
@@ -2358,6 +2361,7 @@ button, select { font-size: var(--btn-font-size, inherit); }
     margin: 0 0 12px 0;
 }
 .file-explorer-sidebar.file-explorer-open {
+    visibility: visible;
     width: 320px;
     min-width: 320px;
     margin-right: 12px;
@@ -2405,6 +2409,9 @@ button, select { font-size: var(--btn-font-size, inherit); }
     flex-wrap: wrap;
 }
 .breadcrumb-segment {
+    border: 0;
+    background: transparent;
+    font: inherit;
     cursor: pointer;
     color: var(--text-muted, #888);
     text-decoration: none;
@@ -2438,6 +2445,11 @@ button, select { font-size: var(--btn-font-size, inherit); }
     color: var(--accent-color, #4a9eff);
 }
 .file-explorer-item.folder {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    text-align: left;
+    font-family: inherit;
     color: var(--text-primary, #ccc);
 }
 .file-explorer-item svg {
@@ -2449,6 +2461,46 @@ button, select { font-size: var(--btn-font-size, inherit); }
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+/* Panel visibility, request feedback, and the narrow-screen drawer. */
+.workspace-panel-status {
+    padding: 8px 12px;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+.workspace-panel-status button { margin-left: 8px; }
+.workspace-sidebar-backdrop[hidden], .workspace-panel-status[hidden] { display: none; }
+.workspace-sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 900;
+}
+.file-explorer-item.folder:hover { background: var(--bg-hover, #252525); }
+.file-explorer-item:focus-visible, .breadcrumb-segment:focus-visible {
+    outline: 2px solid var(--accent-blue);
+    outline-offset: -2px;
+}
+.file-explorer-item:focus-within .file-explorer-delete-btn { opacity: 1; }
+@media (max-width: 768px) {
+    .file-explorer-sidebar, .outline-sidebar {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        height: calc(100dvh - 16px);
+        max-height: calc(100dvh - 16px);
+        z-index: 901;
+    }
+    .file-explorer-sidebar.file-explorer-open, .outline-sidebar.outline-open {
+        width: min(320px, calc(100vw - 32px));
+        min-width: min(320px, calc(100vw - 32px));
+        margin-right: 0;
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .file-explorer-sidebar, .outline-sidebar, .settings-sidebar { transition: none; }
 }
 
 /* New item modal */
@@ -2773,6 +2825,7 @@ button, select { font-size: var(--btn-font-size, inherit); }
 
 .skill-creator-form input[type="text"],
 .skill-creator-form input:not([type]),
+.skill-creator-form select,
 .skill-creator-form textarea {
     width: 100%;
     box-sizing: border-box;

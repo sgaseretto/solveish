@@ -108,7 +108,7 @@ reported as skipped, not silently assumed, when credentials are unavailable.
 On 2026-07-13 the completed Extension API 1 platform was verified with the
 following evidence:
 
-- CPython 3.11 passed 383 non-browser unit/integration tests with two optional
+- CPython 3.11 passed 387 non-browser unit/integration tests with two optional
   tests skipped. The focused extension matrix also passed 77 tests on CPython
   3.12 and 77 tests on CPython 3.13.
 - The complete deterministic Playwright suite passed 19 scenarios with seven
@@ -129,6 +129,11 @@ following evidence:
   independently packaged extension in two passing smoke tests. A separate probe
   installed the committed `HEAD` through both Git and project-local `uv` flows
   and passed in 4.16 seconds.
+- Authoring-contract tests verify that the public guide, bundled
+  `extension-creator` skill, live `inspect_extension_api` catalog, constrained
+  packaging tool, runtime classifications, trust boundary, and reproducibility
+  workflow remain synchronized. The updated packaged skill passed a clean-wheel
+  installation smoke in 3.14 seconds.
 - Python compilation, JavaScript syntax, generated-schema synchronization,
   standalone extension-module lint, and `git diff --check` passed. Repository-wide
   Ruff remains outside this gate because historical FastHTML modules, demos, and

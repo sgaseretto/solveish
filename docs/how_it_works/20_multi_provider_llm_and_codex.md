@@ -33,7 +33,9 @@ sends a fresh Responses request with `store=false`, complete text/image context,
 tool definitions, and `parallel_tool_calls=false`. Hidden reasoning is never
 shown; only supported reasoning summaries are normalized for the UI.
 
-Project skills are discovered from `.dialeng/skills/`. Their compact metadata
+Project skills are discovered from `.agents/skills/` and `.dialeng/skills/`, with
+Dialeng-local skills taking precedence over shared skills of the same name.
+Their compact metadata
 is added to the Codex system prompt, while `read_skill` provides constrained,
 on-demand access to skill files.
 
