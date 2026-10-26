@@ -4,16 +4,19 @@ This folder contains detailed technical documentation explaining how various fea
 
 ## Recommended Reading Order
 
-Read the documents in numerical order for the best understanding of the system:
+Start with the dialog overview, then use the numbered deep dives for the
+subsystems you need. For a practical first notebook, read
+[How to Use a Dialog](../guides/how_to_use_a_dialog.md).
 
 | # | Document | Description |
 |---|----------|-------------|
-| 1 | [01_state_management.md](01_state_management.md) | **Start here** - How notebooks and cells are stored, loaded, saved, and synchronized |
+| 0 | [00_dialog_overview.md](00_dialog_overview.md) | **Start here** - How the document, kernel, AI context, collaboration, and saving fit together |
+| 1 | [01_state_management.md](01_state_management.md) | How notebooks and cells are stored, loaded, saved, and synchronized |
 | 2 | [02_cell_types.md](02_cell_types.md) | The three cell types (Code, Note, Prompt) - data model, rendering, execution, serialization |
 | 3 | [03_real_time_collaboration.md](03_real_time_collaboration.md) | WebSocket-based real-time collaboration - OOB swaps, broadcasting, conflict avoidance |
 | 4 | [04_kernel_execution.md](04_kernel_execution.md) | Subprocess kernel with streaming output, hard interrupt (SIGINT), and execution queue |
 | 5 | [05_dialoghelper_integration.md](05_dialoghelper_integration.md) | DialogHelper library integration - remote notebook API, headless interaction |
-| 6 | [06_llm_integration.md](06_llm_integration.md) | LLM service integration - Claude, context building, streaming responses |
+| 6 | [06_llm_integration.md](06_llm_integration.md) | LLM service integration - provider requests, context building, streaming responses |
 | 7 | [07_code_organization.md](07_code_organization.md) | **Architecture guide** - Directory structure, `core/` vs `services/` distinction, how to extend |
 | 8 | [08_extension_system.md](08_extension_system.md) | Extension system - type dispatch, 2-way callbacks, creating extensions |
 | 10 | [10_tool_calling.md](10_tool_calling.md) | Tool calling - LLM tool usage and integration |
@@ -48,6 +51,8 @@ These documents are intended for developers who want to:
 
 | Goal | Start with |
 |------|------------|
+| Use a dialog for the first time | [How to Use a Dialog](../guides/how_to_use_a_dialog.md) |
+| Understand the overall dialog lifecycle | [00_dialog_overview.md](00_dialog_overview.md) |
 | Debug sidebar state and filesystem navigation | [28_workspace_ui_state.md](28_workspace_ui_state.md) |
 | Learn the interface / UI | [GUI Overview](../guides/gui_overview.md) |
 | Reproduce notebook UI regressions | [Notebook Regression QA](../guides/notebook_regression_qa.md) |

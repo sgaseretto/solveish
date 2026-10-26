@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Dialog Documentation
+- Add a user guide explaining dialogs, Note/Code/Prompt cells, and a worked create, run, ask, verify, and save workflow
+- Add an internal overview connecting notebook state, kernel execution, AI context selection and tools, collaboration, and persistence, with Mermaid diagrams and an implementation map
+- Link both guides from the project and documentation indexes and related guides; clarify context limits, pin/visibility behavior, and current Monaco editors in the GUI reference
+
 #### Shared Project Skills
 - Discover existing project `.agents/skills/` entries for Codex prompts, CLI listing/validation, and skill previews, with `.dialeng/skills/` overriding shared skills and both overriding packaged sources
 - Preserve shared files during skill creation/update, record `agents` source provenance, and apply automatic refresh, validation, and path confinement to both project roots, including root symlink changes

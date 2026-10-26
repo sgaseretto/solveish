@@ -2,6 +2,10 @@
 
 This document provides a comprehensive guide to the three cell types in Dialeng: **Code**, **Note**, and **Prompt**. It covers how each cell type is implemented, how they work, and their intended behavior.
 
+For the user workflow, see [How to Use a Dialog](../guides/how_to_use_a_dialog.md).
+For the overall document, kernel, and AI lifecycle, see
+[How a Dialog Works](00_dialog_overview.md).
+
 ## Table of Contents
 
 1. [Overview](#overview)
@@ -494,7 +498,11 @@ ws.onmessage = (event) => {
 
 #### Context Building
 
-Context is built from cells **above** the prompt:
+Context is built from eligible cells **above** the prompt. Hidden cells are
+excluded, pinned cells are retained, and recent unpinned cells fill a bounded
+context window. The diagram below illustrates a short notebook where all the
+preceding cells fit; see [context selection](00_dialog_overview.md#which-notebook-content-becomes-context)
+for the full rules.
 
 ```mermaid
 flowchart TB
@@ -525,7 +533,7 @@ When `use_thinking` is enabled:
 
 1. **Shift+Enter** runs the prompt, streaming response appears
 2. **Both parts editable** - double-click user prompt or AI response to edit
-3. **Context-aware** - AI sees all cells above the prompt
+3. **Context-aware** - AI sees selected eligible cells above the prompt, with visibility, pins, and context budget applied
 4. **Streaming** - Response appears word-by-word via WebSocket
 5. **Cancellable** - Click ⏹ button to stop generation
 6. **Thinking indicator** - Shows 🧠 animation when enabled

@@ -2,6 +2,11 @@
 
 This guide walks through every section of the Dialeng notebook interface, explaining what each element does and how to use it.
 
+For an introduction to dialogs and a worked example combining Notes, Code, and
+Prompts, start with [How to Use a Dialog](how_to_use_a_dialog.md). For the
+implementation behind the interface, see
+[How a Dialog Works](../how_it_works/00_dialog_overview.md).
+
 ## Table of Contents
 
 - [Page Layout](#page-layout)
@@ -159,7 +164,7 @@ Code cells contain Python code that runs in the kernel.
 │      In: [▼/◐/▬]  Out: [▼/◐/▬]                          │
 │                     [👁] [📌] [📤] [type ▾] [▶] [↑] [↓] [×]│
 ├──────────────────────────────────────────────────────────┤
-│ ┌── Ace Editor (Python) ──────────────────────────────┐  │
+│ ┌── Monaco Editor (Python) ───────────────────────────┐  │
 │ │ import pandas as pd                                 │  │
 │ │ df = pd.read_csv("data.csv")                        │  │
 │ │ df.head()                                           │  │
@@ -170,7 +175,7 @@ Code cells contain Python code that runs in the kernel.
 └──────────────────────────────────────────────────────────┘
 ```
 
-- **Editor**: Ace editor with Python syntax highlighting, auto-indent, and bracket matching. Theme follows the global dark/light setting (Monokai / Chrome).
+- **Editor**: Monaco editor with Python syntax highlighting, auto-indent, and bracket matching. Theme follows the global dark/light setting.
 - **Output**: Shows `stdout`, `stderr`, rendered HTML, images, and errors. Errors are highlighted with a red accent.
 - **Run**: Press `Shift+Enter` to run and advance to the next cell, or `Ctrl+Enter` to run and stay.
 
@@ -224,7 +229,9 @@ Prompt cells let you interact with the AI. You write a prompt and the AI generat
 - **User prompt**: Editable textarea before running. After running, it switches to a Markdown preview (double-click to re-edit).
 - **AI response**: Streams in real-time as the model generates. Rendered as Markdown with syntax-highlighted code blocks.
 - **Cancel** (⏹): Stops the AI generation mid-stream.
-- The AI sees the full notebook context (respecting pinned/skipped states) when generating a response.
+- Real AI requests use eligible cells above the Prompt, respecting visibility,
+  pins, and the context size budget. See
+  [AI context and tools](how_to_use_a_dialog.md#ai-context-and-tools).
 
 ### Shell Cell
 
@@ -236,7 +243,7 @@ Shell cells execute bash commands. Only available if shell cells are enabled in 
 │      In: [▼/◐/▬]  Out: [▼/◐/▬]                          │
 │                     [👁] [📌] [📤] [type ▾] [▶] [↑] [↓] [×]│
 ├──────────────────────────────────────────────────────────┤
-│ ┌── Ace Editor (Bash) ────────────────────────────────┐  │
+│ ┌── Monaco Editor (Bash) ─────────────────────────────┐  │
 │ │ ls -la /tmp                                         │  │
 │ │ echo "Hello from shell"                             │  │
 │ └─────────────────────────────────────────────────────┘  │
@@ -248,7 +255,7 @@ Shell cells execute bash commands. Only available if shell cells are enabled in 
 └──────────────────────────────────────────────────────────┘
 ```
 
-- **Editor**: Ace editor with bash syntax highlighting.
+- **Editor**: Monaco editor with bash syntax highlighting.
 - **Safe mode badge**: Shows "Safe" in the header when safe mode is enabled. Commands are validated against an allowlist before execution.
 - **Output**: Shows command output. Errors and `DisallowedCmd` messages are highlighted.
 
@@ -265,7 +272,7 @@ When a cell has an active state, colored badges appear in the header:
 | Badge | Meaning | Visual Effect on Cell |
 |-------|---------|----------------------|
 | **HIDDEN** (red) | Cell is hidden from AI context. The AI will not see this cell's content when generating responses. | Cell dims to 50% opacity with a red left border. |
-| **PINNED** (blue) | Cell is pinned. Its content is always included in the AI context window, regardless of how many cells are in the notebook. | Blue left border. |
+| **PINNED** (blue) | An eligible cell above the Prompt is retained when older unpinned cells fall outside the context window. Hidden cells remain excluded. | Blue left border. |
 | **EXPORT** (green) | Cell is marked for export. Used to tag cells for inclusion in exported artifacts. | Green left border. |
 
 ### State Toggle Buttons
@@ -275,7 +282,7 @@ Three icon buttons control cell states. They appear slightly transparent when in
 | Button | Icon (inactive → active) | Keyboard | What it does |
 |--------|--------------------------|----------|--------------|
 | **Visibility** | eye → eye-closed | `h` | Toggles whether the AI can see this cell. Hidden cells are excluded from the context sent to the LLM. |
-| **Pin** | pin-off → pin | `p` | Toggles pin. Pinned cells are always included in the AI context, even if they fall outside the normal context window. |
+| **Pin** | pin-off → pin | `p` | Retains an eligible cell above the Prompt outside the normal context window. Does not override visibility or include later cells. |
 | **Export** | bookmark → bookmark-check | `e` | Toggles export flag. Marks the cell for inclusion in exports. |
 
 These buttons update instantly across all connected browser tabs via WebSocket.

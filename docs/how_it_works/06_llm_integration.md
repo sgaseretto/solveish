@@ -5,6 +5,10 @@ access and AWS Bedrock. Prompt execution remains stateless: every run rebuilds
 the complete context from the notebook's current cells, including user-edited
 prompt inputs and assistant outputs.
 
+For how AI requests fit into the document and kernel lifecycle, see
+[How a Dialog Works](00_dialog_overview.md). For a worked user example, see
+[How to Use a Dialog](../guides/how_to_use_a_dialog.md).
+
 ## Provider Flow
 
 ```mermaid

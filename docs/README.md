@@ -1,6 +1,9 @@
 # Dialeng Documentation
 
-Welcome to the Dialeng documentation. This folder contains detailed technical documentation for developers.
+Welcome to the Dialeng documentation. Start with [How to Use a Dialog](guides/how_to_use_a_dialog.md)
+for the user workflow and [How a Dialog Works](how_it_works/00_dialog_overview.md)
+for an overview of the internals. The guides cover using Dialeng; the technical
+deep dives explain its implementation.
 
 ## Documentation Structure
 
@@ -8,6 +11,7 @@ Welcome to the Dialeng documentation. This folder contains detailed technical do
 docs/
 ├── README.md                       # This file - documentation overview
 ├── guides/
+│   ├── how_to_use_a_dialog.md      # First dialog: notes, code, AI, checks, and saving
 │   ├── gui_overview.md             # Visual guide to the notebook interface
 │   ├── notebook_regression_qa.md   # Repeatable notebook interaction QA suite
 │   ├── colab_oauth_setup.md        # Google Colab OAuth configuration
@@ -17,6 +21,7 @@ docs/
 │   └── notebook_to_package.md    # Explore → Reuse → Package progression
 └── how_it_works/                   # Deep dives into feature implementations
     ├── README.md                   # Index with recommended reading order
+    ├── 00_dialog_overview.md       # End-to-end document, kernel, and AI lifecycle
     ├── 01_state_management.md      # Notebook/cell state, persistence
     ├── 02_cell_types.md            # Code, Note, Prompt cells
     └── 03_real_time_collaboration.md  # WebSocket collaboration
@@ -25,6 +30,8 @@ docs/
 ## Quick Links
 
 ### For Users
+
+- [How to Use a Dialog](guides/how_to_use_a_dialog.md) - What a dialog is, which cell to use, and a complete worked example
 - [Main README](../README.md) - Quick start, features, keyboard shortcuts
 - [GUI Overview](guides/gui_overview.md) - Visual guide to every section of the interface
 - [Notebook Regression QA](guides/notebook_regression_qa.md) - Manual interaction, collaboration, execution, and output regression suite
@@ -35,6 +42,8 @@ docs/
 - [Codex Skills](guides/codex_skills.md) - Project skills and reviewable notebook-to-skill creation
 
 ### For Developers
+
+- [How a Dialog Works](how_it_works/00_dialog_overview.md) - How document state, kernel execution, AI context, collaboration, and persistence fit together
 - [DEVELOPERS.md](../DEVELOPERS.md) - Extension points, patterns, architecture
 - [ROADMAP.md](../ROADMAP.md) - Planned features and contribution areas
 - [Performance, Reliability, and UX Roadmap](superpowers/plans/2026-07-09-performance-reliability-ux-roadmap.md) - Implemented roadmap and acceptance targets for startup, synchronization, runtime state, rendering, persistence, and diagnostics
@@ -44,6 +53,7 @@ docs/
 
 | # | Document | Description |
 |---|----------|-------------|
+| 0 | [How a Dialog Works](how_it_works/00_dialog_overview.md) | Start here for the overall lifecycle and implementation map |
 | 1 | [State Management](how_it_works/01_state_management.md) | How notebooks/cells are stored, loaded, saved |
 | 2 | [Cell Types](how_it_works/02_cell_types.md) | Code, Note, Prompt - data model, rendering, execution |
 | 3 | [Real-time Collaboration](how_it_works/03_real_time_collaboration.md) | WebSocket architecture, OOB swaps, conflict handling |

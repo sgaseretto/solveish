@@ -32,6 +32,8 @@ An open-source Solveit-like notebook built entirely with **FastHTML**. Features 
 | Document | Description |
 |----------|-------------|
 | **[README.md](README.md)** | Quick start and overview (this file) |
+| **[How to Use a Dialog](docs/guides/how_to_use_a_dialog.md)** | Notes, code, AI prompts, and a worked first dialog |
+| **[How a Dialog Works](docs/how_it_works/00_dialog_overview.md)** | Document state, kernel execution, AI context, collaboration, and saving |
 | **[DEVELOPERS.md](DEVELOPERS.md)** | Developer guide for extending the project |
 | **[ROADMAP.md](ROADMAP.md)** | Planned features and contribution opportunities |
 | **[docs/](docs/)** | Technical deep dives (collaboration, architecture) |
